@@ -1,0 +1,113 @@
+# Codex Slop Fork
+
+[English](README.md) | [日本語](README.ja.md)
+
+Codex 自身に「お願いだからこの機能を追加して。バグはなしで」と頼んで作らせた Codex のフォークです。
+
+このフォークを長期的に保守するつもりはありません。
+
+## 追加機能
+
+### マルチアカウント対応
+
+- 現在アクティブな認証情報は引き続き `~/.codex/auth.json` に保存されます。
+- 保存済みアカウントは通常の `auth.json` 互換ファイルとして `~/.codex/.accounts/` に保存されます。
+- レート制限メタデータは `~/.codex/.accounts/.rate-limits.json` に保存されます。
+- 設定は `~/.codex/config-slop-fork.toml` に保存されます。
+- 起動時、このフォークは必要に応じて現在のアクティブ認証情報を保存済みアカウントへミラーします。
+
+保存済みアカウントの管理には `/accounts` を使います。
+
+`/accounts` では、ブラウザログイン、デバイスコードログイン、API キーログイン、切り替え、削除、誤った保存済みアカウントファイル名のリネーム、制限確認、フォーク専用設定を扱えます。
+
+`/logout` はアクティブな認証情報だけを消去します。`~/.codex/.accounts/` 配下の保存済みアカウントは削除しません。
+
+### 自動アカウント切り替え
+
+有効化すると、このフォークは ChatGPT のレート制限系の失敗後に別の保存済みアカウントへ切り替えられます。
+
+設定項目:
+
+- `auto_switch_accounts_on_rate_limit = true`
+- `follow_external_account_switches = false`
+- `api_key_fallback_on_all_accounts_limited = false`
+- `auto_start_five_hour_quota = false`
+- `auto_start_weekly_quota = false`
+- `show_average_account_limits_in_status_line = false`
+
+これらの設定は `/accounts -> Settings` から切り替えるか、次のファイルを直接編集できます。
+
+- `~/.codex/config-slop-fork.toml`
+
+スイッチャーは、保存済み ChatGPT アカウントを、最新で判明している使用量スナップショットが最も低いものから優先します。API キーアカウントは、保存済み ChatGPT アカウントがすべて利用不能で、かつフォールバックが有効な場合にのみ使われます。
+
+`follow_external_account_switches` を有効にすると、実行中のセッションは別の Codex インスタンスによって書き込まれたアカウント変更を取り込めます。
+
+### 保存済みアカウント制限の一覧
+
+`/accounts -> Saved account limits` では、保存済みアカウントの最新の使用量とリセット時刻を表示します。
+
+`show_average_account_limits_in_status_line` を有効にすると、ステータスラインに、アクティブアカウントの横へ保存済みアカウントの平均残量も追記できます。たとえば `5h 95% (63%) · weekly 99% (27%)` のようになります。追加の平均表示は、保存済み ChatGPT アカウントが 1 つしかない場合は非表示です。
+
+この画面では次も行えます。
+
+- 期限の来たアカウント制限の更新
+- すべての保存済み ChatGPT アカウントの強制更新
+- 手つかずのままキャッシュされたウィンドウの手動確認と開始
+
+手つかず quota の挙動:
+
+- キャッシュされたウィンドウは、使用率が `0%` で、かつキャッシュされた `reset_after_seconds` が `limit_window_seconds` の全量とまだ一致している場合に手つかずと見なされます
+- キャッシュされた `reset_at` がすでに過去なら、そのキャッシュ済みウィンドウはリセット済みと見なされ、再開可能になります
+- 手動開始と自動開始はいずれも対象アカウントに対して小さなリクエストを 1 回送り、その後そのアカウントの `/usage` キャッシュエントリだけを更新します
+- 自動 quota 開始はオプトインであり、起動時には毎回すべての保存済みアカウントへ新しい `/usage` 取得を強制せず、キャッシュを使います
+
+保守メモ:
+
+- フォークの TUI は `codex-rs/tui/src/slop_fork/ui.rs` をディスパッチ兼コントローラの継ぎ目として維持し、ログインポップアップ描画、保存済みアカウントのレート制限処理、オートメーション UI コードを専用の内部モジュールへ分割して、今後のフォーク変更を局所化しています
+
+### オートメーションエンジン
+
+`$auto` は、ターン完了後またはタイマーに応じて実行されるフォローアッププロンプトを作成します。
+
+例:
+
+- `$auto on-complete "continue working on this"`
+- `$auto on-complete --times 10 "continue working on this"`
+- `$auto on-complete --until 14:00 --round-robin "msg1" "msg2" "msg3"`
+- `$auto on-complete --policy 'bash ./.codex/automation/next-message.sh' "continue working on this"`
+- `$auto every 10m "run tests"`
+- `$auto every "0 14 * * 1-5" "check deploy"`
+- `$auto list`
+- `$auto show session:auto-1`
+- `$auto pause session:auto-1`
+- `$auto resume session:auto-1`
+- `$auto rm session:auto-1`
+
+挙動:
+
+- `automation_enabled = false` は、保存済み定義を削除せずに実行だけを無効化します
+- `automation_default_scope` は、新しいルールの既定保存スコープを制御します
+- `automation_shell_timeout_ms` は、`--policy` シェルコマンドの既定タイムアウトを設定します
+- `session`、`repo`、`global` スコープをサポートします
+- `--times` と `--until` をサポートします
+- ラウンドロビンのメッセージをサポートします
+- `10m`、`2h`、`1d` のような間隔構文と、5 フィールド cron によるタイマールールをサポートします
+- 秒ベースの間隔は分単位へ切り上げます
+- 最後のレスポンスを `stdin` から読み取り、JSON の判断を `stdout` に返すシェルポリシーコマンドをサポートします
+
+永続化されるオートメーションファイル:
+
+- グローバル定義: `~/.codex/codex-slop-fork-automations.toml`
+- リポジトリ定義: `<repo>/.codex/codex-slop-fork-automations.toml`
+- 実行時状態: `~/.codex/.codex-slop-fork-automation-state.json`
+
+### 追加指示の注入
+
+このフォークは `~/.codex/config-slop-fork.toml` から追加指示を追記できます。
+
+利用可能なキー:
+
+- `instructions = "..."` はグローバルな指示ブロックを追加します。
+- `instruction_files = ["CLAUDE.md", "GEMINI.md"]` は `AGENTS.md` と並ぶ追加のプロジェクト文書を読み込みます。絶対パスもサポートされ、見つかったファイルは有効なファイルシステムサンドボックスポリシーで引き続きフィルタされます。
+- `[projects."/abs/path"]` は、プロジェクト単位の `instructions` と `instruction_files` をサポートします。

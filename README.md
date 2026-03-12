@@ -1,60 +1,126 @@
-<p align="center"><code>npm i -g @openai/codex</code><br />or <code>brew install --cask codex</code></p>
-<p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
-<p align="center">
-  <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
-</p>
-</br>
-If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="https://developers.openai.com/codex/ide">install in your IDE.</a>
-</br>If you want the desktop app experience, run <code>codex app</code> or visit <a href="https://chatgpt.com/codex?app-landing-page=true">the Codex App page</a>.
-</br>If you are looking for the <em>cloud-based agent</em> from OpenAI, <strong>Codex Web</strong>, go to <a href="https://chatgpt.com/codex">chatgpt.com/codex</a>.</p>
+# Codex Slop Fork
 
----
+[English](README.md) | [日本語](README.ja.md)
 
-## Quickstart
+A fork of Codex that was created by asking Codex itself to "pretty please add this feature, no bugs".
 
-### Installing and running Codex CLI
+I have no interest in maintaining this fork long-term.
 
-Install globally with your preferred package manager:
+## Added Features
 
-```shell
-# Install using npm
-npm install -g @openai/codex
-```
+### Multi-account support
 
-```shell
-# Install using Homebrew
-brew install --cask codex
-```
+- Active auth still lives in `~/.codex/auth.json`.
+- Saved accounts live in `~/.codex/.accounts/` as normal `auth.json`-compatible files.
+- Rate-limit metadata is stored in `~/.codex/.accounts/.rate-limits.json`.
+- Settings live in `~/.codex/config-slop-fork.toml`.
+- On startup, the fork mirrors the current active auth into saved accounts when needed.
 
-Then simply run `codex` to get started.
+Use `/accounts` to manage saved accounts.
 
-<details>
-<summary>You can also go to the <a href="https://github.com/openai/codex/releases/latest">latest GitHub Release</a> and download the appropriate binary for your platform.</summary>
+`/accounts` covers browser login, device-code login, API-key login, switching, removal, renaming
+misnamed saved-account files, limit inspection, and fork-only settings.
 
-Each GitHub Release contains many executables, but in practice, you likely want one of these:
+`/logout` only clears the active auth. It does not delete saved accounts under `~/.codex/.accounts/`.
 
-- macOS
-  - Apple Silicon/arm64: `codex-aarch64-apple-darwin.tar.gz`
-  - x86_64 (older Mac hardware): `codex-x86_64-apple-darwin.tar.gz`
-- Linux
-  - x86_64: `codex-x86_64-unknown-linux-musl.tar.gz`
-  - arm64: `codex-aarch64-unknown-linux-musl.tar.gz`
+### Automatic account switching
 
-Each archive contains a single entry with the platform baked into the name (e.g., `codex-x86_64-unknown-linux-musl`), so you likely want to rename it to `codex` after extracting it.
+When enabled, the fork can switch to another saved account after a ChatGPT rate-limit style failure.
 
-</details>
+Settings:
 
-### Using Codex with your ChatGPT plan
+- `auto_switch_accounts_on_rate_limit = true`
+- `follow_external_account_switches = false`
+- `api_key_fallback_on_all_accounts_limited = false`
+- `auto_start_five_hour_quota = false`
+- `auto_start_weekly_quota = false`
+- `show_average_account_limits_in_status_line = false`
 
-Run `codex` and select **Sign in with ChatGPT**. We recommend signing into your ChatGPT account to use Codex as part of your Plus, Pro, Team, Edu, or Enterprise plan. [Learn more about what's included in your ChatGPT plan](https://help.openai.com/en/articles/11369540-codex-in-chatgpt).
+Those settings can be toggled from `/accounts -> Settings`, or edited directly in:
 
-You can also use Codex with an API key, but this requires [additional setup](https://developers.openai.com/codex/auth#sign-in-with-an-api-key).
+- `~/.codex/config-slop-fork.toml`
 
-## Docs
+The switcher ranks saved ChatGPT accounts by the lowest latest known usage snapshot. API-key
+accounts are only used when every saved ChatGPT account is unavailable and fallback is enabled.
 
-- [**Codex Documentation**](https://developers.openai.com/codex)
-- [**Contributing**](./docs/contributing.md)
-- [**Installing & building**](./docs/install.md)
-- [**Open source fund**](./docs/open-source-fund.md)
+When `follow_external_account_switches` is enabled, a running session can adopt account changes
+written by another Codex instance.
 
-This repository is licensed under the [Apache-2.0 License](LICENSE).
+### Saved account limits overview
+
+`/accounts -> Saved account limits` shows the latest known usage and reset times for saved accounts.
+
+When `show_average_account_limits_in_status_line` is enabled, the status line can also append the
+average remaining 5-hour and weekly saved-account limits next to the active account, for example
+`5h 95% (63%) · weekly 99% (27%)`. The extra averages are hidden when there is only one saved
+ChatGPT account.
+
+It also supports:
+
+- refreshing due account limits
+- force-refreshing all saved ChatGPT accounts
+- manually checking cached untouched windows and starting them
+
+Untouched quota behavior:
+
+- a cached window is treated as untouched when it shows `0%` usage and the cached
+  `reset_after_seconds` still equals the full `limit_window_seconds`
+- if a cached `reset_at` is already in the past, the fork treats that cached window as reset and
+  eligible to be started again
+- manual and automatic quota starts send one tiny request for the affected account and then refresh
+  only that account's `/usage` cache entry
+- automatic quota starts are opt-in and use cache on startup instead of forcing a fresh `/usage` fetch
+  for every saved account on every boot
+
+Maintenance note:
+
+- the fork TUI keeps `codex-rs/tui/src/slop_fork/ui.rs` as the dispatch/controller seam and splits
+  login popup rendering, saved-account rate-limit handling, and automation UI code into dedicated
+  internal modules so future fork changes stay local
+
+### Automation engine
+
+`$auto` creates follow-up prompts that run after a completed turn or on a timer.
+
+Examples:
+
+- `$auto on-complete "continue working on this"`
+- `$auto on-complete --times 10 "continue working on this"`
+- `$auto on-complete --until 14:00 --round-robin "msg1" "msg2" "msg3"`
+- `$auto on-complete --policy 'bash ./.codex/automation/next-message.sh' "continue working on this"`
+- `$auto every 10m "run tests"`
+- `$auto every "0 14 * * 1-5" "check deploy"`
+- `$auto list`
+- `$auto show session:auto-1`
+- `$auto pause session:auto-1`
+- `$auto resume session:auto-1`
+- `$auto rm session:auto-1`
+
+Behavior:
+
+- `automation_enabled = false` disables execution without deleting saved definitions
+- `automation_default_scope` controls the default storage scope for new rules
+- `automation_shell_timeout_ms` sets the default timeout for `--policy` shell commands
+- supports `session`, `repo`, and `global` scope
+- supports `--times` and `--until`
+- supports round-robin messages
+- supports interval syntax like `10m`, `2h`, `1d`, and five-field cron for timer rules
+- rounds second-based intervals up to whole minutes
+- supports shell-policy commands that inspect the last response on `stdin` and return a JSON decision on `stdout`
+
+Persisted automation files:
+
+- global definitions: `~/.codex/codex-slop-fork-automations.toml`
+- repo definitions: `<repo>/.codex/codex-slop-fork-automations.toml`
+- runtime state: `~/.codex/.codex-slop-fork-automation-state.json`
+
+### Additional instruction injection
+
+The fork can append extra instructions from `~/.codex/config-slop-fork.toml`.
+
+Available keys:
+
+- `instructions = "..."` adds a global instruction block.
+- `instruction_files = ["CLAUDE.md", "GEMINI.md"]` reads extra project docs alongside `AGENTS.md`.
+  Absolute paths are also supported, and discovered files are still filtered by the effective filesystem sandbox policy.
+- `[projects."/abs/path"]` supports project-scoped `instructions` and `instruction_files`.
