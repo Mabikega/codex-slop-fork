@@ -6,6 +6,55 @@ A fork of Codex that was created by asking Codex itself to "pretty please add th
 
 I have no interest in maintaining this fork long-term.
 
+## Install
+
+Install the latest release package for your platform with npm or Bun.
+For npm, the `--force` flag is intentional so the stable `releases/latest/download/...` URL refreshes to the newest package version on upgrade.
+Rerun the same command to update to the latest release.
+The installed command is `codex-slop-fork`.
+
+Linux x64:
+
+```sh
+npm install -g --force https://github.com/Mabikega/codex-slop-fork/releases/latest/download/codex-slop-fork-npm-linux-x64.tgz
+bun install -g https://github.com/Mabikega/codex-slop-fork/releases/latest/download/codex-slop-fork-npm-linux-x64.tgz
+```
+
+Linux arm64:
+
+```sh
+npm install -g --force https://github.com/Mabikega/codex-slop-fork/releases/latest/download/codex-slop-fork-npm-linux-arm64.tgz
+bun install -g https://github.com/Mabikega/codex-slop-fork/releases/latest/download/codex-slop-fork-npm-linux-arm64.tgz
+```
+
+macOS x64:
+
+```sh
+npm install -g --force https://github.com/Mabikega/codex-slop-fork/releases/latest/download/codex-slop-fork-npm-darwin-x64.tgz
+bun install -g https://github.com/Mabikega/codex-slop-fork/releases/latest/download/codex-slop-fork-npm-darwin-x64.tgz
+```
+
+macOS arm64:
+
+```sh
+npm install -g --force https://github.com/Mabikega/codex-slop-fork/releases/latest/download/codex-slop-fork-npm-darwin-arm64.tgz
+bun install -g https://github.com/Mabikega/codex-slop-fork/releases/latest/download/codex-slop-fork-npm-darwin-arm64.tgz
+```
+
+Windows x64:
+
+```sh
+npm install -g --force https://github.com/Mabikega/codex-slop-fork/releases/latest/download/codex-slop-fork-npm-win32-x64.tgz
+bun install -g https://github.com/Mabikega/codex-slop-fork/releases/latest/download/codex-slop-fork-npm-win32-x64.tgz
+```
+
+Windows arm64:
+
+```sh
+npm install -g --force https://github.com/Mabikega/codex-slop-fork/releases/latest/download/codex-slop-fork-npm-win32-arm64.tgz
+bun install -g https://github.com/Mabikega/codex-slop-fork/releases/latest/download/codex-slop-fork-npm-win32-arm64.tgz
+```
+
 ## Added Features
 
 ### Multi-account support
