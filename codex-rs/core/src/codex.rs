@@ -40,6 +40,8 @@ use crate::realtime_conversation::handle_close as handle_realtime_conversation_c
 use crate::realtime_conversation::handle_start as handle_realtime_conversation_start;
 use crate::realtime_conversation::handle_text as handle_realtime_conversation_text;
 use crate::rollout::session_index;
+use crate::slop_fork;
+use crate::slop_fork::RateLimitSwitchState;
 use crate::stream_events_utils::HandleOutputCtx;
 use crate::stream_events_utils::handle_non_tool_response_item;
 use crate::stream_events_utils::handle_output_item_done;
@@ -3585,6 +3587,29 @@ impl Session {
         turn_context: &TurnContext,
         new_rate_limits: RateLimitSnapshot,
     ) {
+        self.update_rate_limits_for_auth(turn_context, new_rate_limits, None)
+            .await;
+    }
+
+    pub(crate) async fn update_rate_limits_for_auth(
+        &self,
+        turn_context: &TurnContext,
+        new_rate_limits: RateLimitSnapshot,
+        auth: Option<&crate::auth::CodexAuth>,
+    ) {
+        if let Some(auth) = auth {
+            slop_fork::record_rate_limit_snapshot_for_auth(
+                &turn_context.config.codex_home,
+                auth,
+                &new_rate_limits,
+            );
+        } else {
+            slop_fork::record_active_account_rate_limit_snapshot(
+                &turn_context.config.codex_home,
+                self.services.auth_manager.as_ref(),
+                &new_rate_limits,
+            );
+        }
         {
             let mut state = self.state.lock().await;
             state.set_rate_limits(new_rate_limits);
@@ -6136,6 +6161,7 @@ async fn run_sampling_request(
         base_instructions,
     );
     let mut retries = 0;
+    let mut rate_limit_switch_state = RateLimitSwitchState::default();
     loop {
         let err = match try_run_sampling_request(
             Arc::clone(&router),
@@ -6158,14 +6184,38 @@ async fn run_sampling_request(
                 return Err(CodexErr::ContextWindowExceeded);
             }
             Err(CodexErr::UsageLimitReached(e)) => {
-                let rate_limits = e.rate_limits.clone();
-                if let Some(rate_limits) = rate_limits {
-                    sess.update_rate_limits(&turn_context, *rate_limits).await;
+                if slop_fork::handle_usage_limit_error(
+                    sess.as_ref(),
+                    turn_context.as_ref(),
+                    client_session,
+                    &mut rate_limit_switch_state,
+                    e.rate_limits.as_deref(),
+                    e.resets_at,
+                )
+                .await
+                {
+                    retries = 0;
+                    continue;
                 }
                 return Err(CodexErr::UsageLimitReached(e));
             }
             Err(err) => err,
         };
+
+        if matches!(
+            &err,
+            CodexErr::RetryLimit(retry) if retry.status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        ) && slop_fork::handle_too_many_requests_retry_limit(
+            sess.as_ref(),
+            turn_context.as_ref(),
+            client_session,
+            &mut rate_limit_switch_state,
+        )
+        .await
+        {
+            retries = 0;
+            continue;
+        }
 
         if !err.is_retryable() {
             return Err(err);
@@ -6227,7 +6277,7 @@ async fn run_sampling_request(
     }
 }
 
-async fn built_tools(
+pub(crate) async fn built_tools(
     sess: &Session,
     turn_context: &TurnContext,
     input: &[ResponseItem],

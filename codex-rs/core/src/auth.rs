@@ -197,6 +197,19 @@ impl CodexAuth {
         load_auth(codex_home, false, auth_credentials_store_mode)
     }
 
+    pub fn from_saved_account(
+        codex_home: &Path,
+        auth_dot_json: AuthDotJson,
+        auth_credentials_store_mode: AuthCredentialsStoreMode,
+    ) -> std::io::Result<Self> {
+        Self::from_auth_dot_json(
+            codex_home,
+            auth_dot_json,
+            auth_credentials_store_mode,
+            crate::default_client::create_client(),
+        )
+    }
+
     pub fn auth_mode(&self) -> AuthMode {
         match self {
             Self::ApiKey(_) => AuthMode::ApiKey,
@@ -312,6 +325,10 @@ impl CodexAuth {
         state.auth_dot_json.lock().unwrap().clone()
     }
 
+    pub fn auth_dot_json(&self) -> Option<AuthDotJson> {
+        self.get_current_auth_json()
+    }
+
     /// Returns `None` if `is_chatgpt_auth()` is false.
     fn get_current_token_data(&self) -> Option<TokenData> {
         self.get_current_auth_json().and_then(|t| t.tokens)
@@ -409,7 +426,11 @@ pub fn login_with_api_key(
         tokens: None,
         last_refresh: None,
     };
-    save_auth(codex_home, &auth_dot_json, auth_credentials_store_mode)
+    crate::slop_fork::save_auth_with_account_sync(
+        codex_home,
+        &auth_dot_json,
+        auth_credentials_store_mode,
+    )
 }
 
 /// Writes an in-memory auth payload for externally managed ChatGPT tokens.
@@ -424,7 +445,7 @@ pub fn login_with_chatgpt_auth_tokens(
         chatgpt_account_id,
         chatgpt_plan_type,
     )?;
-    save_auth(
+    crate::slop_fork::save_auth_with_account_sync(
         codex_home,
         &auth_dot_json,
         AuthCredentialsStoreMode::Ephemeral,
@@ -437,8 +458,17 @@ pub fn save_auth(
     auth: &AuthDotJson,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
 ) -> std::io::Result<()> {
-    let storage = create_auth_storage(codex_home.to_path_buf(), auth_credentials_store_mode);
-    storage.save(auth)
+    let storage_mode = auth.storage_mode(auth_credentials_store_mode);
+    let storage = create_auth_storage(codex_home.to_path_buf(), storage_mode);
+    storage.save(auth)?;
+    if storage_mode != AuthCredentialsStoreMode::Ephemeral {
+        let ephemeral_storage = create_auth_storage(
+            codex_home.to_path_buf(),
+            AuthCredentialsStoreMode::Ephemeral,
+        );
+        ephemeral_storage.delete()?;
+    }
+    Ok(())
 }
 
 /// Load CLI auth data using the configured credential store backend.
@@ -452,6 +482,14 @@ pub fn load_auth_dot_json(
 ) -> std::io::Result<Option<AuthDotJson>> {
     let storage = create_auth_storage(codex_home.to_path_buf(), auth_credentials_store_mode);
     storage.load()
+}
+
+pub fn auth_for_saved_account(
+    codex_home: &Path,
+    auth: AuthDotJson,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> std::io::Result<CodexAuth> {
+    CodexAuth::from_saved_account(codex_home, auth, auth_credentials_store_mode)
 }
 
 pub fn enforce_login_restrictions(config: &Config) -> std::io::Result<()> {
@@ -749,7 +787,7 @@ fn refresh_token_endpoint() -> String {
 }
 
 impl AuthDotJson {
-    fn from_external_tokens(external: &ExternalAuthTokens) -> std::io::Result<Self> {
+    pub(crate) fn from_external_tokens(external: &ExternalAuthTokens) -> std::io::Result<Self> {
         let mut token_info =
             parse_chatgpt_jwt_claims(&external.access_token).map_err(std::io::Error::other)?;
         token_info.chatgpt_account_id = Some(external.chatgpt_account_id.clone());
@@ -774,7 +812,7 @@ impl AuthDotJson {
         })
     }
 
-    fn from_external_access_token(
+    pub(crate) fn from_external_access_token(
         access_token: &str,
         chatgpt_account_id: &str,
         chatgpt_plan_type: Option<&str>,
@@ -787,7 +825,7 @@ impl AuthDotJson {
         Self::from_external_tokens(&external)
     }
 
-    fn resolved_mode(&self) -> ApiAuthMode {
+    pub(crate) fn resolved_mode(&self) -> ApiAuthMode {
         if let Some(mode) = self.auth_mode {
             return mode;
         }
@@ -797,7 +835,7 @@ impl AuthDotJson {
         ApiAuthMode::Chatgpt
     }
 
-    fn storage_mode(
+    pub(crate) fn storage_mode(
         &self,
         auth_credentials_store_mode: AuthCredentialsStoreMode,
     ) -> AuthCredentialsStoreMode {
@@ -807,6 +845,13 @@ impl AuthDotJson {
             auth_credentials_store_mode
         }
     }
+
+    pub(crate) fn is_chatgpt_mode(&self) -> bool {
+        matches!(
+            self.resolved_mode(),
+            ApiAuthMode::Chatgpt | ApiAuthMode::ChatgptAuthTokens
+        )
+    }
 }
 
 /// Internal cached auth state.
@@ -815,6 +860,7 @@ struct CachedAuth {
     auth: Option<CodexAuth>,
     /// Callback used to refresh external auth by asking the parent app for new tokens.
     external_refresher: Option<Arc<dyn ExternalAuthRefresher>>,
+    pending_external_auth_switch_notice: Option<String>,
 }
 
 impl Debug for CachedAuth {
@@ -827,6 +873,10 @@ impl Debug for CachedAuth {
             .field(
                 "external_refresher",
                 &self.external_refresher.as_ref().map(|_| "present"),
+            )
+            .field(
+                "pending_external_auth_switch_notice",
+                &self.pending_external_auth_switch_notice,
             )
             .finish()
     }
@@ -965,8 +1015,9 @@ impl UnauthorizedRecovery {
 /// consistent snapshot.
 ///
 /// External modifications to `auth.json` will NOT be observed until
-/// `reload()` is called explicitly. This matches the design goal of avoiding
-/// different parts of the program seeing inconsistent auth data mid‑run.
+/// `reload()` is called explicitly, unless fork-specific external account
+/// following is enabled. This matches the design goal of avoiding different
+/// parts of the program seeing inconsistent auth data mid‑run.
 #[derive(Debug)]
 pub struct AuthManager {
     codex_home: PathBuf,
@@ -986,6 +1037,10 @@ impl AuthManager {
         enable_codex_api_key_env: bool,
         auth_credentials_store_mode: AuthCredentialsStoreMode,
     ) -> Self {
+        crate::slop_fork::reconcile_saved_accounts_on_startup(
+            &codex_home,
+            auth_credentials_store_mode,
+        );
         let managed_auth = load_auth(
             &codex_home,
             enable_codex_api_key_env,
@@ -998,6 +1053,7 @@ impl AuthManager {
             inner: RwLock::new(CachedAuth {
                 auth: managed_auth,
                 external_refresher: None,
+                pending_external_auth_switch_notice: None,
             }),
             enable_codex_api_key_env,
             auth_credentials_store_mode,
@@ -1010,6 +1066,7 @@ impl AuthManager {
         let cached = CachedAuth {
             auth: Some(auth),
             external_refresher: None,
+            pending_external_auth_switch_notice: None,
         };
 
         Arc::new(Self {
@@ -1029,6 +1086,7 @@ impl AuthManager {
         let cached = CachedAuth {
             auth: Some(auth),
             external_refresher: None,
+            pending_external_auth_switch_notice: None,
         };
         Arc::new(Self {
             codex_home,
@@ -1047,6 +1105,7 @@ impl AuthManager {
     /// Current cached auth (clone). May be `None` if not logged in or load failed.
     /// Refreshes cached ChatGPT tokens if they are stale before returning.
     pub async fn auth(&self) -> Option<CodexAuth> {
+        let _ = crate::slop_fork::sync_external_auth_if_enabled(self);
         let auth = self.auth_cached()?;
         if let Err(err) = self.refresh_if_stale(&auth).await {
             tracing::error!("Failed to refresh token: {}", err);
@@ -1095,7 +1154,7 @@ impl AuthManager {
         }
     }
 
-    fn auths_equal_for_refresh(a: Option<&CodexAuth>, b: Option<&CodexAuth>) -> bool {
+    pub(crate) fn auths_equal_for_refresh(a: Option<&CodexAuth>, b: Option<&CodexAuth>) -> bool {
         match (a, b) {
             (None, None) => true,
             (Some(a), Some(b)) => match (a.api_auth_mode(), b.api_auth_mode()) {
@@ -1128,6 +1187,10 @@ impl AuthManager {
         .flatten()
     }
 
+    pub(crate) fn load_auth_from_storage_for_fork(&self) -> Option<CodexAuth> {
+        self.load_auth_from_storage()
+    }
+
     fn set_cached_auth(&self, new_auth: Option<CodexAuth>) -> bool {
         if let Ok(mut guard) = self.inner.write() {
             let previous = guard.auth.as_ref();
@@ -1138,6 +1201,27 @@ impl AuthManager {
         } else {
             false
         }
+    }
+
+    pub(crate) fn set_cached_auth_from_fork(&self, new_auth: Option<CodexAuth>) -> bool {
+        self.set_cached_auth(new_auth)
+    }
+
+    pub(crate) fn record_external_auth_switch_notice_for_fork(&self, label: String) {
+        if let Ok(mut guard) = self.inner.write() {
+            guard.pending_external_auth_switch_notice = Some(label);
+        }
+    }
+
+    pub(crate) fn take_external_auth_switch_notice_for_fork(&self) -> Option<String> {
+        self.inner
+            .write()
+            .ok()
+            .and_then(|mut guard| guard.pending_external_auth_switch_notice.take())
+    }
+
+    pub(crate) fn set_cached_auth_for_switch(&self, new_auth: CodexAuth) -> bool {
+        self.set_cached_auth(Some(new_auth))
     }
 
     pub fn set_external_auth_refresher(&self, refresher: Arc<dyn ExternalAuthRefresher>) {
@@ -1171,6 +1255,36 @@ impl AuthManager {
         self.auth_cached()
             .as_ref()
             .is_some_and(CodexAuth::is_external_chatgpt_tokens)
+    }
+
+    pub fn activate_saved_account(&self, account_id: &str) -> std::io::Result<bool> {
+        let Some(account) = crate::slop_fork::activate_saved_account(
+            &self.codex_home,
+            account_id,
+            self.auth_credentials_store_mode,
+        )?
+        else {
+            return Ok(false);
+        };
+        let auth = auth_for_saved_account(
+            &self.codex_home,
+            account.auth,
+            self.auth_credentials_store_mode,
+        )?;
+        self.set_cached_auth(Some(auth));
+        Ok(true)
+    }
+
+    pub fn remove_saved_account(&self, account_id: &str) -> std::io::Result<bool> {
+        let removed = crate::slop_fork::remove_saved_account(
+            &self.codex_home,
+            account_id,
+            self.auth_credentials_store_mode,
+        )?;
+        if removed {
+            self.reload();
+        }
+        Ok(removed)
     }
 
     /// Convenience constructor returning an `Arc` wrapper.
@@ -1265,6 +1379,10 @@ impl AuthManager {
         self.auth_cached().as_ref().map(CodexAuth::auth_mode)
     }
 
+    pub(crate) fn codex_home_path(&self) -> &Path {
+        &self.codex_home
+    }
+
     async fn refresh_if_stale(&self, auth: &CodexAuth) -> Result<bool, RefreshTokenError> {
         let chatgpt_auth = match auth {
             CodexAuth::Chatgpt(chatgpt_auth) => chatgpt_auth,
@@ -1333,7 +1451,7 @@ impl AuthManager {
         }
         let auth_dot_json =
             AuthDotJson::from_external_tokens(&refreshed).map_err(RefreshTokenError::Transient)?;
-        save_auth(
+        crate::slop_fork::save_auth_with_account_sync(
             &self.codex_home,
             &auth_dot_json,
             AuthCredentialsStoreMode::Ephemeral,
@@ -1352,13 +1470,14 @@ impl AuthManager {
     ) -> Result<(), RefreshTokenError> {
         let refresh_response = request_chatgpt_token_refresh(refresh_token, auth.client()).await?;
 
-        persist_tokens(
+        let refreshed_auth = persist_tokens(
             auth.storage(),
             refresh_response.id_token,
             refresh_response.access_token,
             refresh_response.refresh_token,
         )
         .map_err(RefreshTokenError::from)?;
+        crate::slop_fork::sync_refreshed_auth(&self.codex_home, &refreshed_auth);
         self.reload();
 
         Ok(())
@@ -1443,6 +1562,231 @@ mod tests {
             .expect("auth.json should parse");
         assert_eq!(auth.openai_api_key.as_deref(), Some("sk-new"));
         assert!(auth.tokens.is_none(), "tokens should be cleared");
+    }
+
+    #[test]
+    fn login_with_api_key_preserves_previous_account_in_accounts_dir() {
+        let dir = tempdir().unwrap();
+        let _fake_jwt = write_auth_file(
+            AuthFileParams {
+                openai_api_key: None,
+                chatgpt_plan_type: Some("pro".to_string()),
+                chatgpt_account_id: Some("acct-1".to_string()),
+            },
+            dir.path(),
+        )
+        .expect("failed to build fake jwt");
+
+        super::login_with_api_key(dir.path(), "sk-new", AuthCredentialsStoreMode::File)
+            .expect("login_with_api_key should succeed");
+
+        let accounts = crate::slop_fork::auth_accounts::list_accounts(dir.path())
+            .expect("accounts should load");
+        assert_eq!(accounts.len(), 2);
+    }
+
+    #[test]
+    fn save_auth_does_not_implicitly_sync_accounts() {
+        let dir = tempdir().unwrap();
+        let _fake_jwt = write_auth_file(
+            AuthFileParams {
+                openai_api_key: None,
+                chatgpt_plan_type: Some("pro".to_string()),
+                chatgpt_account_id: Some("acct-1".to_string()),
+            },
+            dir.path(),
+        )
+        .expect("failed to build fake jwt");
+
+        let api_key_auth = AuthDotJson {
+            auth_mode: Some(ApiAuthMode::ApiKey),
+            openai_api_key: Some("sk-new".to_string()),
+            tokens: None,
+            last_refresh: None,
+        };
+        super::save_auth(dir.path(), &api_key_auth, AuthCredentialsStoreMode::File)
+            .expect("save_auth should succeed");
+
+        let accounts = crate::slop_fork::auth_accounts::list_accounts(dir.path())
+            .expect("accounts should load");
+        assert_eq!(accounts, Vec::new());
+    }
+
+    #[test]
+    fn auth_manager_startup_saves_missing_active_auth_to_accounts() {
+        let dir = tempdir().unwrap();
+        let _fake_jwt = write_auth_file(
+            AuthFileParams {
+                openai_api_key: None,
+                chatgpt_plan_type: Some("pro".to_string()),
+                chatgpt_account_id: Some("acct-1".to_string()),
+            },
+            dir.path(),
+        )
+        .expect("failed to build fake jwt");
+
+        let _auth_manager = super::AuthManager::new(
+            dir.path().to_path_buf(),
+            false,
+            AuthCredentialsStoreMode::File,
+        );
+
+        let accounts = crate::slop_fork::auth_accounts::list_accounts(dir.path())
+            .expect("accounts should load");
+        assert_eq!(accounts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn auth_manager_follows_external_account_switch_when_enabled() {
+        let dir = tempdir().unwrap();
+        let first_jwt = write_auth_file(
+            AuthFileParams {
+                openai_api_key: None,
+                chatgpt_plan_type: Some("pro".to_string()),
+                chatgpt_account_id: Some("acct-1".to_string()),
+            },
+            dir.path(),
+        )
+        .expect("failed to write first auth file");
+
+        crate::slop_fork::update_slop_fork_config(dir.path(), |config| {
+            config.follow_external_account_switches = true;
+        })
+        .expect("config should save");
+
+        let auth_manager = super::AuthManager::new(
+            dir.path().to_path_buf(),
+            false,
+            AuthCredentialsStoreMode::File,
+        );
+        let initial_auth = auth_manager.auth().await.expect("initial auth should load");
+        let initial_jwt = initial_auth
+            .auth_dot_json()
+            .and_then(|auth_dot_json| auth_dot_json.tokens)
+            .map(|tokens| tokens.id_token.raw_jwt)
+            .expect("initial auth should have a JWT");
+        assert_eq!(initial_jwt, first_jwt);
+
+        let second_jwt = write_auth_file(
+            AuthFileParams {
+                openai_api_key: None,
+                chatgpt_plan_type: Some("pro".to_string()),
+                chatgpt_account_id: Some("acct-2".to_string()),
+            },
+            dir.path(),
+        )
+        .expect("failed to write second auth file");
+
+        let followed_auth = auth_manager
+            .auth()
+            .await
+            .expect("followed auth should load");
+        let followed_jwt = followed_auth
+            .auth_dot_json()
+            .and_then(|auth_dot_json| auth_dot_json.tokens)
+            .map(|tokens| tokens.id_token.raw_jwt)
+            .expect("followed auth should have a JWT");
+        let notice = auth_manager.take_external_auth_switch_notice_for_fork();
+
+        assert_eq!(followed_jwt, second_jwt);
+        assert_ne!(followed_jwt, first_jwt);
+        assert_eq!(notice.as_deref(), Some("user@example.com (Pro)"));
+    }
+
+    #[tokio::test]
+    async fn auth_manager_keeps_cached_account_when_external_follow_is_disabled() {
+        let dir = tempdir().unwrap();
+        let first_jwt = write_auth_file(
+            AuthFileParams {
+                openai_api_key: None,
+                chatgpt_plan_type: Some("pro".to_string()),
+                chatgpt_account_id: Some("acct-1".to_string()),
+            },
+            dir.path(),
+        )
+        .expect("failed to write first auth file");
+
+        let auth_manager = super::AuthManager::new(
+            dir.path().to_path_buf(),
+            false,
+            AuthCredentialsStoreMode::File,
+        );
+        let initial_auth = auth_manager.auth().await.expect("initial auth should load");
+        let initial_jwt = initial_auth
+            .auth_dot_json()
+            .and_then(|auth_dot_json| auth_dot_json.tokens)
+            .map(|tokens| tokens.id_token.raw_jwt)
+            .expect("initial auth should have a JWT");
+        assert_eq!(initial_jwt, first_jwt);
+
+        let second_jwt = write_auth_file(
+            AuthFileParams {
+                openai_api_key: None,
+                chatgpt_plan_type: Some("pro".to_string()),
+                chatgpt_account_id: Some("acct-2".to_string()),
+            },
+            dir.path(),
+        )
+        .expect("failed to write second auth file");
+
+        let cached_auth = auth_manager
+            .auth()
+            .await
+            .expect("cached auth should still load");
+        let cached_jwt = cached_auth
+            .auth_dot_json()
+            .and_then(|auth_dot_json| auth_dot_json.tokens)
+            .map(|tokens| tokens.id_token.raw_jwt)
+            .expect("cached auth should have a JWT");
+
+        assert_eq!(cached_jwt, first_jwt);
+        assert_ne!(cached_jwt, second_jwt);
+    }
+
+    #[test]
+    fn saving_persistent_auth_clears_ephemeral_auth_override() {
+        let dir = tempdir().unwrap();
+        let fake_jwt = write_auth_file(
+            AuthFileParams {
+                openai_api_key: None,
+                chatgpt_plan_type: Some("pro".to_string()),
+                chatgpt_account_id: Some("acct-1".to_string()),
+            },
+            dir.path(),
+        )
+        .expect("failed to build fake jwt");
+        logout(dir.path(), AuthCredentialsStoreMode::File).expect("cleanup managed auth");
+        let ephemeral_auth = AuthDotJson {
+            auth_mode: Some(ApiAuthMode::ChatgptAuthTokens),
+            openai_api_key: None,
+            tokens: Some(TokenData {
+                id_token: IdTokenInfo {
+                    email: Some("user@example.com".to_string()),
+                    chatgpt_plan_type: Some(InternalPlanType::Known(InternalKnownPlan::Pro)),
+                    chatgpt_user_id: Some("user-12345".to_string()),
+                    chatgpt_account_id: Some("acct-1".to_string()),
+                    raw_jwt: fake_jwt,
+                },
+                access_token: "test-access-token".to_string(),
+                refresh_token: String::new(),
+                account_id: Some("acct-1".to_string()),
+            }),
+            last_refresh: Some(Utc::now()),
+        };
+        super::save_auth(
+            dir.path(),
+            &ephemeral_auth,
+            AuthCredentialsStoreMode::Ephemeral,
+        )
+        .expect("ephemeral auth should save");
+        super::login_with_api_key(dir.path(), "sk-new", AuthCredentialsStoreMode::File)
+            .expect("persistent auth should save");
+
+        let auth = super::load_auth(dir.path(), false, AuthCredentialsStoreMode::File)
+            .expect("load auth should succeed")
+            .expect("auth should exist");
+        assert_eq!(auth.auth_mode(), AuthMode::ApiKey);
+        assert_eq!(auth.api_key(), Some("sk-new"));
     }
 
     #[test]

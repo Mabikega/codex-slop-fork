@@ -1,0 +1,252 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "Automation": {
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "lastError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limits": {
+          "$ref": "#/definitions/AutomationLimits"
+        },
+        "messageSource": {
+          "$ref": "#/definitions/AutomationMessageSource"
+        },
+        "nextFireAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "paused": {
+          "type": "boolean"
+        },
+        "policyCommand": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AutomationPolicyCommand"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "runCount": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "runtimeId": {
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "#/definitions/AutomationScope"
+        },
+        "stopped": {
+          "type": "boolean"
+        },
+        "trigger": {
+          "$ref": "#/definitions/AutomationTrigger"
+        }
+      },
+      "required": [
+        "enabled",
+        "id",
+        "limits",
+        "messageSource",
+        "paused",
+        "runCount",
+        "runtimeId",
+        "scope",
+        "stopped",
+        "trigger"
+      ],
+      "type": "object"
+    },
+    "AutomationLimits": {
+      "properties": {
+        "maxRuns": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "untilAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "AutomationMessageSource": {
+      "oneOf": [
+        {
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "static"
+              ],
+              "title": "StaticAutomationMessageSourceType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "message",
+            "type"
+          ],
+          "title": "StaticAutomationMessageSource",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "messages": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": {
+              "enum": [
+                "roundRobin"
+              ],
+              "title": "RoundRobinAutomationMessageSourceType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "messages",
+            "type"
+          ],
+          "title": "RoundRobinAutomationMessageSource",
+          "type": "object"
+        }
+      ]
+    },
+    "AutomationPolicyCommand": {
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "cwd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timeoutMs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "AutomationScope": {
+      "enum": [
+        "session",
+        "repo",
+        "global"
+      ],
+      "type": "string"
+    },
+    "AutomationTrigger": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "turnCompleted"
+              ],
+              "title": "TurnCompletedAutomationTriggerType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "TurnCompletedAutomationTrigger",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "every_seconds": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "type": {
+              "enum": [
+                "interval"
+              ],
+              "title": "IntervalAutomationTriggerType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "every_seconds",
+            "type"
+          ],
+          "title": "IntervalAutomationTrigger",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "expression": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "cron"
+              ],
+              "title": "CronAutomationTriggerType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "expression",
+            "type"
+          ],
+          "title": "CronAutomationTrigger",
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "properties": {
+    "automation": {
+      "$ref": "#/definitions/Automation"
+    }
+  },
+  "required": [
+    "automation"
+  ],
+  "title": "AutomationUpsertResponse",
+  "type": "object"
+}

@@ -15,6 +15,7 @@ mod client_common;
 pub mod codex;
 mod realtime_context;
 mod realtime_conversation;
+pub mod slop_fork;
 pub use codex::SteerInputError;
 mod codex_thread;
 mod compact_remote;
@@ -97,7 +98,6 @@ pub type ConversationManager = ThreadManager;
 pub type NewConversation = NewThread;
 #[deprecated(note = "use CodexThread")]
 pub type CodexConversation = CodexThread;
-// Re-export common auth types for workspace consumers
 pub use auth::AuthManager;
 pub use auth::CodexAuth;
 pub mod default_client;

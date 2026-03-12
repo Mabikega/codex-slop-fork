@@ -307,6 +307,22 @@ client_request_definitions! {
         params: v2::AppsListParams,
         response: v2::AppsListResponse,
     },
+    AutomationList => "automation/list" {
+        params: v2::AutomationListParams,
+        response: v2::AutomationListResponse,
+    },
+    AutomationUpsert => "automation/upsert" {
+        params: v2::AutomationUpsertParams,
+        response: v2::AutomationUpsertResponse,
+    },
+    AutomationDelete => "automation/delete" {
+        params: v2::AutomationDeleteParams,
+        response: v2::AutomationDeleteResponse,
+    },
+    AutomationSetEnabled => "automation/setEnabled" {
+        params: v2::AutomationSetEnabledParams,
+        response: v2::AutomationSetEnabledResponse,
+    },
     SkillsConfigWrite => "skills/config/write" {
         params: v2::SkillsConfigWriteParams,
         response: v2::SkillsConfigWriteResponse,
@@ -868,6 +884,7 @@ server_notification_definitions! {
     AccountUpdated => "account/updated" (v2::AccountUpdatedNotification),
     AccountRateLimitsUpdated => "account/rateLimits/updated" (v2::AccountRateLimitsUpdatedNotification),
     AppListUpdated => "app/list/updated" (v2::AppListUpdatedNotification),
+    AutomationUpdated => "automation/updated" (v2::AutomationUpdatedNotification),
     ReasoningSummaryTextDelta => "item/reasoning/summaryTextDelta" (v2::ReasoningSummaryTextDeltaNotification),
     ReasoningSummaryPartAdded => "item/reasoning/summaryPartAdded" (v2::ReasoningSummaryPartAddedNotification),
     ReasoningTextDelta => "item/reasoning/textDelta" (v2::ReasoningTextDeltaNotification),
@@ -1322,6 +1339,27 @@ mod tests {
                 "id": 6,
                 "params": {
                     "refreshToken": false
+                }
+            }),
+            serde_json::to_value(&request)?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_automation_list() -> Result<()> {
+        let request = ClientRequest::AutomationList {
+            request_id: RequestId::Integer(7),
+            params: v2::AutomationListParams {
+                thread_id: "thr_123".to_string(),
+            },
+        };
+        assert_eq!(
+            json!({
+                "method": "automation/list",
+                "id": 7,
+                "params": {
+                    "threadId": "thr_123"
                 }
             }),
             serde_json::to_value(&request)?,

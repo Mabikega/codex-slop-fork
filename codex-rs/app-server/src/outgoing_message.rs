@@ -520,6 +520,11 @@ mod tests {
     use codex_app_server_protocol::AccountUpdatedNotification;
     use codex_app_server_protocol::ApplyPatchApprovalParams;
     use codex_app_server_protocol::AuthMode;
+    use codex_app_server_protocol::AutomationMessageSource;
+    use codex_app_server_protocol::AutomationScope;
+    use codex_app_server_protocol::AutomationTrigger;
+    use codex_app_server_protocol::AutomationUpdateType;
+    use codex_app_server_protocol::AutomationUpdatedNotification;
     use codex_app_server_protocol::ConfigWarningNotification;
     use codex_app_server_protocol::DynamicToolCallParams;
     use codex_app_server_protocol::FileChangeRequestApprovalParams;
@@ -644,6 +649,72 @@ mod tests {
                 "params": {
                     "authMode": "apikey",
                     "planType": null
+                },
+            }),
+            serde_json::to_value(jsonrpc_notification)
+                .expect("ensure the notification serializes correctly"),
+            "ensure the notification serializes correctly"
+        );
+    }
+
+    #[test]
+    fn verify_automation_updated_notification_serialization() {
+        let notification = ServerNotification::AutomationUpdated(AutomationUpdatedNotification {
+            thread_id: "thr_123".to_string(),
+            runtime_id: "session:auto-1".to_string(),
+            update_type: AutomationUpdateType::Fired,
+            automation: Some(codex_app_server_protocol::Automation {
+                runtime_id: "session:auto-1".to_string(),
+                id: "auto-1".to_string(),
+                scope: AutomationScope::Session,
+                enabled: true,
+                paused: false,
+                stopped: false,
+                run_count: 1,
+                next_fire_at: Some(123),
+                last_error: None,
+                trigger: AutomationTrigger::TurnCompleted,
+                message_source: AutomationMessageSource::Static {
+                    message: "continue".to_string(),
+                },
+                limits: codex_app_server_protocol::AutomationLimits::default(),
+                policy_command: None,
+            }),
+            message: Some("continue".to_string()),
+        });
+
+        let jsonrpc_notification = OutgoingMessage::AppServerNotification(notification);
+        assert_eq!(
+            json!({
+                "method": "automation/updated",
+                "params": {
+                    "threadId": "thr_123",
+                    "runtimeId": "session:auto-1",
+                    "updateType": "fired",
+                    "automation": {
+                        "runtimeId": "session:auto-1",
+                        "id": "auto-1",
+                        "scope": "session",
+                        "enabled": true,
+                        "paused": false,
+                        "stopped": false,
+                        "runCount": 1,
+                        "nextFireAt": 123,
+                        "lastError": null,
+                        "trigger": {
+                            "type": "turnCompleted"
+                        },
+                        "messageSource": {
+                            "type": "static",
+                            "message": "continue"
+                        },
+                        "limits": {
+                            "maxRuns": null,
+                            "untilAt": null
+                        },
+                        "policyCommand": null
+                    },
+                    "message": "continue"
                 },
             }),
             serde_json::to_value(jsonrpc_notification)

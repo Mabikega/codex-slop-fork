@@ -57,6 +57,7 @@ use codex_api::common::ResponsesWsRequest;
 use codex_api::create_text_param_for_request;
 use codex_api::error::ApiError;
 use codex_api::requests::responses::Compression;
+use codex_app_server_protocol::AuthMode as ApiAuthMode;
 use codex_otel::SessionTelemetry;
 
 use codex_protocol::ThreadId;
@@ -176,6 +177,7 @@ pub struct ModelClient {
 pub struct ModelClientSession {
     client: ModelClient,
     websocket_session: WebsocketSession,
+    last_request_auth: StdMutex<Option<CodexAuth>>,
     /// Turn state for sticky routing.
     ///
     /// This is an `OnceLock` that stores the turn state value received from the server
@@ -249,6 +251,7 @@ impl ModelClient {
         ModelClientSession {
             client: self.clone(),
             websocket_session: self.take_cached_websocket_session(),
+            last_request_auth: StdMutex::new(None),
             turn_state: Arc::new(OnceLock::new()),
         }
     }
@@ -478,6 +481,30 @@ impl Drop for ModelClientSession {
 }
 
 impl ModelClientSession {
+    fn record_last_request_auth(&self, auth: Option<&CodexAuth>) {
+        *self
+            .last_request_auth
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = auth.cloned();
+    }
+
+    pub(crate) fn last_request_auth(&self) -> Option<CodexAuth> {
+        self.last_request_auth
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn reset_transport_state_for_auth_change(&mut self, auth: Option<&CodexAuth>) {
+        if auths_equal_for_transport(self.last_request_auth().as_ref(), auth) {
+            return;
+        }
+        self.websocket_session.connection = None;
+        self.websocket_session.last_request = None;
+        self.websocket_session.last_response_rx = None;
+        self.turn_state = Arc::new(OnceLock::new());
+    }
+
     fn activate_http_fallback(&self, websocket_enabled: bool) -> bool {
         websocket_enabled
             && !self
@@ -748,7 +775,7 @@ impl ModelClientSession {
     /// `text` controls used for output schemas.
     #[allow(clippy::too_many_arguments)]
     async fn stream_responses_api(
-        &self,
+        &mut self,
         prompt: &Prompt,
         model_info: &ModelInfo,
         session_telemetry: &SessionTelemetry,
@@ -774,6 +801,8 @@ impl ModelClientSession {
             .map(super::auth::AuthManager::unauthorized_recovery);
         loop {
             let client_setup = self.client.current_client_setup().await?;
+            self.reset_transport_state_for_auth_change(client_setup.auth.as_ref());
+            self.record_last_request_auth(client_setup.auth.as_ref());
             let transport = ReqwestTransport::new(build_reqwest_client());
             let (request_telemetry, sse_telemetry) =
                 Self::build_streaming_telemetry(session_telemetry);
@@ -832,6 +861,8 @@ impl ModelClientSession {
             .map(super::auth::AuthManager::unauthorized_recovery);
         loop {
             let client_setup = self.client.current_client_setup().await?;
+            self.reset_transport_state_for_auth_change(client_setup.auth.as_ref());
+            self.record_last_request_auth(client_setup.auth.as_ref());
             let compression = self.responses_request_compression(client_setup.auth.as_ref());
 
             let options = self.build_responses_options(turn_metadata_header, compression);
@@ -1050,6 +1081,21 @@ impl ModelClientSession {
     }
 }
 
+fn auths_equal_for_transport(a: Option<&CodexAuth>, b: Option<&CodexAuth>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => match (a.api_auth_mode(), b.api_auth_mode()) {
+            (ApiAuthMode::ApiKey, ApiAuthMode::ApiKey) => a.api_key() == b.api_key(),
+            (ApiAuthMode::Chatgpt, ApiAuthMode::Chatgpt)
+            | (ApiAuthMode::ChatgptAuthTokens, ApiAuthMode::ChatgptAuthTokens) => {
+                a.auth_dot_json() == b.auth_dot_json()
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 /// Parses per-turn metadata into an HTTP header value.
 ///
 /// Invalid values are treated as absent so callers can compare and propagate
@@ -1261,6 +1307,8 @@ impl WebsocketTelemetry for ApiTelemetry {
 #[cfg(test)]
 mod tests {
     use super::ModelClient;
+    use super::auths_equal_for_transport;
+    use crate::CodexAuth;
     use codex_otel::SessionTelemetry;
     use codex_protocol::ThreadId;
     use codex_protocol::openai_models::ModelInfo;
@@ -1355,5 +1403,13 @@ mod tests {
             .await
             .expect("empty summarize request should succeed");
         assert_eq!(output.len(), 0);
+    }
+
+    #[test]
+    fn transport_auth_equality_distinguishes_different_api_keys() {
+        let first = CodexAuth::from_api_key("sk-first");
+        let second = CodexAuth::from_api_key("sk-second");
+
+        assert!(!auths_equal_for_transport(Some(&first), Some(&second)));
     }
 }

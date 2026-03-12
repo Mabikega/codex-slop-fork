@@ -1,4 +1,5 @@
 use codex_core::config::Config;
+use codex_core::slop_fork::FORK_DISPLAY_NAME;
 use codex_core::web_search::web_search_detail;
 use codex_protocol::items::TurnItem;
 use codex_protocol::num_format::format_with_separators;
@@ -187,8 +188,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
         const VERSION: &str = env!("CARGO_PKG_VERSION");
         ts_msg!(
             self,
-            "OpenAI Codex v{} (research preview)\n--------",
-            VERSION
+            "{FORK_DISPLAY_NAME} v{VERSION} (research preview)\n--------"
         );
 
         let mut entries =

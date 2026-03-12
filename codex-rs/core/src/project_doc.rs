@@ -25,6 +25,9 @@ use crate::plugins::PluginCapabilitySummary;
 use crate::plugins::render_plugins_section;
 use crate::skills::SkillMetadata;
 use crate::skills::render_skills_section;
+use crate::slop_fork::extend_project_doc_paths;
+use crate::slop_fork::load_project_doc_overlay;
+use crate::slop_fork::push_unique_project_doc_path;
 use crate::tools::code_mode;
 use codex_app_server_protocol::ConfigLayerSource;
 use dunce::canonicalize as normalize_path;
@@ -155,19 +158,32 @@ pub(crate) async fn get_user_instructions(
 /// function returns `Ok(None)`. Unexpected I/O failures bubble up as `Err` so
 /// callers can decide how to handle them.
 pub async fn read_project_docs(config: &Config) -> std::io::Result<Option<String>> {
+    let project_doc_overlay = load_project_doc_overlay(config)?;
     let max_total = config.project_doc_max_bytes;
 
     if max_total == 0 {
-        return Ok(None);
+        let mut inline_sections = project_doc_overlay.prefix_sections;
+        inline_sections.extend(project_doc_overlay.suffix_sections);
+        return if inline_sections.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(inline_sections.join("\n\n")))
+        };
     }
 
     let paths = discover_project_doc_paths(config)?;
     if paths.is_empty() {
-        return Ok(None);
+        let mut inline_sections = project_doc_overlay.prefix_sections;
+        inline_sections.extend(project_doc_overlay.suffix_sections);
+        return if inline_sections.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(inline_sections.join("\n\n")))
+        };
     }
 
     let mut remaining: u64 = max_total as u64;
-    let mut parts: Vec<String> = Vec::new();
+    let mut parts = project_doc_overlay.prefix_sections;
 
     for p in paths {
         if remaining == 0 {
@@ -200,6 +216,8 @@ pub async fn read_project_docs(config: &Config) -> std::io::Result<Option<String
         }
     }
 
+    parts.extend(project_doc_overlay.suffix_sections);
+
     if parts.is_empty() {
         Ok(None)
     } else {
@@ -213,6 +231,20 @@ pub async fn read_project_docs(config: &Config) -> std::io::Result<Option<String
 /// directory (inclusive). Symlinks are allowed. When `project_doc_max_bytes`
 /// is zero, returns an empty list.
 pub fn discover_project_doc_paths(config: &Config) -> std::io::Result<Vec<PathBuf>> {
+    if config.project_doc_max_bytes == 0 {
+        return Ok(Vec::new());
+    }
+    let project_doc_overlay = load_project_doc_overlay(config)?;
+    discover_project_doc_paths_with_additional_filenames(
+        config,
+        &project_doc_overlay.additional_filenames,
+    )
+}
+
+fn discover_project_doc_paths_with_additional_filenames(
+    config: &Config,
+    additional_filenames: &[String],
+) -> std::io::Result<Vec<PathBuf>> {
     let mut dir = config.cwd.clone();
     if let Ok(canon) = normalize_path(&dir) {
         dir = canon;
@@ -273,33 +305,29 @@ pub fn discover_project_doc_paths(config: &Config) -> std::io::Result<Vec<PathBu
         dirs.reverse();
         dirs
     } else {
-        vec![dir]
+        vec![dir.clone()]
     };
 
     let mut found: Vec<PathBuf> = Vec::new();
-    let candidate_filenames = candidate_filenames(config);
-    for d in search_dirs {
-        for name in &candidate_filenames {
-            let candidate = d.join(name);
-            match std::fs::symlink_metadata(&candidate) {
-                Ok(md) => {
-                    let ft = md.file_type();
-                    // Allow regular files and symlinks; opening will later fail for dangling links.
-                    if ft.is_file() || ft.is_symlink() {
-                        found.push(candidate);
-                        break;
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(e),
-            }
+    let primary_candidate_filenames = primary_candidate_filenames(config);
+    for d in &search_dirs {
+        if let Some(primary_doc) = first_existing_doc_path(d, &primary_candidate_filenames)? {
+            push_unique_project_doc_path(&mut found, primary_doc);
         }
     }
+    extend_project_doc_paths(
+        config,
+        &dir,
+        &search_dirs,
+        &primary_candidate_filenames,
+        additional_filenames,
+        &mut found,
+    )?;
 
     Ok(found)
 }
 
-fn candidate_filenames<'a>(config: &'a Config) -> Vec<&'a str> {
+fn primary_candidate_filenames<'a>(config: &'a Config) -> Vec<&'a str> {
     let mut names: Vec<&'a str> =
         Vec::with_capacity(2 + config.project_doc_fallback_filenames.len());
     names.push(LOCAL_PROJECT_DOC_FILENAME);
@@ -316,6 +344,29 @@ fn candidate_filenames<'a>(config: &'a Config) -> Vec<&'a str> {
     names
 }
 
+fn first_existing_doc_path(
+    directory: &std::path::Path,
+    candidate_filenames: &[&str],
+) -> std::io::Result<Option<PathBuf>> {
+    for name in candidate_filenames {
+        if let Some(path) = existing_doc_path(&directory.join(name))? {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
+fn existing_doc_path(path: &std::path::Path) -> std::io::Result<Option<PathBuf>> {
+    match std::fs::symlink_metadata(path) {
+        Ok(md) => {
+            let ft = md.file_type();
+            Ok((ft.is_file() || ft.is_symlink()).then(|| path.to_path_buf()))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,7 +374,13 @@ mod tests {
     use crate::features::Feature;
     use crate::skills::loader::SkillRoot;
     use crate::skills::loader::load_skills_from_roots;
+    use codex_protocol::permissions::FileSystemAccessMode;
+    use codex_protocol::permissions::FileSystemPath;
+    use codex_protocol::permissions::FileSystemSandboxEntry;
+    use codex_protocol::permissions::FileSystemSandboxPolicy;
     use codex_protocol::protocol::SkillScope;
+    use codex_utils_absolute_path::AbsolutePathBuf;
+    use pretty_assertions::assert_eq;
     use std::fs;
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -346,6 +403,12 @@ mod tests {
 
         config.user_instructions = instructions.map(ToOwned::to_owned);
         config
+    }
+
+    fn write_slop_fork_config(config: &Config, contents: &str) {
+        fs::create_dir_all(&config.codex_home).expect("create codex_home");
+        fs::write(config.codex_home.join("config-slop-fork.toml"), contents)
+            .expect("write fork config");
     }
 
     async fn make_config_with_fallback(
@@ -484,6 +547,28 @@ mod tests {
         assert!(
             res.is_none(),
             "With limit 0 the function should return None"
+        );
+    }
+
+    #[tokio::test]
+    async fn zero_byte_limit_keeps_fork_inline_instructions() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg = make_config(&tmp, 0, None).await;
+        write_slop_fork_config(
+            &cfg,
+            &format!(
+                "instructions = \"global extra\"\n\n[projects.\"{}\"]\ninstructions = \"project extra\"\n",
+                tmp.path().display()
+            ),
+        );
+
+        let res = get_user_instructions(&cfg, None, None)
+            .await
+            .expect("fork inline instructions expected");
+        assert_eq!(res, "global extra\n\nproject extra");
+        assert_eq!(
+            discover_project_doc_paths(&cfg).expect("discover paths"),
+            Vec::<PathBuf>::new()
         );
     }
 
@@ -700,6 +785,143 @@ mod tests {
                 .unwrap()
                 .to_string_lossy()
                 .eq(DEFAULT_PROJECT_DOC_FILENAME)
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_instruction_files_are_read_like_agents_docs() {
+        let repo = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            repo.path().join(".git"),
+            "gitdir: /path/to/actual/git/dir\n",
+        )
+        .unwrap();
+        fs::write(repo.path().join("AGENTS.md"), "root agents").unwrap();
+        fs::write(repo.path().join("CLAUDE.md"), "root claude").unwrap();
+
+        let nested = repo.path().join("workspace/crate_a");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("CLAUDE.md"), "nested claude").unwrap();
+
+        let mut cfg = make_config(&repo, 4096, None).await;
+        cfg.cwd = nested;
+        write_slop_fork_config(&cfg, "instruction_files = [\"CLAUDE.md\"]\n");
+
+        let discovery = discover_project_doc_paths(&cfg).expect("discover paths");
+        assert_eq!(discovery.len(), 3);
+        assert_eq!(
+            discovery
+                .iter()
+                .map(|path| path.file_name().unwrap().to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            vec![
+                "AGENTS.md".to_string(),
+                "CLAUDE.md".to_string(),
+                "CLAUDE.md".to_string()
+            ]
+        );
+
+        let res = get_user_instructions(&cfg, None, None)
+            .await
+            .expect("combined docs expected");
+        assert_eq!(res, "root agents\n\nroot claude\n\nnested claude");
+    }
+
+    #[tokio::test]
+    async fn configured_absolute_instruction_file_is_read_once() {
+        let repo = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            repo.path().join(".git"),
+            "gitdir: /path/to/actual/git/dir\n",
+        )
+        .unwrap();
+
+        let absolute_doc = repo.path().join("CLAUDE.md");
+        fs::write(&absolute_doc, "absolute claude").unwrap();
+
+        let nested = repo.path().join("workspace/crate_a");
+        fs::create_dir_all(&nested).unwrap();
+
+        let mut cfg = make_config(&repo, 4096, None).await;
+        cfg.cwd = nested;
+        write_slop_fork_config(
+            &cfg,
+            &format!("instruction_files = [\"{}\"]\n", absolute_doc.display()),
+        );
+
+        let discovery = discover_project_doc_paths(&cfg).expect("discover paths");
+        assert_eq!(discovery, vec![absolute_doc.clone()]);
+
+        let res = get_user_instructions(&cfg, None, None)
+            .await
+            .expect("combined docs expected");
+        assert_eq!(res, "absolute claude");
+    }
+
+    #[tokio::test]
+    async fn configured_absolute_instruction_file_outside_readable_roots_is_skipped() {
+        let repo = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            repo.path().join(".git"),
+            "gitdir: /path/to/actual/git/dir\n",
+        )
+        .unwrap();
+
+        let external = tempfile::tempdir().expect("external tempdir");
+        let external_doc = external.path().join("CLAUDE.md");
+        fs::write(&external_doc, "external claude").unwrap();
+
+        let nested = repo.path().join("workspace/crate_a");
+        fs::create_dir_all(&nested).unwrap();
+
+        let mut cfg = make_config(&repo, 4096, None).await;
+        cfg.cwd = nested.clone();
+        cfg.permissions.file_system_sandbox_policy =
+            FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {
+                path: FileSystemPath::Path {
+                    path: AbsolutePathBuf::from_absolute_path(repo.path())
+                        .expect("repo path should be absolute"),
+                },
+                access: FileSystemAccessMode::Write,
+            }]);
+        write_slop_fork_config(
+            &cfg,
+            &format!("instruction_files = [\"{}\"]\n", external_doc.display()),
+        );
+
+        let discovery = discover_project_doc_paths(&cfg).expect("discover paths");
+        assert_eq!(discovery, Vec::<PathBuf>::new());
+
+        let res = get_user_instructions(&cfg, None, None);
+        assert_eq!(res.await, None);
+    }
+
+    #[tokio::test]
+    async fn project_scoped_fork_instructions_append_global_and_project_overlays() {
+        let repo = tempfile::tempdir().expect("tempdir");
+        fs::create_dir_all(repo.path().join(".git")).unwrap();
+        fs::write(repo.path().join("CLAUDE.md"), "root claude").unwrap();
+        fs::write(repo.path().join("GEMINI.md"), "root gemini").unwrap();
+
+        let nested = repo.path().join("workspace/crate_a");
+        fs::create_dir_all(&nested).unwrap();
+
+        let mut cfg = make_config(&repo, 4096, None).await;
+        cfg.cwd = nested;
+        write_slop_fork_config(
+            &cfg,
+            &format!(
+                "instructions = \"global extra\"\ninstruction_files = [\"CLAUDE.md\"]\n\n[projects.\"{}\"]\ninstructions = \"project extra\"\ninstruction_files = [\"GEMINI.md\"]\n",
+                repo.path().display()
+            ),
+        );
+
+        let res = get_user_instructions(&cfg, None, None)
+            .await
+            .expect("overlay docs expected");
+        assert_eq!(
+            res,
+            "global extra\n\nroot claude\n\nroot gemini\n\nproject extra"
         );
     }
 

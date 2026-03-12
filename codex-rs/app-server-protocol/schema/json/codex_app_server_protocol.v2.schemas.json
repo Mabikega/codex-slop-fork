@@ -784,6 +784,467 @@
         }
       ]
     },
+    "Automation": {
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "lastError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limits": {
+          "$ref": "#/definitions/AutomationLimits"
+        },
+        "messageSource": {
+          "$ref": "#/definitions/AutomationMessageSource"
+        },
+        "nextFireAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "paused": {
+          "type": "boolean"
+        },
+        "policyCommand": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AutomationPolicyCommand"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "runCount": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "runtimeId": {
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "#/definitions/AutomationScope"
+        },
+        "stopped": {
+          "type": "boolean"
+        },
+        "trigger": {
+          "$ref": "#/definitions/AutomationTrigger"
+        }
+      },
+      "required": [
+        "enabled",
+        "id",
+        "limits",
+        "messageSource",
+        "paused",
+        "runCount",
+        "runtimeId",
+        "scope",
+        "stopped",
+        "trigger"
+      ],
+      "type": "object"
+    },
+    "AutomationDefinition": {
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limits": {
+          "$ref": "#/definitions/AutomationLimits"
+        },
+        "messageSource": {
+          "$ref": "#/definitions/AutomationMessageSource"
+        },
+        "policyCommand": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AutomationPolicyCommand"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "trigger": {
+          "$ref": "#/definitions/AutomationTrigger"
+        }
+      },
+      "required": [
+        "enabled",
+        "limits",
+        "messageSource",
+        "trigger"
+      ],
+      "type": "object"
+    },
+    "AutomationDeleteParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "runtimeId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "runtimeId",
+        "threadId"
+      ],
+      "title": "AutomationDeleteParams",
+      "type": "object"
+    },
+    "AutomationDeleteResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "deleted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "deleted"
+      ],
+      "title": "AutomationDeleteResponse",
+      "type": "object"
+    },
+    "AutomationLimits": {
+      "properties": {
+        "maxRuns": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "untilAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "AutomationListParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "title": "AutomationListParams",
+      "type": "object"
+    },
+    "AutomationListResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "data": {
+          "items": {
+            "$ref": "#/definitions/Automation"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "data"
+      ],
+      "title": "AutomationListResponse",
+      "type": "object"
+    },
+    "AutomationMessageSource": {
+      "oneOf": [
+        {
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "static"
+              ],
+              "title": "StaticAutomationMessageSourceType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "message",
+            "type"
+          ],
+          "title": "StaticAutomationMessageSource",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "messages": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": {
+              "enum": [
+                "roundRobin"
+              ],
+              "title": "RoundRobinAutomationMessageSourceType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "messages",
+            "type"
+          ],
+          "title": "RoundRobinAutomationMessageSource",
+          "type": "object"
+        }
+      ]
+    },
+    "AutomationPolicyCommand": {
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "cwd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timeoutMs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "AutomationScope": {
+      "enum": [
+        "session",
+        "repo",
+        "global"
+      ],
+      "type": "string"
+    },
+    "AutomationSetEnabledParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "runtimeId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "enabled",
+        "runtimeId",
+        "threadId"
+      ],
+      "title": "AutomationSetEnabledParams",
+      "type": "object"
+    },
+    "AutomationSetEnabledResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "automation": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Automation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "updated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "updated"
+      ],
+      "title": "AutomationSetEnabledResponse",
+      "type": "object"
+    },
+    "AutomationTrigger": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "turnCompleted"
+              ],
+              "title": "TurnCompletedAutomationTriggerType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "TurnCompletedAutomationTrigger",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "every_seconds": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "type": {
+              "enum": [
+                "interval"
+              ],
+              "title": "IntervalAutomationTriggerType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "every_seconds",
+            "type"
+          ],
+          "title": "IntervalAutomationTrigger",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "expression": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "cron"
+              ],
+              "title": "CronAutomationTriggerType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "expression",
+            "type"
+          ],
+          "title": "CronAutomationTrigger",
+          "type": "object"
+        }
+      ]
+    },
+    "AutomationUpdateType": {
+      "enum": [
+        "upserted",
+        "deleted",
+        "fired",
+        "paused",
+        "failed",
+        "stopped"
+      ],
+      "type": "string"
+    },
+    "AutomationUpdatedNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "automation": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Automation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runtimeId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "updateType": {
+          "$ref": "#/definitions/AutomationUpdateType"
+        }
+      },
+      "required": [
+        "runtimeId",
+        "threadId",
+        "updateType"
+      ],
+      "title": "AutomationUpdatedNotification",
+      "type": "object"
+    },
+    "AutomationUpsertParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "automation": {
+          "$ref": "#/definitions/AutomationDefinition"
+        },
+        "scope": {
+          "$ref": "#/definitions/AutomationScope"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "automation",
+        "scope",
+        "threadId"
+      ],
+      "title": "AutomationUpsertParams",
+      "type": "object"
+    },
+    "AutomationUpsertResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "automation": {
+          "$ref": "#/definitions/Automation"
+        }
+      },
+      "required": [
+        "automation"
+      ],
+      "title": "AutomationUpsertResponse",
+      "type": "object"
+    },
     "ByteRange": {
       "properties": {
         "end": {
@@ -1337,6 +1798,102 @@
             "params"
           ],
           "title": "App/listRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "automation/list"
+              ],
+              "title": "Automation/listRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/AutomationListParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Automation/listRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "automation/upsert"
+              ],
+              "title": "Automation/upsertRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/AutomationUpsertParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Automation/upsertRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "automation/delete"
+              ],
+              "title": "Automation/deleteRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/AutomationDeleteParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Automation/deleteRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "automation/setEnabled"
+              ],
+              "title": "Automation/setEnabledRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/AutomationSetEnabledParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Automation/setEnabledRequest",
           "type": "object"
         },
         {
@@ -11741,6 +12298,26 @@
             "params"
           ],
           "title": "App/list/updatedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
+                "automation/updated"
+              ],
+              "title": "Automation/updatedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/AutomationUpdatedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Automation/updatedNotification",
           "type": "object"
         },
         {

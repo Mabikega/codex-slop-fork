@@ -14,6 +14,7 @@ use crate::outgoing_message::ConnectionRequestId;
 use crate::outgoing_message::OutgoingMessageSender;
 use crate::outgoing_message::OutgoingNotification;
 use crate::outgoing_message::ThreadScopedOutgoingMessageSender;
+use crate::slop_fork_automation::SlopForkAutomationManager;
 use crate::thread_status::ThreadWatchManager;
 use crate::thread_status::resolve_thread_status;
 use chrono::DateTime;
@@ -29,6 +30,16 @@ use codex_app_server_protocol::AppsListParams;
 use codex_app_server_protocol::AppsListResponse;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::AuthMode;
+use codex_app_server_protocol::AutomationDeleteParams;
+use codex_app_server_protocol::AutomationDeleteResponse;
+use codex_app_server_protocol::AutomationListParams;
+use codex_app_server_protocol::AutomationListResponse;
+use codex_app_server_protocol::AutomationSetEnabledParams;
+use codex_app_server_protocol::AutomationSetEnabledResponse;
+use codex_app_server_protocol::AutomationUpdateType;
+use codex_app_server_protocol::AutomationUpdatedNotification;
+use codex_app_server_protocol::AutomationUpsertParams;
+use codex_app_server_protocol::AutomationUpsertResponse;
 use codex_app_server_protocol::CancelLoginAccountParams;
 use codex_app_server_protocol::CancelLoginAccountResponse;
 use codex_app_server_protocol::CancelLoginAccountStatus;
@@ -199,6 +210,7 @@ use codex_core::config::edit::ConfigEdit;
 use codex_core::config::edit::ConfigEditsBuilder;
 use codex_core::config::types::McpServerTransportConfig;
 use codex_core::config_loader::CloudRequirementsLoader;
+use codex_core::config_loader::LoaderOverrides;
 use codex_core::connectors::filter_disallowed_connectors;
 use codex_core::connectors::merge_plugin_apps;
 use codex_core::default_client::set_default_client_residency_requirement;
@@ -231,6 +243,7 @@ use codex_core::rollout_date_parts;
 use codex_core::sandboxing::SandboxPermissions;
 use codex_core::skills::remote::export_remote_skill;
 use codex_core::skills::remote::list_remote_skills;
+use codex_core::slop_fork::load_slop_fork_config;
 use codex_core::state_db::StateDbHandle;
 use codex_core::state_db::get_state_db;
 use codex_core::state_db::reconcile_rollout;
@@ -378,12 +391,14 @@ pub(crate) struct CodexMessageProcessor {
     arg0_paths: Arg0DispatchPaths,
     config: Arc<Config>,
     cli_overrides: Vec<(String, TomlValue)>,
+    loader_overrides: LoaderOverrides,
     cloud_requirements: Arc<RwLock<CloudRequirementsLoader>>,
     active_login: Arc<Mutex<Option<ActiveLogin>>>,
     pending_thread_unloads: Arc<Mutex<HashSet<ThreadId>>>,
     thread_state_manager: ThreadStateManager,
     thread_watch_manager: ThreadWatchManager,
     command_exec_manager: CommandExecManager,
+    automation_manager: SlopForkAutomationManager,
     pending_fuzzy_searches: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     fuzzy_search_sessions: Arc<Mutex<HashMap<String, FuzzyFileSearchSession>>>,
     feedback: CodexFeedback,
@@ -404,8 +419,11 @@ struct ListenerTaskContext {
     thread_state_manager: ThreadStateManager,
     outgoing: Arc<OutgoingMessageSender>,
     thread_watch_manager: ThreadWatchManager,
+    automation_manager: SlopForkAutomationManager,
     fallback_model_provider: String,
     codex_home: PathBuf,
+    codex_linux_sandbox_exe: Option<PathBuf>,
+    windows_sandbox_level: WindowsSandboxLevel,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -421,6 +439,7 @@ pub(crate) struct CodexMessageProcessorArgs {
     pub(crate) arg0_paths: Arg0DispatchPaths,
     pub(crate) config: Arc<Config>,
     pub(crate) cli_overrides: Vec<(String, TomlValue)>,
+    pub(crate) loader_overrides: LoaderOverrides,
     pub(crate) cloud_requirements: Arc<RwLock<CloudRequirementsLoader>>,
     pub(crate) feedback: CodexFeedback,
     pub(crate) log_db: Option<LogDbLayer>,
@@ -481,6 +500,7 @@ impl CodexMessageProcessor {
             arg0_paths,
             config,
             cli_overrides,
+            loader_overrides,
             cloud_requirements,
             feedback,
             log_db,
@@ -492,12 +512,14 @@ impl CodexMessageProcessor {
             arg0_paths,
             config,
             cli_overrides,
+            loader_overrides,
             cloud_requirements,
             active_login: Arc::new(Mutex::new(None)),
             pending_thread_unloads: Arc::new(Mutex::new(HashSet::new())),
             thread_state_manager: ThreadStateManager::new(),
             thread_watch_manager: ThreadWatchManager::new_with_outgoing(outgoing),
             command_exec_manager: CommandExecManager::default(),
+            automation_manager: SlopForkAutomationManager,
             pending_fuzzy_searches: Arc::new(Mutex::new(HashMap::new())),
             fuzzy_search_sessions: Arc::new(Mutex::new(HashMap::new())),
             feedback,
@@ -837,6 +859,22 @@ impl CodexMessageProcessor {
             }
             ClientRequest::GetAuthStatus { request_id, params } => {
                 self.get_auth_status(to_connection_request_id(request_id), params)
+                    .await;
+            }
+            ClientRequest::AutomationList { request_id, params } => {
+                self.automation_list(to_connection_request_id(request_id), params)
+                    .await;
+            }
+            ClientRequest::AutomationUpsert { request_id, params } => {
+                self.automation_upsert(to_connection_request_id(request_id), params)
+                    .await;
+            }
+            ClientRequest::AutomationDelete { request_id, params } => {
+                self.automation_delete(to_connection_request_id(request_id), params)
+                    .await;
+            }
+            ClientRequest::AutomationSetEnabled { request_id, params } => {
+                self.automation_set_enabled(to_connection_request_id(request_id), params)
                     .await;
             }
             ClientRequest::FuzzyFileSearch { request_id, params } => {
@@ -1435,6 +1473,200 @@ impl CodexMessageProcessor {
         self.outgoing.send_response(request_id, response).await;
     }
 
+    async fn automation_list(&self, request_id: ConnectionRequestId, params: AutomationListParams) {
+        let (thread_id, thread) = match self.load_thread(&params.thread_id).await {
+            Ok(value) => value,
+            Err(error) => {
+                self.outgoing.send_error(request_id, error).await;
+                return;
+            }
+        };
+        let cwd = thread.config_snapshot().await.cwd;
+        match self
+            .automation_manager
+            .list(&self.config.codex_home, &cwd, &thread_id)
+            .await
+        {
+            Ok(data) => {
+                self.outgoing
+                    .send_response(request_id, AutomationListResponse { data })
+                    .await;
+            }
+            Err(err) => {
+                self.send_internal_error(request_id, format!("failed to list automations: {err}"))
+                    .await;
+            }
+        }
+    }
+
+    async fn automation_upsert(
+        &self,
+        request_id: ConnectionRequestId,
+        params: AutomationUpsertParams,
+    ) {
+        let (thread_id, thread) = match self.load_thread(&params.thread_id).await {
+            Ok(value) => value,
+            Err(error) => {
+                self.outgoing.send_error(request_id, error).await;
+                return;
+            }
+        };
+        let cwd = thread.config_snapshot().await.cwd;
+        match self
+            .automation_manager
+            .upsert(
+                &self.config.codex_home,
+                &cwd,
+                &thread_id,
+                params.scope,
+                params.automation,
+            )
+            .await
+        {
+            Ok(automation) => {
+                self.wake_automation_listener(thread_id).await;
+                self.outgoing
+                    .send_response(
+                        request_id,
+                        AutomationUpsertResponse {
+                            automation: automation.clone(),
+                        },
+                    )
+                    .await;
+                if let Some(thread_outgoing) = self
+                    .thread_state_manager
+                    .thread_outgoing(self.outgoing.clone(), &thread_id)
+                    .await
+                {
+                    thread_outgoing
+                        .send_server_notification(ServerNotification::AutomationUpdated(
+                            AutomationUpdatedNotification {
+                                thread_id: thread_id.to_string(),
+                                runtime_id: automation.runtime_id.clone(),
+                                update_type: AutomationUpdateType::Upserted,
+                                automation: Some(automation),
+                                message: None,
+                            },
+                        ))
+                        .await;
+                }
+            }
+            Err(err) => {
+                self.send_internal_error(request_id, format!("failed to upsert automation: {err}"))
+                    .await;
+            }
+        }
+    }
+
+    async fn automation_delete(
+        &self,
+        request_id: ConnectionRequestId,
+        params: AutomationDeleteParams,
+    ) {
+        let (thread_id, thread) = match self.load_thread(&params.thread_id).await {
+            Ok(value) => value,
+            Err(error) => {
+                self.outgoing.send_error(request_id, error).await;
+                return;
+            }
+        };
+        let runtime_id = params.runtime_id.clone();
+        let cwd = thread.config_snapshot().await.cwd;
+        match self
+            .automation_manager
+            .delete(&self.config.codex_home, &cwd, &thread_id, &runtime_id)
+            .await
+        {
+            Ok(deleted) => {
+                self.outgoing
+                    .send_response(request_id, AutomationDeleteResponse { deleted })
+                    .await;
+                if deleted {
+                    if let Some(thread_outgoing) = self
+                        .thread_state_manager
+                        .thread_outgoing(self.outgoing.clone(), &thread_id)
+                        .await
+                    {
+                        thread_outgoing
+                            .send_server_notification(ServerNotification::AutomationUpdated(
+                                AutomationUpdatedNotification {
+                                    thread_id: thread_id.to_string(),
+                                    runtime_id,
+                                    update_type: AutomationUpdateType::Deleted,
+                                    automation: None,
+                                    message: None,
+                                },
+                            ))
+                            .await;
+                    }
+                }
+            }
+            Err(err) => {
+                self.send_internal_error(request_id, format!("failed to delete automation: {err}"))
+                    .await;
+            }
+        }
+    }
+
+    async fn automation_set_enabled(
+        &self,
+        request_id: ConnectionRequestId,
+        params: AutomationSetEnabledParams,
+    ) {
+        let (thread_id, thread) = match self.load_thread(&params.thread_id).await {
+            Ok(value) => value,
+            Err(error) => {
+                self.outgoing.send_error(request_id, error).await;
+                return;
+            }
+        };
+        let cwd = thread.config_snapshot().await.cwd;
+        match self
+            .automation_manager
+            .set_enabled(&self.config.codex_home, &cwd, &thread_id, params.clone())
+            .await
+        {
+            Ok(automation) => {
+                let updated = automation.is_some();
+                if updated {
+                    self.wake_automation_listener(thread_id).await;
+                }
+                self.outgoing
+                    .send_response(
+                        request_id,
+                        AutomationSetEnabledResponse {
+                            updated,
+                            automation: automation.clone(),
+                        },
+                    )
+                    .await;
+                if let Some(automation) = automation {
+                    if let Some(thread_outgoing) = self
+                        .thread_state_manager
+                        .thread_outgoing(self.outgoing.clone(), &thread_id)
+                        .await
+                    {
+                        thread_outgoing
+                            .send_server_notification(ServerNotification::AutomationUpdated(
+                                AutomationUpdatedNotification {
+                                    thread_id: thread_id.to_string(),
+                                    runtime_id: automation.runtime_id.clone(),
+                                    update_type: AutomationUpdateType::Upserted,
+                                    automation: Some(automation),
+                                    message: None,
+                                },
+                            ))
+                            .await;
+                    }
+                }
+            }
+            Err(err) => {
+                self.send_internal_error(request_id, format!("failed to update automation: {err}"))
+                    .await;
+            }
+        }
+    }
+
     async fn get_account_rate_limits(&self, request_id: ConnectionRequestId) {
         match self.fetch_account_rate_limits().await {
             Ok((rate_limits, rate_limits_by_limit_id)) => {
@@ -1452,6 +1684,17 @@ impl CodexMessageProcessor {
             Err(error) => {
                 self.outgoing.send_error(request_id, error).await;
             }
+        }
+    }
+
+    async fn wake_automation_listener(&self, thread_id: ThreadId) {
+        let thread_state = self.thread_state_manager.thread_state(thread_id).await;
+        let listener_command_tx = {
+            let thread_state = thread_state.lock().await;
+            thread_state.listener_command_tx()
+        };
+        if let Some(listener_command_tx) = listener_command_tx {
+            let _ = listener_command_tx.send(ThreadListenerCommand::WakeAutomationTimer);
         }
     }
 
@@ -1838,20 +2081,29 @@ impl CodexMessageProcessor {
         );
         typesafe_overrides.ephemeral = ephemeral;
         let cli_overrides = self.cli_overrides.clone();
+        let loader_overrides = self.loader_overrides.clone();
+        let codex_home = self.config.codex_home.clone();
+        let base_cwd = self.config.cwd.clone();
         let cloud_requirements = self.current_cloud_requirements();
         let listener_task_context = ListenerTaskContext {
             thread_manager: Arc::clone(&self.thread_manager),
             thread_state_manager: self.thread_state_manager.clone(),
             outgoing: Arc::clone(&self.outgoing),
             thread_watch_manager: self.thread_watch_manager.clone(),
+            automation_manager: self.automation_manager.clone(),
             fallback_model_provider: self.config.model_provider_id.clone(),
             codex_home: self.config.codex_home.clone(),
+            codex_linux_sandbox_exe: self.config.codex_linux_sandbox_exe.clone(),
+            windows_sandbox_level: WindowsSandboxLevel::from_config(&self.config),
         };
 
         tokio::spawn(async move {
             Self::thread_start_task(
                 listener_task_context,
                 cli_overrides,
+                loader_overrides,
+                codex_home,
+                base_cwd,
                 cloud_requirements,
                 request_id,
                 config,
@@ -1869,6 +2121,9 @@ impl CodexMessageProcessor {
     async fn thread_start_task(
         listener_task_context: ListenerTaskContext,
         cli_overrides: Vec<(String, TomlValue)>,
+        loader_overrides: LoaderOverrides,
+        codex_home: PathBuf,
+        base_cwd: PathBuf,
         cloud_requirements: CloudRequirementsLoader,
         request_id: ConnectionRequestId,
         config_overrides: Option<HashMap<String, serde_json::Value>>,
@@ -1880,8 +2135,11 @@ impl CodexMessageProcessor {
     ) {
         let config = match derive_config_from_params(
             &cli_overrides,
+            &loader_overrides,
+            &codex_home,
             config_overrides,
             typesafe_overrides,
+            Some(base_cwd),
             &cloud_requirements,
         )
         .await
@@ -3269,6 +3527,8 @@ impl CodexMessageProcessor {
         let cloud_requirements = self.current_cloud_requirements();
         let config = match derive_config_for_cwd(
             &self.cli_overrides,
+            &self.loader_overrides,
+            &self.config.codex_home,
             request_overrides,
             typesafe_overrides,
             history_cwd,
@@ -3790,6 +4050,8 @@ impl CodexMessageProcessor {
         let cloud_requirements = self.current_cloud_requirements();
         let config = match derive_config_for_cwd(
             &self.cli_overrides,
+            &self.loader_overrides,
+            &self.config.codex_home,
             request_overrides,
             typesafe_overrides,
             history_cwd,
@@ -4689,8 +4951,13 @@ impl CodexMessageProcessor {
         }
     }
 
-    async fn finalize_thread_teardown(&mut self, thread_id: ThreadId) {
+    async fn finalize_thread_teardown(&mut self, thread_id: ThreadId, clear_automation: bool) {
         self.pending_thread_unloads.lock().await.remove(&thread_id);
+        if clear_automation {
+            self.automation_manager
+                .clear_thread(self.config.codex_home.as_path(), &thread_id)
+                .await;
+        }
         self.outgoing
             .cancel_requests_for_thread(thread_id, None)
             .await;
@@ -4720,7 +4987,7 @@ impl CodexMessageProcessor {
             // Reconcile stale app-server bookkeeping when the thread has already been
             // removed from the core manager. This keeps loaded-status/subscription state
             // consistent with the source of truth before reporting NotLoaded.
-            self.finalize_thread_teardown(thread_id).await;
+            self.finalize_thread_teardown(thread_id, false).await;
             self.outgoing
                 .send_response(
                     request_id,
@@ -4896,7 +5163,7 @@ impl CodexMessageProcessor {
                 }
             }
         }
-        self.finalize_thread_teardown(thread_id).await;
+        self.finalize_thread_teardown(thread_id, true).await;
 
         if state_db_ctx.is_none() {
             state_db_ctx = get_state_db(&self.config).await;
@@ -6287,8 +6554,11 @@ impl CodexMessageProcessor {
                 thread_state_manager: self.thread_state_manager.clone(),
                 outgoing: Arc::clone(&self.outgoing),
                 thread_watch_manager: self.thread_watch_manager.clone(),
+                automation_manager: self.automation_manager.clone(),
                 fallback_model_provider: self.config.model_provider_id.clone(),
                 codex_home: self.config.codex_home.clone(),
+                codex_linux_sandbox_exe: self.config.codex_linux_sandbox_exe.clone(),
+                windows_sandbox_level: WindowsSandboxLevel::from_config(&self.config),
             },
             conversation_id,
             connection_id,
@@ -6374,8 +6644,11 @@ impl CodexMessageProcessor {
                 thread_state_manager: self.thread_state_manager.clone(),
                 outgoing: Arc::clone(&self.outgoing),
                 thread_watch_manager: self.thread_watch_manager.clone(),
+                automation_manager: self.automation_manager.clone(),
                 fallback_model_provider: self.config.model_provider_id.clone(),
                 codex_home: self.config.codex_home.clone(),
+                codex_linux_sandbox_exe: self.config.codex_linux_sandbox_exe.clone(),
+                windows_sandbox_level: WindowsSandboxLevel::from_config(&self.config),
             },
             conversation_id,
             conversation,
@@ -6405,12 +6678,51 @@ impl CodexMessageProcessor {
             thread_manager,
             thread_state_manager,
             thread_watch_manager,
+            automation_manager,
             fallback_model_provider,
             codex_home,
+            codex_linux_sandbox_exe,
+            windows_sandbox_level,
         } = listener_task_context;
         let outgoing_for_task = Arc::clone(&outgoing);
         tokio::spawn(async move {
             loop {
+                let fork_config = match load_slop_fork_config(&codex_home) {
+                    Ok(config) => Some(config),
+                    Err(err) => {
+                        warn!("failed to load slop fork config for automation hooks: {err}");
+                        None
+                    }
+                };
+                let has_active_turn = {
+                    let thread_state = thread_state.lock().await;
+                    thread_state.active_turn_snapshot().is_some()
+                };
+                let next_timer_wake = if !has_active_turn {
+                    if fork_config
+                        .as_ref()
+                        .is_some_and(|config| config.automation_enabled)
+                    {
+                        match automation_manager
+                            .next_timer_wake(codex_home.as_path(), &conversation, &conversation_id)
+                            .await
+                        {
+                            Ok(next_wake) => next_wake,
+                            Err(err) => {
+                                warn!(
+                                    "failed to calculate next automation wake for {conversation_id}: {err}"
+                                );
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                let mut timer_sleep =
+                    next_timer_wake.map(|duration| Box::pin(tokio::time::sleep(duration)));
                 tokio::select! {
                     _ = &mut cancel_rx => {
                         // Listener was superseded or the thread is being torn down.
@@ -6496,6 +6808,96 @@ impl CodexMessageProcessor {
                             codex_home.as_path(),
                         )
                         .await;
+
+                        if let EventMsg::TurnComplete(turn_complete) = &event.msg
+                            && let Some(fork_config) =
+                                fork_config.as_ref().filter(|config| config.automation_enabled)
+                        {
+                            match automation_manager
+                                .evaluate_turn_completed(
+                                    codex_home.as_path(),
+                                    &conversation,
+                                    &conversation_id,
+                                    &turn_complete.turn_id,
+                                    turn_complete.last_agent_message.as_deref().unwrap_or_default(),
+                                    fork_config.automation_shell_timeout_ms,
+                                    codex_linux_sandbox_exe.clone(),
+                                    windows_sandbox_level,
+                                )
+                                .await
+                            {
+                                Ok(notifications) => {
+                                    if let Some(thread_outgoing) = thread_state_manager
+                                        .thread_outgoing(
+                                            outgoing_for_task.clone(),
+                                            &conversation_id,
+                                        )
+                                        .await
+                                    {
+                                        for notification in notifications {
+                                            thread_outgoing
+                                                .send_server_notification(
+                                                    ServerNotification::AutomationUpdated(
+                                                        notification,
+                                                    ),
+                                                )
+                                                .await;
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    warn!(
+                                        "failed to evaluate turn-complete automations for {conversation_id}: {err}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    _ = async {
+                        if let Some(timer_sleep) = timer_sleep.as_mut() {
+                            timer_sleep.as_mut().await;
+                        }
+                    }, if timer_sleep.is_some() => {
+                        if let Some(fork_config) =
+                            fork_config.as_ref().filter(|config| config.automation_enabled)
+                        {
+                            match automation_manager
+                                .evaluate_timers(
+                                    codex_home.as_path(),
+                                    &conversation,
+                                    &conversation_id,
+                                    fork_config.automation_shell_timeout_ms,
+                                    codex_linux_sandbox_exe.clone(),
+                                    windows_sandbox_level,
+                                )
+                                .await
+                            {
+                                Ok(notifications) => {
+                                    if let Some(thread_outgoing) = thread_state_manager
+                                        .thread_outgoing(
+                                            outgoing_for_task.clone(),
+                                            &conversation_id,
+                                        )
+                                        .await
+                                    {
+                                        for notification in notifications {
+                                            thread_outgoing
+                                                .send_server_notification(
+                                                    ServerNotification::AutomationUpdated(
+                                                        notification,
+                                                    ),
+                                                )
+                                                .await;
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    warn!(
+                                        "failed to evaluate timer automations for {conversation_id}: {err}"
+                                    );
+                                }
+                            }
+                        }
                     }
                     listener_command = listener_command_rx.recv() => {
                         let Some(listener_command) = listener_command else {
@@ -6813,6 +7215,7 @@ impl CodexMessageProcessor {
         };
         let config = Arc::clone(&self.config);
         let cli_overrides = self.cli_overrides.clone();
+        let loader_overrides = self.loader_overrides.clone();
         let cloud_requirements = self.current_cloud_requirements();
         let command_cwd = params
             .cwd
@@ -6824,6 +7227,8 @@ impl CodexMessageProcessor {
         tokio::spawn(async move {
             let derived_config = derive_config_for_cwd(
                 &cli_overrides,
+                &loader_overrides,
+                &config.codex_home,
                 None,
                 ConfigOverrides {
                     cwd: Some(command_cwd.clone()),
@@ -6898,6 +7303,7 @@ async fn handle_thread_listener_command(
             )
             .await;
         }
+        ThreadListenerCommand::WakeAutomationTimer => {}
         ThreadListenerCommand::ResolveServerRequest {
             request_id,
             completion_tx,
@@ -7049,14 +7455,12 @@ async fn resolve_pending_server_request(
     request_id: RequestId,
 ) {
     let thread_id = conversation_id.to_string();
-    let subscribed_connection_ids = thread_state_manager
-        .subscribed_connection_ids(conversation_id)
-        .await;
-    let outgoing = ThreadScopedOutgoingMessageSender::new(
-        outgoing.clone(),
-        subscribed_connection_ids,
-        conversation_id,
-    );
+    let Some(outgoing) = thread_state_manager
+        .thread_outgoing(outgoing.clone(), &conversation_id)
+        .await
+    else {
+        return;
+    };
     outgoing
         .send_server_notification(ServerNotification::ServerRequestResolved(
             ServerRequestResolvedNotification {
@@ -7326,8 +7730,11 @@ async fn sync_default_client_residency_requirement(
 ///   the more general "bag of config options" provided by `cli_overrides` and `request_overrides`.
 async fn derive_config_from_params(
     cli_overrides: &[(String, TomlValue)],
+    loader_overrides: &LoaderOverrides,
+    codex_home: &Path,
     request_overrides: Option<HashMap<String, serde_json::Value>>,
     typesafe_overrides: ConfigOverrides,
+    fallback_cwd: Option<PathBuf>,
     cloud_requirements: &CloudRequirementsLoader,
 ) -> std::io::Result<Config> {
     let merged_cli_overrides = cli_overrides
@@ -7342,8 +7749,11 @@ async fn derive_config_from_params(
         .collect::<Vec<_>>();
 
     codex_core::config::ConfigBuilder::default()
+        .codex_home(codex_home.to_path_buf())
         .cli_overrides(merged_cli_overrides)
         .harness_overrides(typesafe_overrides)
+        .loader_overrides(loader_overrides.clone())
+        .fallback_cwd(fallback_cwd)
         .cloud_requirements(cloud_requirements.clone())
         .build()
         .await
@@ -7351,6 +7761,8 @@ async fn derive_config_from_params(
 
 async fn derive_config_for_cwd(
     cli_overrides: &[(String, TomlValue)],
+    loader_overrides: &LoaderOverrides,
+    codex_home: &Path,
     request_overrides: Option<HashMap<String, serde_json::Value>>,
     typesafe_overrides: ConfigOverrides,
     cwd: Option<PathBuf>,
@@ -7368,8 +7780,10 @@ async fn derive_config_for_cwd(
         .collect::<Vec<_>>();
 
     codex_core::config::ConfigBuilder::default()
+        .codex_home(codex_home.to_path_buf())
         .cli_overrides(merged_cli_overrides)
         .harness_overrides(typesafe_overrides)
+        .loader_overrides(loader_overrides.clone())
         .fallback_cwd(cwd)
         .cloud_requirements(cloud_requirements.clone())
         .build()

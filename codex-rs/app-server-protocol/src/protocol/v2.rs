@@ -1978,6 +1978,165 @@ pub struct AppListUpdatedNotification {
     pub data: Vec<AppInfo>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case", export_to = "v2/")]
+pub enum AutomationScope {
+    Session,
+    Repo,
+    Global,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(tag = "type", rename_all = "camelCase")]
+#[ts(tag = "type", rename_all = "camelCase", export_to = "v2/")]
+pub enum AutomationTrigger {
+    TurnCompleted,
+    Interval { every_seconds: u64 },
+    Cron { expression: String },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(tag = "type", rename_all = "camelCase")]
+#[ts(tag = "type", rename_all = "camelCase", export_to = "v2/")]
+pub enum AutomationMessageSource {
+    Static { message: String },
+    RoundRobin { messages: Vec<String> },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AutomationLimits {
+    pub max_runs: Option<u32>,
+    pub until_at: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AutomationPolicyCommand {
+    pub command: Vec<String>,
+    pub cwd: Option<PathBuf>,
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AutomationDefinition {
+    pub id: Option<String>,
+    pub enabled: bool,
+    pub trigger: AutomationTrigger,
+    pub message_source: AutomationMessageSource,
+    pub limits: AutomationLimits,
+    pub policy_command: Option<AutomationPolicyCommand>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct Automation {
+    pub runtime_id: String,
+    pub id: String,
+    pub scope: AutomationScope,
+    pub enabled: bool,
+    pub paused: bool,
+    pub stopped: bool,
+    pub run_count: u32,
+    pub next_fire_at: Option<i64>,
+    pub last_error: Option<String>,
+    pub trigger: AutomationTrigger,
+    pub message_source: AutomationMessageSource,
+    pub limits: AutomationLimits,
+    pub policy_command: Option<AutomationPolicyCommand>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AutomationListParams {
+    pub thread_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AutomationListResponse {
+    pub data: Vec<Automation>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AutomationUpsertParams {
+    pub thread_id: String,
+    pub scope: AutomationScope,
+    pub automation: AutomationDefinition,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AutomationUpsertResponse {
+    pub automation: Automation,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AutomationDeleteParams {
+    pub thread_id: String,
+    pub runtime_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AutomationDeleteResponse {
+    pub deleted: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AutomationSetEnabledParams {
+    pub thread_id: String,
+    pub runtime_id: String,
+    pub enabled: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AutomationSetEnabledResponse {
+    pub updated: bool,
+    pub automation: Option<Automation>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = "v2/")]
+pub enum AutomationUpdateType {
+    Upserted,
+    Deleted,
+    Fired,
+    Paused,
+    Failed,
+    Stopped,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AutomationUpdatedNotification {
+    pub thread_id: String,
+    pub runtime_id: String,
+    pub update_type: AutomationUpdateType,
+    pub automation: Option<Automation>,
+    pub message: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
