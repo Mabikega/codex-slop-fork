@@ -1,0 +1,7 @@
+.gitattributes merge=ours
+.github/workflows/** merge=ours
+AGENTS.md merge=ours
+AGENTS_FORK.md merge=ours
+README.md merge=ours
+README.ja.md merge=ours
+codex-rs/core/src/agent/agent_names.txt merge=ours
