@@ -1,6 +1,5 @@
 ---
 source: tui/src/bottom_pane/approval_overlay.rs
-assertion_line: 821
 expression: "format!(\"{buf:?}\")"
 ---
 Buffer {
@@ -26,6 +25,8 @@ Buffer {
         x: 10, y: 3, fg: Reset, bg: Reset, underline: Reset, modifier: ITALIC,
         x: 33, y: 3, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
         x: 0, y: 6, fg: Cyan, bg: Reset, underline: Reset, modifier: BOLD,
+        x: 26, y: 6, fg: Reset, bg: Reset, underline: Reset, modifier: DIM,
+        x: 27, y: 6, fg: Cyan, bg: Reset, underline: Reset, modifier: BOLD,
         x: 28, y: 6, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
         x: 53, y: 7, fg: Reset, bg: Reset, underline: Reset, modifier: DIM,
         x: 54, y: 7, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,

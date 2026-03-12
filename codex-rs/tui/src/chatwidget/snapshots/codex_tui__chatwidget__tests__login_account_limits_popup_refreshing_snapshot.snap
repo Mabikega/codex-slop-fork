@@ -1,0 +1,27 @@
+---
+source: tui/src/chatwidget/tests.rs
+expression: popup
+---
+  View Account Limits
+  Choose a saved account to review or refresh its latest usage and reset times.
+  This session: API key (...test)
+  Shared active account: refreshing@example.com (Pro)
+  • Refreshing saved account limits (0s)
+    └ Refreshing 1 saved account in the background.
+
+› 1. refreshing@example.com (Pro)                 Refreshing this saved account now. Wait for the
+                                                  current refresh to finish before retrying.
+  2. Refresh due account limits (disabled)        Refreshing 1 saved account in the background.
+                                                  Wait for it to finish before retrying.
+                                                  (disabled: A background refresh is already
+                                                  running.)
+  3. Force refresh all accounts (disabled)        Refreshing 1 saved account in the background.
+                                                  Wait for it to finish before retrying.
+                                                  (disabled: A background refresh is already
+                                                  running.)
+  4. Check and start untouched quotas (disabled)  Refreshing 1 saved account in the background.
+                                                  Wait for it to finish before retrying.
+                                                  (disabled: A background refresh is already
+                                                  running.)
+
+  Press enter to confirm or esc to go back

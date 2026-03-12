@@ -190,6 +190,10 @@ use crate::render::Insets;
 use crate::render::RectExt;
 use crate::render::renderable::Renderable;
 use crate::slash_command::SlashCommand;
+use crate::slop_fork::auto_command_first_token;
+use crate::slop_fork::auto_command_mention_item;
+use crate::slop_fork::parse_auto_command_args;
+use crate::slop_fork::should_dispatch_auto_command;
 use crate::style::user_message_style;
 use codex_protocol::custom_prompts::CustomPrompt;
 use codex_protocol::custom_prompts::PROMPTS_CMD_PREFIX;
@@ -2215,6 +2219,25 @@ impl ChatComposer {
             .collect()
     }
 
+    fn mention_binding_path_for_range(&self, range: std::ops::Range<usize>) -> Option<&str> {
+        let id = self
+            .textarea
+            .text_element_snapshots()
+            .into_iter()
+            .find(|snapshot| snapshot.range == range)
+            .map(|snapshot| snapshot.id)?;
+        self.mention_bindings
+            .get(&id)
+            .map(|binding| binding.path.as_str())
+    }
+
+    fn should_dispatch_auto_dollar_command(&self, text: &str) -> bool {
+        let Some((first_token, range)) = auto_command_first_token(text) else {
+            return false;
+        };
+        should_dispatch_auto_command(first_token, self.mention_binding_path_for_range(range))
+    }
+
     fn snapshot_mention_bindings(&self) -> Vec<MentionBinding> {
         let mut ordered = Vec::new();
         for (id, mention) in self.current_mention_elements() {
@@ -2474,6 +2497,35 @@ impl ChatComposer {
         let original_pending_pastes = self.pending_pastes.clone();
         if let Some(result) = self.try_dispatch_slash_command_with_args() {
             return (result, true);
+        }
+        if self.should_dispatch_auto_dollar_command(&original_input) {
+            if self.is_task_running {
+                self.app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+                    history_cell::new_error_event(
+                        "'$auto' is disabled while a task is in progress.".to_string(),
+                    ),
+                )));
+                return (InputResult::None, true);
+            }
+
+            if let Some((prepared_text, _prepared_elements)) = self.prepare_submission_text(false) {
+                let args = parse_auto_command_args(&prepared_text)
+                    .unwrap_or_default()
+                    .to_string();
+                return (
+                    InputResult::CommandWithArgs(SlashCommand::Auto, args, Vec::new()),
+                    true,
+                );
+            }
+
+            self.set_text_content_with_mention_bindings(
+                original_input,
+                original_text_elements,
+                original_local_image_paths,
+                original_mention_bindings,
+            );
+            self.pending_pastes = original_pending_pastes;
+            return (InputResult::None, true);
         }
 
         if let Some((text, text_elements)) = self.prepare_submission_text(true) {
@@ -3563,6 +3615,8 @@ impl ChatComposer {
     fn mention_items(&self) -> Vec<MentionItem> {
         let mut mentions = Vec::new();
 
+        mentions.push(auto_command_mention_item());
+
         if let Some(skills) = self.skills.as_ref() {
             for skill in skills {
                 let display_name = skill_display_name(skill).to_string();
@@ -4482,6 +4536,7 @@ impl Drop for ChatComposer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::slop_fork::AUTO_COMMAND_MENTION_PATH;
     use image::ImageBuffer;
     use image::Rgba;
     use pretty_assertions::assert_eq;
@@ -5251,7 +5306,7 @@ mod tests {
             false,
         );
         composer.set_connectors_enabled(true);
-        composer.set_text_content("$".to_string(), Vec::new(), Vec::new());
+        composer.set_text_content("$connector_1".to_string(), Vec::new(), Vec::new());
         assert!(matches!(composer.active_popup, ActivePopup::None));
 
         let connectors = vec![AppInfo {
@@ -5292,7 +5347,7 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_text_content("$".to_string(), Vec::new(), Vec::new());
+        composer.set_text_content("$sa".to_string(), Vec::new(), Vec::new());
         assert!(matches!(composer.active_popup, ActivePopup::None));
 
         composer.set_plugin_mentions(Some(vec![PluginCapabilitySummary {
@@ -5389,6 +5444,29 @@ mod tests {
     }
 
     #[test]
+    fn mention_popup_auto_command_conflict_snapshot() {
+        snapshot_composer_state_with_width(
+            "mention_popup_auto_command_conflict",
+            72,
+            false,
+            |composer| {
+                composer.set_skill_mentions(Some(vec![SkillMetadata {
+                    name: "auto".to_string(),
+                    description: "Skill with the same name as the dollar command".to_string(),
+                    short_description: None,
+                    interface: None,
+                    dependencies: None,
+                    policy: None,
+                    permission_profile: None,
+                    path_to_skills_md: PathBuf::from("/tmp/repo/auto/SKILL.md"),
+                    scope: codex_protocol::protocol::SkillScope::Repo,
+                }]));
+                composer.set_text_content("$auto".to_string(), Vec::new(), Vec::new());
+            },
+        );
+    }
+
+    #[test]
     fn set_connector_mentions_excludes_disabled_apps_from_mention_popup() {
         let (tx, _rx) = unbounded_channel::<AppEvent>();
         let sender = AppEventSender::new(tx);
@@ -5400,7 +5478,7 @@ mod tests {
             false,
         );
         composer.set_connectors_enabled(true);
-        composer.set_text_content("$".to_string(), Vec::new(), Vec::new());
+        composer.set_text_content("$connector_1".to_string(), Vec::new(), Vec::new());
 
         let connectors = vec![AppInfo {
             id: "connector_1".to_string(),
@@ -5419,7 +5497,10 @@ mod tests {
         }];
         composer.set_connector_mentions(Some(ConnectorsSnapshot { connectors }));
 
-        assert!(matches!(composer.active_popup, ActivePopup::None));
+        let ActivePopup::Skill(popup) = &composer.active_popup else {
+            panic!("expected mention popup to stay open for the command row");
+        };
+        assert!(popup.selected_mention().is_none());
     }
 
     #[test]
@@ -7576,6 +7657,85 @@ mod tests {
             mention_bindings
         );
         assert!(composer.take_mention_bindings().is_empty());
+    }
+
+    #[test]
+    fn manual_auto_dollar_command_dispatches_with_args() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        composer.set_text_content("$auto list".to_string(), Vec::new(), Vec::new());
+
+        let (result, _) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            result,
+            InputResult::CommandWithArgs(SlashCommand::Auto, "list".to_string(), Vec::new())
+        );
+    }
+
+    #[test]
+    fn bound_auto_skill_does_not_dispatch_auto_dollar_command() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        composer.set_text_content_with_mention_bindings(
+            "$auto please".to_string(),
+            Vec::new(),
+            Vec::new(),
+            vec![MentionBinding {
+                mention: "auto".to_string(),
+                path: "/tmp/repo/auto/SKILL.md".to_string(),
+            }],
+        );
+
+        let (result, _) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(result, InputResult::Submitted { .. }));
+    }
+
+    #[test]
+    fn bound_auto_command_dispatches_auto_dollar_command() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        composer.set_text_content_with_mention_bindings(
+            "$auto list".to_string(),
+            Vec::new(),
+            Vec::new(),
+            vec![MentionBinding {
+                mention: "auto".to_string(),
+                path: AUTO_COMMAND_MENTION_PATH.to_string(),
+            }],
+        );
+
+        let (result, _) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            result,
+            InputResult::CommandWithArgs(SlashCommand::Auto, "list".to_string(), Vec::new())
+        );
     }
 
     #[test]

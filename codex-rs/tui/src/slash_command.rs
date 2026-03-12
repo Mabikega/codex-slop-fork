@@ -42,6 +42,8 @@ pub enum SlashCommand {
     Theme,
     Mcp,
     Apps,
+    Auto,
+    Accounts,
     Logout,
     Quit,
     Exit,
@@ -106,6 +108,8 @@ impl SlashCommand {
             SlashCommand::Experimental => "toggle experimental features",
             SlashCommand::Mcp => "list configured MCP tools",
             SlashCommand::Apps => "manage apps",
+            SlashCommand::Auto => "automate follow-up prompts after Codex completes work",
+            SlashCommand::Accounts => "manage saved accounts and auth flows",
             SlashCommand::Logout => "log out of Codex",
             SlashCommand::Rollout => "print the rollout file path",
             SlashCommand::TestApproval => "test approval request",
@@ -115,7 +119,10 @@ impl SlashCommand {
     /// Command string without the leading '/'. Provided for compatibility with
     /// existing code that expects a method named `command()`.
     pub fn command(self) -> &'static str {
-        self.into()
+        match self {
+            SlashCommand::Accounts => "accounts",
+            _ => self.into(),
+        }
     }
 
     /// Whether this command supports inline args (for example `/review ...`).
@@ -126,6 +133,7 @@ impl SlashCommand {
                 | SlashCommand::Rename
                 | SlashCommand::Plan
                 | SlashCommand::Fast
+                | SlashCommand::Auto
                 | SlashCommand::SandboxReadRoot
         )
     }
@@ -150,6 +158,8 @@ impl SlashCommand {
             | SlashCommand::Review
             | SlashCommand::Plan
             | SlashCommand::Clear
+            | SlashCommand::Auto
+            | SlashCommand::Accounts
             | SlashCommand::Logout
             | SlashCommand::MemoryDrop
             | SlashCommand::MemoryUpdate => false,
@@ -194,4 +204,23 @@ pub fn built_in_slash_commands() -> Vec<(&'static str, SlashCommand)> {
         .filter(|command| command.is_visible())
         .map(|c| (c.command(), c))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use pretty_assertions::assert_eq;
+
+    use super::SlashCommand;
+
+    #[test]
+    fn accounts_is_the_only_supported_command_name() {
+        assert_eq!(SlashCommand::Accounts.command(), "accounts");
+        assert_eq!(
+            SlashCommand::from_str("accounts"),
+            Ok(SlashCommand::Accounts)
+        );
+        assert!(SlashCommand::from_str("login").is_err());
+    }
 }

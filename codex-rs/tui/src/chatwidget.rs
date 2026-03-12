@@ -34,7 +34,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
 use std::time::Instant;
 
 use self::realtime::PendingSteerCompareKey;
@@ -44,14 +43,27 @@ use crate::audio_device::list_realtime_audio_device_names;
 use crate::bottom_pane::StatusLineItem;
 use crate::bottom_pane::StatusLinePreviewData;
 use crate::bottom_pane::StatusLineSetupView;
-use crate::status::RateLimitWindowDisplay;
+use crate::slop_fork::LOGIN_POPUP_VIEW_ID;
+#[cfg(test)]
+use crate::slop_fork::LoginFlowKind;
+use crate::slop_fork::LoginPopupKind;
+#[cfg(test)]
+use crate::slop_fork::PendingChatgptLogin;
+use crate::slop_fork::SavedAccountLimitKind;
+use crate::slop_fork::SavedAccountStatusLineFormatter;
+use crate::slop_fork::SlopForkEvent;
+use crate::slop_fork::SlopForkUi;
+use crate::slop_fork::SlopForkUiContext;
+use crate::slop_fork::SlopForkUiEffect;
+use crate::slop_fork::should_spawn_rate_limit_poller;
+use crate::slop_fork::spawn_external_auth_sync_poller;
+use crate::slop_fork::spawn_rate_limit_poller;
 use crate::status::format_directory_display;
 use crate::status::format_tokens_compact;
 use crate::status::rate_limit_snapshot_display_for_limit;
 use crate::text_formatting::proper_join;
 use crate::version::CODEX_CLI_VERSION;
 use codex_app_server_protocol::ConfigLayerSource;
-use codex_backend_client::Client as BackendClient;
 use codex_chatgpt::connectors;
 use codex_core::config::Config;
 use codex_core::config::Constrained;
@@ -72,7 +84,6 @@ use codex_core::project_doc::DEFAULT_PROJECT_DOC_FILENAME;
 use codex_core::skills::model::SkillMetadata;
 use codex_core::terminal::TerminalName;
 use codex_core::terminal::terminal_info;
-#[cfg(target_os = "windows")]
 use codex_core::windows_sandbox::WindowsSandboxLevelExt;
 use codex_otel::RuntimeMetricsSummary;
 use codex_otel::SessionTelemetry;
@@ -85,7 +96,6 @@ use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::Settings;
-#[cfg(target_os = "windows")]
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
@@ -571,6 +581,7 @@ pub(crate) struct ChatWidget {
     rate_limit_warnings: RateLimitWarningState,
     rate_limit_switch_prompt: RateLimitSwitchPromptState,
     rate_limit_poller: Option<JoinHandle<()>>,
+    external_auth_sync_poller: Option<JoinHandle<()>>,
     adaptive_chunking: AdaptiveChunkingPolicy,
     // Stream lifecycle controller
     stream_controller: Option<StreamController>,
@@ -628,6 +639,7 @@ pub(crate) struct ChatWidget {
     suppress_session_configured_redraw: bool,
     // User messages queued while a turn is in progress
     queued_user_messages: VecDeque<UserMessage>,
+    slop_fork_ui: SlopForkUi,
     // Steers already submitted to core but not yet committed into history.
     //
     // The bottom pane shows these above queued drafts until core records the
@@ -1131,9 +1143,13 @@ impl ChatWidget {
             self.request_status_line_branch(cwd);
         }
 
+        let saved_account_limit_formatter =
+            SavedAccountStatusLineFormatter::load(&self.config.codex_home, &items);
         let mut parts = Vec::new();
         for item in items {
-            if let Some(value) = self.status_line_value_for_item(&item) {
+            if let Some(value) =
+                self.status_line_value_for_item(&item, &saved_account_limit_formatter)
+            {
                 parts.push(value);
             }
         }
@@ -1285,6 +1301,10 @@ impl ChatWidget {
             show_fast_status,
         );
         self.apply_session_info_cell(session_info_cell);
+        let slop_fork_effects = self
+            .slop_fork_ui
+            .on_session_configured(&self.slop_fork_context());
+        self.apply_slop_fork_effects(slop_fork_effects);
 
         if let Some(messages) = initial_messages {
             self.replay_initial_messages(messages);
@@ -1640,6 +1660,12 @@ impl ChatWidget {
         if !from_replay {
             self.saw_plan_item_this_turn = false;
         }
+        let auto_effects = self.slop_fork_ui.on_turn_completed(
+            &self.slop_fork_context(),
+            last_agent_message.as_deref().unwrap_or_default(),
+            from_replay,
+        );
+        self.apply_slop_fork_effects(auto_effects);
         // If there is a queued user message, send exactly one now to begin the next turn.
         self.maybe_send_next_queued_input();
         // Emit a notification when the turn completes (suppressed if focused).
@@ -2649,6 +2675,8 @@ impl ChatWidget {
 
     pub(crate) fn pre_draw_tick(&mut self) {
         self.bottom_pane.pre_draw_tick();
+        self.poll_timer_automations();
+        self.schedule_slop_fork_frames();
     }
 
     /// Handle completion of an `AgentMessage` turn item.
@@ -3238,6 +3266,7 @@ impl ChatWidget {
             rate_limit_warnings: RateLimitWarningState::default(),
             rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
             rate_limit_poller: None,
+            external_auth_sync_poller: None,
             adaptive_chunking: AdaptiveChunkingPolicy::default(),
             stream_controller: None,
             plan_stream_controller: None,
@@ -3266,6 +3295,7 @@ impl ChatWidget {
             thread_name: None,
             forked_from: None,
             queued_user_messages: VecDeque::new(),
+            slop_fork_ui: SlopForkUi::default(),
             pending_steers: VecDeque::new(),
             submit_pending_steers_after_interrupt: false,
             queued_message_edit_binding,
@@ -3301,6 +3331,7 @@ impl ChatWidget {
             last_rendered_user_message_event: None,
         };
 
+        widget.start_external_auth_sync_poller();
         widget.prefetch_rate_limits();
         widget.bottom_pane.set_voice_transcription_enabled(
             widget.config.features.enabled(Feature::VoiceTranscription),
@@ -3422,6 +3453,7 @@ impl ChatWidget {
             rate_limit_warnings: RateLimitWarningState::default(),
             rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
             rate_limit_poller: None,
+            external_auth_sync_poller: None,
             adaptive_chunking: AdaptiveChunkingPolicy::default(),
             stream_controller: None,
             plan_stream_controller: None,
@@ -3454,6 +3486,7 @@ impl ChatWidget {
             plan_delta_buffer: String::new(),
             plan_item_active: false,
             queued_user_messages: VecDeque::new(),
+            slop_fork_ui: SlopForkUi::default(),
             pending_steers: VecDeque::new(),
             submit_pending_steers_after_interrupt: false,
             queued_message_edit_binding,
@@ -3485,6 +3518,7 @@ impl ChatWidget {
             last_rendered_user_message_event: None,
         };
 
+        widget.start_external_auth_sync_poller();
         widget.prefetch_rate_limits();
         widget.bottom_pane.set_voice_transcription_enabled(
             widget.config.features.enabled(Feature::VoiceTranscription),
@@ -3598,6 +3632,7 @@ impl ChatWidget {
             rate_limit_warnings: RateLimitWarningState::default(),
             rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
             rate_limit_poller: None,
+            external_auth_sync_poller: None,
             adaptive_chunking: AdaptiveChunkingPolicy::default(),
             stream_controller: None,
             plan_stream_controller: None,
@@ -3626,6 +3661,7 @@ impl ChatWidget {
             thread_name: None,
             forked_from: None,
             queued_user_messages: VecDeque::new(),
+            slop_fork_ui: SlopForkUi::default(),
             pending_steers: VecDeque::new(),
             submit_pending_steers_after_interrupt: false,
             queued_message_edit_binding,
@@ -3661,6 +3697,7 @@ impl ChatWidget {
             last_rendered_user_message_event: None,
         };
 
+        widget.start_external_auth_sync_poller();
         widget.prefetch_rate_limits();
         widget.bottom_pane.set_voice_transcription_enabled(
             widget.config.features.enabled(Feature::VoiceTranscription),
@@ -4206,6 +4243,13 @@ impl ChatWidget {
             SlashCommand::Apps => {
                 self.add_connectors_output();
             }
+            SlashCommand::Accounts => {
+                self.open_login_popup(LoginPopupKind::Root);
+            }
+            SlashCommand::Auto => {
+                let effects = self.slop_fork_ui.show_auto_usage();
+                self.apply_slop_fork_effects(effects);
+            }
             SlashCommand::Rollout => {
                 if let Some(path) = self.rollout_path() {
                     self.add_info_message(
@@ -4378,6 +4422,18 @@ impl ChatWidget {
                     });
                 self.bottom_pane.drain_pending_submission_state();
             }
+            SlashCommand::Auto => {
+                let prepared_args = self
+                    .bottom_pane
+                    .prepare_inline_args_submission(false)
+                    .map(|(prepared_args, _prepared_elements)| prepared_args)
+                    .unwrap_or(args);
+                let effects = self
+                    .slop_fork_ui
+                    .handle_auto_command(&self.slop_fork_context(), prepared_args.trim());
+                self.apply_slop_fork_effects(effects);
+                self.bottom_pane.drain_pending_submission_state();
+            }
             _ => self.dispatch_command(cmd),
         }
     }
@@ -4468,11 +4524,116 @@ impl ChatWidget {
         if !self.is_session_configured()
             || self.bottom_pane.is_task_running()
             || self.is_review_mode
+            || !self.queued_user_messages.is_empty()
         {
             self.queued_user_messages.push_back(user_message);
             self.refresh_pending_input_preview();
         } else {
             self.submit_user_message(user_message);
+        }
+    }
+
+    fn slop_fork_context(&self) -> SlopForkUiContext {
+        SlopForkUiContext {
+            codex_home: self.config.codex_home.clone(),
+            cwd: self.config.cwd.clone(),
+            thread_id: self.thread_id.map(|thread_id| thread_id.to_string()),
+            chatgpt_base_url: self.config.chatgpt_base_url.clone(),
+            auth_credentials_store_mode: self.config.cli_auth_credentials_store_mode,
+            forced_chatgpt_workspace_id: self.config.forced_chatgpt_workspace_id.clone(),
+            animations: self.config.animations,
+            auth_manager: Arc::clone(&self.auth_manager),
+            sandbox_policy: self.config.permissions.sandbox_policy.get().clone(),
+            file_system_sandbox_policy: self.config.permissions.file_system_sandbox_policy.clone(),
+            network_sandbox_policy: self.config.permissions.network_sandbox_policy,
+            codex_linux_sandbox_exe: self.config.codex_linux_sandbox_exe.clone(),
+            windows_sandbox_level: WindowsSandboxLevel::from_config(&self.config),
+            app_event_tx: self.app_event_tx.clone(),
+            frame_requester: self.frame_requester.clone(),
+        }
+    }
+
+    fn apply_slop_fork_effects(&mut self, effects: Vec<SlopForkUiEffect>) {
+        for effect in effects {
+            match effect {
+                SlopForkUiEffect::ShowOrReplaceSelection(params) => {
+                    if self.bottom_pane.is_view_active(LOGIN_POPUP_VIEW_ID) {
+                        self.bottom_pane.dismiss_view_if_active(LOGIN_POPUP_VIEW_ID);
+                    }
+                    self.bottom_pane.show_selection_view(*params);
+                }
+                SlopForkUiEffect::ShowLoginView(view) => {
+                    let _ = self.bottom_pane.dismiss_view_if_active(LOGIN_POPUP_VIEW_ID);
+                    self.bottom_pane.show_view(view);
+                }
+                SlopForkUiEffect::DismissLoginView => {
+                    self.bottom_pane.dismiss_view_if_active(LOGIN_POPUP_VIEW_ID);
+                    self.refresh_status_line();
+                }
+                SlopForkUiEffect::AddInfoMessage { message, hint } => {
+                    self.add_info_message(message, hint);
+                }
+                SlopForkUiEffect::AddErrorMessage(message) => {
+                    self.add_error_message(message);
+                }
+                SlopForkUiEffect::AddPlainHistoryLines(lines) => {
+                    self.add_plain_history_lines(lines);
+                }
+                SlopForkUiEffect::AuthStateChanged {
+                    message,
+                    is_error,
+                    is_warning,
+                } => {
+                    self.on_auth_state_changed(message, is_error, is_warning);
+                }
+                SlopForkUiEffect::QueueAutomationPrompt(prompt) => {
+                    self.queue_user_message(UserMessage {
+                        text: prompt,
+                        local_images: Vec::new(),
+                        remote_image_urls: Vec::new(),
+                        text_elements: Vec::new(),
+                        mention_bindings: Vec::new(),
+                    });
+                }
+                SlopForkUiEffect::ScheduleFrameIn(delay) => {
+                    self.frame_requester.schedule_frame_in(delay);
+                }
+            }
+        }
+    }
+
+    fn timer_automations_can_autosend(&self) -> bool {
+        self.is_session_configured()
+            && !self.suppress_queue_autosend
+            && !self.bottom_pane.is_task_running()
+            && !self.is_review_mode
+            && self.queued_user_messages.is_empty()
+            && self.bottom_pane.composer_is_empty()
+            && self.bottom_pane.no_modal_or_popup_active()
+    }
+
+    fn poll_timer_automations(&mut self) {
+        if !self.timer_automations_can_autosend() {
+            return;
+        }
+
+        let effects = self
+            .slop_fork_ui
+            .poll_timer_automations(&self.slop_fork_context(), Local::now());
+        self.apply_slop_fork_effects(effects);
+    }
+
+    fn schedule_slop_fork_frames(&mut self) {
+        if !self.timer_automations_can_autosend() {
+            return;
+        }
+        for effect in self
+            .slop_fork_ui
+            .automation_frame_effects(&self.slop_fork_context(), Local::now())
+        {
+            if let SlopForkUiEffect::ScheduleFrameIn(delay) = effect {
+                self.frame_requester.schedule_frame_in(delay);
+            }
         }
     }
 
@@ -5314,10 +5475,13 @@ impl ChatWidget {
 
     fn open_status_line_setup(&mut self) {
         let configured_status_line_items = self.configured_status_line_items();
+        let preview_items = StatusLineItem::iter().collect::<Vec<_>>();
+        let preview_limit_formatter =
+            SavedAccountStatusLineFormatter::load(&self.config.codex_home, &preview_items);
         let view = StatusLineSetupView::new(
             Some(configured_status_line_items.as_slice()),
             StatusLinePreviewData::from_iter(StatusLineItem::iter().filter_map(|item| {
-                self.status_line_value_for_item(&item)
+                self.status_line_value_for_item(&item, &preview_limit_formatter)
                     .map(|value| (item, value))
             })),
             self.app_event_tx.clone(),
@@ -5437,7 +5601,11 @@ impl ChatWidget {
     /// Returning `None` means "omit this item for now", not "configuration error". Callers rely on
     /// this to keep partially available status lines readable while waiting for session, token, or
     /// git metadata.
-    fn status_line_value_for_item(&self, item: &StatusLineItem) -> Option<String> {
+    fn status_line_value_for_item(
+        &self,
+        item: &StatusLineItem,
+        saved_account_limit_formatter: &SavedAccountStatusLineFormatter,
+    ) -> Option<String> {
         match item {
             StatusLineItem::ModelName => Some(self.model_display_name().to_string()),
             StatusLineItem::ModelWithReasoning => {
@@ -5481,7 +5649,11 @@ impl ChatWidget {
                     .and_then(|window| window.window_minutes)
                     .map(get_limits_duration)
                     .unwrap_or_else(|| "5h".to_string());
-                self.status_line_limit_display(window, &label)
+                saved_account_limit_formatter.format_limit(
+                    SavedAccountLimitKind::FiveHour,
+                    window,
+                    &label,
+                )
             }
             StatusLineItem::WeeklyLimit => {
                 let window = self
@@ -5492,7 +5664,11 @@ impl ChatWidget {
                     .and_then(|window| window.window_minutes)
                     .map(get_limits_duration)
                     .unwrap_or_else(|| "weekly".to_string());
-                self.status_line_limit_display(window, &label)
+                saved_account_limit_formatter.format_limit(
+                    SavedAccountLimitKind::Weekly,
+                    window,
+                    &label,
+                )
             }
             StatusLineItem::CodexVersion => Some(CODEX_CLI_VERSION.to_string()),
             StatusLineItem::ContextWindowSize => self
@@ -5553,16 +5729,6 @@ impl ChatWidget {
             .unwrap_or_default()
     }
 
-    fn status_line_limit_display(
-        &self,
-        window: Option<&RateLimitWindowDisplay>,
-        label: &str,
-    ) -> Option<String> {
-        let window = window?;
-        let remaining = (100.0f64 - window.used_percent).clamp(0.0f64, 100.0f64);
-        Some(format!("{label} {remaining:.0}%"))
-    }
-
     fn status_line_reasoning_effort_label(effort: Option<ReasoningEffortConfig>) -> &'static str {
         match effort {
             Some(ReasoningEffortConfig::Minimal) => "minimal",
@@ -5593,6 +5759,20 @@ impl ChatWidget {
 
     fn stop_rate_limit_poller(&mut self) {
         if let Some(handle) = self.rate_limit_poller.take() {
+            handle.abort();
+        }
+    }
+
+    fn start_external_auth_sync_poller(&mut self) {
+        self.stop_external_auth_sync_poller();
+        self.external_auth_sync_poller = Some(spawn_external_auth_sync_poller(
+            Arc::clone(&self.auth_manager),
+            self.app_event_tx.clone(),
+        ));
+    }
+
+    fn stop_external_auth_sync_poller(&mut self) {
+        if let Some(handle) = self.external_auth_sync_poller.take() {
             handle.abort();
         }
     }
@@ -5684,37 +5864,21 @@ impl ChatWidget {
             return;
         }
 
-        let base_url = self.config.chatgpt_base_url.clone();
-        let app_event_tx = self.app_event_tx.clone();
-        let auth_manager = Arc::clone(&self.auth_manager);
-
-        let handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(60));
-
-            loop {
-                if let Some(auth) = auth_manager.auth().await
-                    && auth.is_chatgpt_auth()
-                {
-                    for snapshot in fetch_rate_limits(base_url.clone(), auth).await {
-                        app_event_tx.send(AppEvent::RateLimitSnapshotFetched(snapshot));
-                    }
-                }
-                interval.tick().await;
-            }
-        });
-
-        self.rate_limit_poller = Some(handle);
+        self.rate_limit_poller = Some(spawn_rate_limit_poller(
+            self.config.chatgpt_base_url.clone(),
+            self.app_event_tx.clone(),
+            Arc::clone(&self.auth_manager),
+            self.config.codex_home.clone(),
+            self.config.cli_auth_credentials_store_mode,
+        ));
     }
 
     fn should_prefetch_rate_limits(&self) -> bool {
-        if !self.config.model_provider.requires_openai_auth {
-            return false;
-        }
-
-        self.auth_manager
-            .auth_cached()
-            .as_ref()
-            .is_some_and(CodexAuth::is_chatgpt_auth)
+        should_spawn_rate_limit_poller(
+            self.config.model_provider.requires_openai_auth,
+            self.auth_manager.as_ref(),
+            &self.config.codex_home,
+        )
     }
 
     fn lower_cost_preset(&self) -> Option<ModelPreset> {
@@ -7850,6 +8014,110 @@ impl ChatWidget {
         self.request_redraw();
     }
 
+    pub(crate) fn on_auth_state_changed(
+        &mut self,
+        message: String,
+        is_error: bool,
+        is_warning: bool,
+    ) {
+        let effects = self.slop_fork_ui.on_auth_state_changed();
+        self.apply_slop_fork_effects(effects);
+        if is_error {
+            self.add_error_message(message);
+        } else if is_warning {
+            self.on_warning(message);
+        } else {
+            self.add_info_message(message, None);
+        }
+        self.prefetch_rate_limits();
+        self.request_redraw();
+    }
+
+    pub(crate) fn open_login_popup(&mut self, kind: LoginPopupKind) {
+        let context = self.slop_fork_context();
+        let effects = self.slop_fork_ui.open_login_popup(&context, kind);
+        self.apply_slop_fork_effects(effects);
+    }
+
+    pub(crate) fn handle_slop_fork_event(&mut self, event: SlopForkEvent) {
+        match event {
+            SlopForkEvent::SavedAccountRateLimitsRefreshCompleted {
+                updated_account_ids,
+            } => {
+                self.on_saved_account_rate_limits_refresh_completed(updated_account_ids);
+            }
+            SlopForkEvent::SavedAccountQuotaTouchCompleted {
+                updated_account_ids,
+                message,
+            } => {
+                self.on_saved_account_quota_touch_completed(updated_account_ids, message);
+            }
+            event => {
+                let context = self.slop_fork_context();
+                let effects = self.slop_fork_ui.handle_event(&context, event);
+                self.apply_slop_fork_effects(effects);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_login_api_key_prompt(&mut self) {
+        self.handle_slop_fork_event(SlopForkEvent::OpenLoginApiKeyPrompt);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_login_flow(&mut self, kind: LoginFlowKind) {
+        self.handle_slop_fork_event(SlopForkEvent::StartLoginFlow { kind });
+    }
+
+    #[cfg(test)]
+    fn enter_pending_chatgpt_login(&mut self, pending_login: PendingChatgptLogin) {
+        self.slop_fork_ui
+            .set_pending_chatgpt_login_for_test(pending_login);
+        let context = self.slop_fork_context();
+        let effects = self.slop_fork_ui.open_login_root(&context);
+        self.apply_slop_fork_effects(effects);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cancel_pending_chatgpt_login(&mut self) {
+        self.handle_slop_fork_event(SlopForkEvent::CancelPendingLogin);
+    }
+
+    pub(crate) fn on_saved_account_rate_limits_refresh_completed(
+        &mut self,
+        updated_account_ids: Vec<String>,
+    ) {
+        let context = self.slop_fork_context();
+        let is_login_view_active = self.bottom_pane.is_view_active(LOGIN_POPUP_VIEW_ID);
+        let effects = self
+            .slop_fork_ui
+            .on_saved_account_rate_limits_refresh_completed(
+                &context,
+                updated_account_ids,
+                is_login_view_active,
+            );
+        self.apply_slop_fork_effects(effects);
+        self.refresh_status_line();
+    }
+
+    pub(crate) fn on_saved_account_quota_touch_completed(
+        &mut self,
+        updated_account_ids: Vec<String>,
+        message: String,
+    ) {
+        let context = self.slop_fork_context();
+        let is_login_view_active = self.bottom_pane.is_view_active(LOGIN_POPUP_VIEW_ID);
+        let effects = self.slop_fork_ui.on_saved_account_quota_touch_completed(
+            &context,
+            updated_account_ids,
+            message,
+            is_login_view_active,
+        );
+        self.apply_slop_fork_effects(effects);
+        self.refresh_status_line();
+    }
+
     fn rename_confirmation_cell(name: &str, thread_id: Option<ThreadId>) -> PlainHistoryCell {
         let resume_cmd = codex_core::util::resume_command(Some(name), thread_id)
             .unwrap_or_else(|| format!("codex resume {name}"));
@@ -8727,6 +8995,7 @@ impl Drop for ChatWidget {
     fn drop(&mut self) {
         self.reset_realtime_conversation_state();
         self.stop_rate_limit_poller();
+        self.stop_external_auth_sync_poller();
     }
 }
 
@@ -8916,22 +9185,6 @@ fn hook_event_label(event_name: codex_protocol::protocol::HookEventName) -> &'st
     match event_name {
         codex_protocol::protocol::HookEventName::SessionStart => "SessionStart",
         codex_protocol::protocol::HookEventName::Stop => "Stop",
-    }
-}
-
-async fn fetch_rate_limits(base_url: String, auth: CodexAuth) -> Vec<RateLimitSnapshot> {
-    match BackendClient::from_auth(base_url, &auth) {
-        Ok(client) => match client.get_rate_limits_many().await {
-            Ok(snapshots) => snapshots,
-            Err(err) => {
-                debug!(error = ?err, "failed to fetch rate limits from /usage");
-                Vec::new()
-            }
-        },
-        Err(err) => {
-            debug!(error = ?err, "failed to construct backend client for rate limits");
-            Vec::new()
-        }
     }
 }
 

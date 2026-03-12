@@ -2387,6 +2387,17 @@ impl App {
             AppEvent::OpenUrlInBrowser { url } => {
                 self.open_url_in_browser(url);
             }
+            AppEvent::AuthStateChanged {
+                message,
+                is_error,
+                is_warning,
+            } => {
+                self.chat_widget
+                    .on_auth_state_changed(message, is_error, is_warning);
+            }
+            AppEvent::SlopFork(event) => {
+                self.chat_widget.handle_slop_fork_event(event);
+            }
             AppEvent::RefreshConnectors { force_refetch } => {
                 self.chat_widget.refresh_connectors(force_refetch);
             }

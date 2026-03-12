@@ -13,11 +13,22 @@ use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::FeedbackAudience;
 use crate::bottom_pane::LocalImageAttachment;
 use crate::bottom_pane::MentionBinding;
+use crate::history_cell::PrefixedWrappedHistoryCell;
 use crate::history_cell::UserHistoryCell;
+use crate::slop_fork::LoginFlowKind;
+use crate::slop_fork::LoginPopupKind;
+use crate::slop_fork::PendingChatgptLogin;
+use crate::slop_fork::PendingDeviceCodeState;
+use crate::slop_fork::SlopForkEvent;
 use crate::test_backend::VT100Backend;
 use crate::tui::FrameRequester;
 use assert_matches::assert_matches;
+use base64::Engine;
+use chrono::TimeZone;
+use chrono::Utc;
+use codex_app_server_protocol::AuthMode;
 use codex_core::CodexAuth;
+use codex_core::auth::AuthDotJson;
 use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
 use codex_core::config::Constrained;
@@ -32,6 +43,8 @@ use codex_core::models_manager::collaboration_mode_presets::CollaborationModesCo
 use codex_core::models_manager::manager::ModelsManager;
 use codex_core::skills::model::SkillMetadata;
 use codex_core::terminal::TerminalName;
+use codex_core::token_data::IdTokenInfo;
+use codex_core::token_data::TokenData;
 use codex_otel::RuntimeMetricsSummary;
 use codex_otel::SessionTelemetry;
 use codex_protocol::ThreadId;
@@ -74,6 +87,7 @@ use codex_protocol::protocol::ExitedReviewModeEvent;
 use codex_protocol::protocol::FileChange;
 use codex_protocol::protocol::ImageGenerationEndEvent;
 use codex_protocol::protocol::ItemCompletedEvent;
+use codex_protocol::protocol::ListSkillsResponseEvent;
 use codex_protocol::protocol::McpStartupCompleteEvent;
 use codex_protocol::protocol::McpStartupStatus;
 use codex_protocol::protocol::McpStartupUpdateEvent;
@@ -85,7 +99,9 @@ use codex_protocol::protocol::RateLimitWindow;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::ReviewTarget;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SkillMetadata as ProtocolSkillMetadata;
 use codex_protocol::protocol::SkillScope;
+use codex_protocol::protocol::SkillsListEntry;
 use codex_protocol::protocol::StreamErrorEvent;
 use codex_protocol::protocol::TerminalInteractionEvent;
 use codex_protocol::protocol::ThreadRolledBackEvent;
@@ -137,6 +153,54 @@ fn invalid_value(candidate: impl Into<String>, allowed: impl Into<String>) -> Co
         candidate: candidate.into(),
         allowed: allowed.into(),
         requirement_source: RequirementSource::Unknown,
+    }
+}
+
+fn fake_jwt(email: &str, account_id: &str) -> String {
+    #[derive(serde::Serialize)]
+    struct Header {
+        alg: &'static str,
+        typ: &'static str,
+    }
+
+    let header = Header {
+        alg: "none",
+        typ: "JWT",
+    };
+    let payload = serde_json::json!({
+        "email": email,
+        "https://api.openai.com/auth": {
+            "chatgpt_plan_type": "pro",
+            "chatgpt_account_id": account_id,
+        }
+    });
+
+    fn b64url_no_pad(bytes: &[u8]) -> String {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+    }
+
+    let header_b64 = b64url_no_pad(&serde_json::to_vec(&header).expect("header"));
+    let payload_b64 = b64url_no_pad(&serde_json::to_vec(&payload).expect("payload"));
+    let signature_b64 = b64url_no_pad(b"sig");
+    format!("{header_b64}.{payload_b64}.{signature_b64}")
+}
+
+fn chatgpt_auth_dot_json(account_id: &str, email: &str) -> AuthDotJson {
+    let mut id_token = IdTokenInfo::default();
+    id_token.email = Some(email.to_string());
+    id_token.chatgpt_account_id = Some(account_id.to_string());
+    id_token.raw_jwt = fake_jwt(email, account_id);
+
+    AuthDotJson {
+        auth_mode: Some(AuthMode::Chatgpt),
+        openai_api_key: None,
+        tokens: Some(TokenData {
+            id_token,
+            access_token: "access".to_string(),
+            refresh_token: "refresh".to_string(),
+            account_id: Some(account_id.to_string()),
+        }),
+        last_refresh: Some(Utc::now()),
     }
 }
 
@@ -1675,7 +1739,10 @@ async fn turn_started_uses_runtime_context_window_before_first_token_count() {
     });
 
     assert_eq!(
-        chat.status_line_value_for_item(&crate::bottom_pane::StatusLineItem::ContextWindowSize),
+        chat.status_line_value_for_item(
+            &crate::bottom_pane::StatusLineItem::ContextWindowSize,
+            &crate::slop_fork::SavedAccountStatusLineFormatter::default(),
+        ),
         Some("950K window".to_string())
     );
     assert_eq!(chat.bottom_pane.context_window_percent(), Some(100));
@@ -1833,6 +1900,7 @@ async fn make_chatwidget_manual(
         rate_limit_warnings: RateLimitWarningState::default(),
         rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
         rate_limit_poller: None,
+        external_auth_sync_poller: None,
         adaptive_chunking: crate::streaming::chunking::AdaptiveChunkingPolicy::default(),
         stream_controller: None,
         plan_stream_controller: None,
@@ -1865,6 +1933,7 @@ async fn make_chatwidget_manual(
         frame_requester: FrameRequester::test_dummy(),
         show_welcome_banner: true,
         startup_tooltip_override: None,
+        slop_fork_ui: SlopForkUi::default(),
         queued_user_messages: VecDeque::new(),
         pending_steers: VecDeque::new(),
         submit_pending_steers_after_interrupt: false,
@@ -7997,6 +8066,1467 @@ async fn fast_status_indicator_is_hidden_when_fast_mode_is_off() {
 }
 
 #[tokio::test]
+async fn login_slash_command_popup_snapshot() {
+    let dir = tempdir().unwrap();
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.config.cli_auth_credentials_store_mode = codex_core::auth::AuthCredentialsStoreMode::File;
+    codex_core::auth::login_with_api_key(
+        &chat.config.codex_home,
+        "sk-test1234",
+        chat.config.cli_auth_credentials_store_mode,
+    )
+    .unwrap();
+
+    chat.dispatch_command(SlashCommand::Accounts);
+
+    let popup = render_bottom_popup(&chat, 100);
+    assert_snapshot!(popup);
+}
+
+#[tokio::test]
+async fn login_api_key_prompt_snapshot() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.open_login_api_key_prompt();
+
+    let popup = render_bottom_popup(&chat, 100);
+    assert_snapshot!(popup);
+}
+
+#[tokio::test]
+async fn login_popup_shows_active_auth_when_saved_accounts_are_empty() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.auth_manager =
+        codex_core::test_support::auth_manager_from_auth(CodexAuth::from_api_key("sk-test1234"));
+    chat.models_manager = Arc::new(ModelsManager::new(
+        chat.config.codex_home.clone(),
+        chat.auth_manager.clone(),
+        None,
+        CollaborationModesConfig::default(),
+    ));
+
+    chat.dispatch_command(SlashCommand::Accounts);
+
+    let popup = render_bottom_popup(&chat, 100);
+    assert!(
+        popup.contains("This session: API key (...1234)"),
+        "expected active auth label in popup, got:\n{popup}"
+    );
+}
+
+#[tokio::test]
+async fn accounts_popup_shows_shared_active_account_when_session_differs() {
+    let dir = tempdir().unwrap();
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+
+    let session_auth_dot_json = chatgpt_auth_dot_json("acct-session-popup", "session@example.com");
+    let shared_auth_dot_json = chatgpt_auth_dot_json("acct-shared-popup", "shared@example.com");
+    codex_core::slop_fork::auth_accounts::upsert_account(
+        &chat.config.codex_home,
+        &session_auth_dot_json,
+    )
+    .unwrap();
+    codex_core::slop_fork::auth_accounts::upsert_account(
+        &chat.config.codex_home,
+        &shared_auth_dot_json,
+    )
+    .unwrap();
+    codex_core::auth::save_auth(
+        &chat.config.codex_home,
+        &shared_auth_dot_json,
+        chat.config.cli_auth_credentials_store_mode,
+    )
+    .unwrap();
+
+    let session_auth = codex_core::auth::auth_for_saved_account(
+        &chat.config.codex_home,
+        session_auth_dot_json,
+        chat.config.cli_auth_credentials_store_mode,
+    )
+    .unwrap();
+    chat.auth_manager = codex_core::test_support::auth_manager_from_auth_with_home(
+        session_auth,
+        chat.config.codex_home.clone(),
+    );
+    chat.models_manager = Arc::new(ModelsManager::new(
+        chat.config.codex_home.clone(),
+        chat.auth_manager.clone(),
+        None,
+        CollaborationModesConfig::default(),
+    ));
+
+    chat.dispatch_command(SlashCommand::Accounts);
+
+    let popup = render_bottom_popup(&chat, 100);
+    assert!(popup.contains("This session: session@example.com (Pro)"));
+    assert!(popup.contains("Shared active account: shared@example.com (Pro)"));
+    assert!(popup.contains("Switch to shared active account"));
+}
+
+#[tokio::test]
+async fn accounts_popup_prompts_to_rename_misnamed_account_files() {
+    let dir = tempdir().unwrap();
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+
+    let auth_dot_json = chatgpt_auth_dot_json("acct-rename-root", "rename-root@example.com");
+    let wrong_path = dir.path().join(".accounts").join("rename-root.json");
+    std::fs::create_dir_all(wrong_path.parent().expect("accounts dir")).unwrap();
+    std::fs::write(
+        &wrong_path,
+        serde_json::to_string_pretty(&auth_dot_json).unwrap(),
+    )
+    .unwrap();
+
+    chat.dispatch_command(SlashCommand::Accounts);
+
+    let popup = render_bottom_popup(&chat, 100);
+    assert!(popup.contains("Rename account files"));
+    assert!(popup.contains("1 misnamed account file(s) are ignored until renamed."));
+}
+
+#[tokio::test]
+async fn rename_account_files_popup_snapshot() {
+    let dir = tempdir().unwrap();
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+
+    let auth_dot_json = chatgpt_auth_dot_json("acct-rename-popup", "rename-popup@example.com");
+    let wrong_path = dir.path().join(".accounts").join("rename-popup.json");
+    std::fs::create_dir_all(wrong_path.parent().expect("accounts dir")).unwrap();
+    std::fs::write(
+        &wrong_path,
+        serde_json::to_string_pretty(&auth_dot_json).unwrap(),
+    )
+    .unwrap();
+
+    chat.open_login_popup(LoginPopupKind::RenameAccountFiles);
+
+    let popup = render_bottom_popup(&chat, 100);
+    assert_snapshot!(popup);
+}
+
+#[tokio::test]
+async fn rename_account_files_popup_enter_on_first_row_requests_bulk_rename() {
+    let dir = tempdir().unwrap();
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+
+    let auth_dot_json = chatgpt_auth_dot_json("acct-rename-all", "rename-all@example.com");
+    let wrong_path = dir.path().join(".accounts").join("rename-all.json");
+    std::fs::create_dir_all(wrong_path.parent().expect("accounts dir")).unwrap();
+    std::fs::write(
+        &wrong_path,
+        serde_json::to_string_pretty(&auth_dot_json).unwrap(),
+    )
+    .unwrap();
+
+    chat.open_login_popup(LoginPopupKind::RenameAccountFiles);
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::SlopFork(
+            SlopForkEvent::RenameAllSavedAccountFiles
+        ))
+    );
+}
+
+#[tokio::test]
+async fn login_settings_popup_esc_returns_to_root_menu() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.open_login_popup(LoginPopupKind::Settings);
+    chat.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::SlopFork(SlopForkEvent::OpenLoginPopup {
+            kind: LoginPopupKind::Root
+        }))
+    );
+    assert_matches!(rx.try_recv(), Err(TryRecvError::Empty));
+}
+
+#[tokio::test]
+async fn login_settings_popup_snapshot() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.open_login_popup(LoginPopupKind::Settings);
+
+    let popup = render_bottom_popup(&chat, 100);
+    assert_snapshot!(popup);
+}
+
+#[tokio::test]
+async fn login_root_popup_does_not_start_saved_account_refresh() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.open_login_popup(LoginPopupKind::Root);
+
+    assert!(
+        !chat
+            .slop_fork_ui
+            .saved_account_rate_limits_refresh_in_flight()
+    );
+}
+
+#[tokio::test]
+async fn login_account_limits_popup_snapshot() {
+    let dir = tempdir().unwrap();
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.config.cli_auth_credentials_store_mode = codex_core::auth::AuthCredentialsStoreMode::File;
+
+    let auth_dot_json = chatgpt_auth_dot_json("acct-login-limits", "limits@example.com");
+    let account_id = codex_core::slop_fork::auth_accounts::upsert_account(
+        &chat.config.codex_home,
+        &auth_dot_json,
+    )
+    .unwrap()
+    .expect("saved account id");
+    codex_core::auth::save_auth(
+        &chat.config.codex_home,
+        &auth_dot_json,
+        chat.config.cli_auth_credentials_store_mode,
+    )
+    .unwrap();
+    chat.auth_manager = codex_core::test_support::auth_manager_from_auth(
+        CodexAuth::from_saved_account(
+            &chat.config.codex_home,
+            auth_dot_json,
+            chat.config.cli_auth_credentials_store_mode,
+        )
+        .expect("auth"),
+    );
+    chat.models_manager = Arc::new(ModelsManager::new(
+        chat.config.codex_home.clone(),
+        chat.auth_manager.clone(),
+        None,
+        CollaborationModesConfig::default(),
+    ));
+
+    let observed_at = Utc
+        .with_ymd_and_hms(2100, 1, 1, 10, 0, 0)
+        .single()
+        .expect("valid timestamp");
+    let mut rate_limit_snapshot = snapshot(42.0);
+    rate_limit_snapshot.plan_type = Some(PlanType::Pro);
+    rate_limit_snapshot
+        .primary
+        .as_mut()
+        .expect("primary")
+        .resets_at = Some((observed_at + chrono::Duration::minutes(29)).timestamp());
+    codex_core::slop_fork::account_rate_limits::record_rate_limit_snapshot(
+        &chat.config.codex_home,
+        &account_id,
+        Some("pro"),
+        &rate_limit_snapshot,
+        observed_at,
+    )
+    .unwrap();
+
+    chat.open_login_popup(LoginPopupKind::AccountLimits);
+
+    let popup = render_bottom_popup(&chat, 100);
+    assert_snapshot!(popup);
+}
+
+#[tokio::test]
+async fn login_account_limits_popup_refreshing_snapshot() {
+    let dir = tempdir().unwrap();
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.config.cli_auth_credentials_store_mode = codex_core::auth::AuthCredentialsStoreMode::File;
+
+    let auth_dot_json =
+        chatgpt_auth_dot_json("acct-login-limits-refreshing", "refreshing@example.com");
+    let account_id = codex_core::slop_fork::auth_accounts::upsert_account(
+        &chat.config.codex_home,
+        &auth_dot_json,
+    )
+    .unwrap()
+    .expect("saved account id");
+    codex_core::auth::save_auth(
+        &chat.config.codex_home,
+        &auth_dot_json,
+        chat.config.cli_auth_credentials_store_mode,
+    )
+    .unwrap();
+    chat.slop_fork_ui
+        .set_saved_account_rate_limits_refresh_for_test(Some(vec![account_id]));
+
+    chat.open_login_popup(LoginPopupKind::AccountLimits);
+
+    let popup = render_bottom_popup(&chat, 100);
+    assert_snapshot!(popup);
+}
+
+#[tokio::test]
+async fn login_account_limits_popup_refreshing_account_row_shows_busy_feedback() {
+    let dir = tempdir().unwrap();
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.config.cli_auth_credentials_store_mode = codex_core::auth::AuthCredentialsStoreMode::File;
+
+    let auth_dot_json = chatgpt_auth_dot_json("acct-login-limits-busy", "busy-refresh@example.com");
+    let account_id = codex_core::slop_fork::auth_accounts::upsert_account(
+        &chat.config.codex_home,
+        &auth_dot_json,
+    )
+    .unwrap()
+    .expect("saved account id");
+    chat.slop_fork_ui
+        .set_saved_account_rate_limits_refresh_for_test(Some(vec![account_id]));
+
+    chat.open_login_popup(LoginPopupKind::AccountLimits);
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+
+    let cells = drain_insert_history(&mut rx);
+    let blob = lines_to_single_string(cells.last().expect("busy refresh info event"));
+    assert!(blob.contains("Saved account limits are already refreshing."));
+    assert!(blob.contains("Wait for the current refresh to finish before retrying."));
+}
+
+#[tokio::test]
+async fn login_account_limits_popup_highlights_limit_window_labels() {
+    let dir = tempdir().unwrap();
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.config.cli_auth_credentials_store_mode = codex_core::auth::AuthCredentialsStoreMode::File;
+
+    let auth_dot_json =
+        chatgpt_auth_dot_json("acct-login-limits-highlight", "highlight@example.com");
+    let account_id = codex_core::slop_fork::auth_accounts::upsert_account(
+        &chat.config.codex_home,
+        &auth_dot_json,
+    )
+    .unwrap()
+    .expect("saved account id");
+    codex_core::auth::save_auth(
+        &chat.config.codex_home,
+        &auth_dot_json,
+        chat.config.cli_auth_credentials_store_mode,
+    )
+    .unwrap();
+
+    let observed_at = Utc
+        .with_ymd_and_hms(2100, 1, 1, 12, 0, 0)
+        .single()
+        .expect("valid timestamp");
+    let rate_limit_snapshot = RateLimitSnapshot {
+        limit_id: None,
+        limit_name: None,
+        primary: Some(RateLimitWindow {
+            used_percent: 6.0,
+            window_minutes: Some(300),
+            resets_at: Some((observed_at + chrono::Duration::hours(4)).timestamp()),
+        }),
+        secondary: Some(RateLimitWindow {
+            used_percent: 13.0,
+            window_minutes: Some(7 * 24 * 60),
+            resets_at: Some((observed_at + chrono::Duration::days(6)).timestamp()),
+        }),
+        credits: None,
+        plan_type: Some(PlanType::Pro),
+    };
+    codex_core::slop_fork::account_rate_limits::record_rate_limit_snapshot(
+        &chat.config.codex_home,
+        &account_id,
+        Some("pro"),
+        &rate_limit_snapshot,
+        observed_at,
+    )
+    .unwrap();
+
+    chat.open_login_popup(LoginPopupKind::AccountLimits);
+
+    let popup = render_bottom_popup(&chat, 120);
+    assert!(popup.contains("5h   6%"));
+    assert!(popup.contains("weekly  13%"));
+
+    let width = 120;
+    let height = chat.desired_height(width);
+    let area = Rect::new(0, 0, width, height);
+    let mut buf = Buffer::empty(area);
+    chat.render(area, &mut buf);
+
+    assert_popup_token_style_in_row(
+        &buf,
+        area,
+        "5h   6% until",
+        "5h",
+        Color::Reset,
+        Modifier::DIM,
+    );
+    assert_popup_token_style_in_row(
+        &buf,
+        area,
+        "weekly  13% until",
+        "weekly",
+        Color::Reset,
+        Modifier::DIM,
+    );
+    assert_popup_token_style_in_row(
+        &buf,
+        area,
+        "5h   6% until",
+        "6%",
+        Color::Reset,
+        Modifier::UNDERLINED,
+    );
+    assert_popup_token_style_in_row(
+        &buf,
+        area,
+        "weekly  13% until",
+        "13%",
+        Color::Reset,
+        Modifier::UNDERLINED,
+    );
+}
+
+#[tokio::test]
+async fn login_account_limits_popup_only_marks_snapshots_stale_when_refresh_is_due() {
+    let dir = tempdir().unwrap();
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.config.cli_auth_credentials_store_mode = codex_core::auth::AuthCredentialsStoreMode::File;
+
+    let auth_dot_json = chatgpt_auth_dot_json("acct-login-limits-fresh", "fresh@example.com");
+    let account_id = codex_core::slop_fork::auth_accounts::upsert_account(
+        &chat.config.codex_home,
+        &auth_dot_json,
+    )
+    .unwrap()
+    .expect("saved account id");
+    codex_core::auth::save_auth(
+        &chat.config.codex_home,
+        &auth_dot_json,
+        chat.config.cli_auth_credentials_store_mode,
+    )
+    .unwrap();
+
+    let now = Utc::now();
+    let observed_at = now - chrono::Duration::minutes(20);
+    let rate_limit_snapshot = RateLimitSnapshot {
+        limit_id: Some("codex".to_string()),
+        limit_name: Some("codex".to_string()),
+        primary: Some(RateLimitWindow {
+            used_percent: 42.0,
+            window_minutes: Some(300),
+            resets_at: Some((now + chrono::Duration::hours(2)).timestamp()),
+        }),
+        secondary: None,
+        credits: None,
+        plan_type: Some(PlanType::Pro),
+    };
+    codex_core::slop_fork::account_rate_limits::record_rate_limit_snapshot(
+        &chat.config.codex_home,
+        &account_id,
+        Some("pro"),
+        &rate_limit_snapshot,
+        observed_at,
+    )
+    .unwrap();
+
+    chat.open_login_popup(LoginPopupKind::AccountLimits);
+
+    let popup = render_bottom_popup(&chat, 100);
+    assert!(!popup.contains("stale "));
+    assert!(popup.contains("No saved ChatGPT account currently needs a refresh."));
+}
+
+#[tokio::test]
+async fn switch_saved_account_popup_shows_rate_limit_summary() {
+    let dir = tempdir().unwrap();
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.config.cli_auth_credentials_store_mode = codex_core::auth::AuthCredentialsStoreMode::File;
+
+    let auth_dot_json = chatgpt_auth_dot_json("acct-switch-summary", "switch@example.com");
+    let account_id = codex_core::slop_fork::auth_accounts::upsert_account(
+        &chat.config.codex_home,
+        &auth_dot_json,
+    )
+    .unwrap()
+    .expect("saved account id");
+    codex_core::auth::save_auth(
+        &chat.config.codex_home,
+        &auth_dot_json,
+        chat.config.cli_auth_credentials_store_mode,
+    )
+    .unwrap();
+    let observed_at = Utc
+        .with_ymd_and_hms(2100, 1, 1, 11, 0, 0)
+        .single()
+        .expect("valid timestamp");
+    let mut rate_limit_snapshot = snapshot(55.0);
+    rate_limit_snapshot
+        .primary
+        .as_mut()
+        .expect("primary")
+        .resets_at = Some((observed_at + chrono::Duration::minutes(45)).timestamp());
+    codex_core::slop_fork::account_rate_limits::record_rate_limit_snapshot(
+        &chat.config.codex_home,
+        &account_id,
+        Some("pro"),
+        &rate_limit_snapshot,
+        observed_at,
+    )
+    .unwrap();
+
+    chat.open_login_popup(LoginPopupKind::UseAccount);
+
+    let popup = render_bottom_popup(&chat, 100);
+    assert!(popup.contains("1h  55%"));
+}
+
+#[tokio::test]
+async fn login_switch_account_popup_snapshot() {
+    let dir = tempdir().unwrap();
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.config.cli_auth_credentials_store_mode = codex_core::auth::AuthCredentialsStoreMode::File;
+
+    let auth_dot_json = chatgpt_auth_dot_json("acct-switch-popup", "switch-popup@example.com");
+    let account_id = codex_core::slop_fork::auth_accounts::upsert_account(
+        &chat.config.codex_home,
+        &auth_dot_json,
+    )
+    .unwrap()
+    .expect("saved account id");
+    codex_core::auth::save_auth(
+        &chat.config.codex_home,
+        &auth_dot_json,
+        chat.config.cli_auth_credentials_store_mode,
+    )
+    .unwrap();
+
+    let observed_at = Utc
+        .with_ymd_and_hms(2100, 1, 1, 11, 0, 0)
+        .single()
+        .expect("valid timestamp");
+    let mut rate_limit_snapshot = snapshot(55.0);
+    rate_limit_snapshot
+        .primary
+        .as_mut()
+        .expect("primary")
+        .resets_at = Some((observed_at + chrono::Duration::minutes(45)).timestamp());
+    codex_core::slop_fork::account_rate_limits::record_rate_limit_snapshot(
+        &chat.config.codex_home,
+        &account_id,
+        Some("pro"),
+        &rate_limit_snapshot,
+        observed_at,
+    )
+    .unwrap();
+
+    chat.open_login_popup(LoginPopupKind::UseAccount);
+
+    let popup = render_bottom_popup(&chat, 100);
+    assert_snapshot!(popup);
+}
+
+#[tokio::test]
+async fn login_account_limits_popup_force_refresh_all_dispatches_event() {
+    let dir = tempdir().unwrap();
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.config.cli_auth_credentials_store_mode = codex_core::auth::AuthCredentialsStoreMode::File;
+
+    let auth_dot_json = chatgpt_auth_dot_json("acct-login-limits-force", "force@example.com");
+    codex_core::slop_fork::auth_accounts::upsert_account(&chat.config.codex_home, &auth_dot_json)
+        .unwrap()
+        .expect("saved account id");
+
+    chat.open_login_popup(LoginPopupKind::AccountLimits);
+    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::SlopFork(
+            SlopForkEvent::RefreshAllSavedAccountRateLimits
+        ))
+    );
+}
+
+#[tokio::test]
+async fn login_account_limits_popup_check_and_start_untouched_quotas_dispatches_event() {
+    let dir = tempdir().unwrap();
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.config.cli_auth_credentials_store_mode = codex_core::auth::AuthCredentialsStoreMode::File;
+
+    let auth_dot_json = chatgpt_auth_dot_json("acct-login-limits-touch", "touch@example.com");
+    codex_core::slop_fork::auth_accounts::upsert_account(&chat.config.codex_home, &auth_dot_json)
+        .unwrap()
+        .expect("saved account id");
+
+    chat.open_login_popup(LoginPopupKind::AccountLimits);
+    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::SlopFork(
+            SlopForkEvent::RefreshAllSavedAccountRateLimitsAndStartQuotas
+        ))
+    );
+}
+
+fn assert_popup_token_style_in_row(
+    buf: &Buffer,
+    area: Rect,
+    row_fragment: &str,
+    token: &str,
+    expected_fg: Color,
+    expected_modifier: Modifier,
+) {
+    for row in 0..area.height {
+        let line = (0..area.width)
+            .map(|col| {
+                let symbol = buf[(area.x + col, area.y + row)].symbol();
+                if symbol.is_empty() {
+                    ' '
+                } else {
+                    symbol.chars().next().expect("symbol char")
+                }
+            })
+            .collect::<String>();
+        if !line.contains(row_fragment) {
+            continue;
+        }
+        let byte_idx = line
+            .find(token)
+            .unwrap_or_else(|| panic!("token {token:?} not found in row {row_fragment:?}"));
+        let col_idx = line[..byte_idx].chars().count();
+        for offset in 0..token.len() {
+            let style = buf[(area.x + (col_idx + offset) as u16, area.y + row)].style();
+            assert_eq!(style.fg, Some(expected_fg));
+            assert!(
+                style.add_modifier.contains(expected_modifier),
+                "token={token:?} row_fragment={row_fragment:?} style={style:?}"
+            );
+        }
+        return;
+    }
+
+    panic!("row fragment {row_fragment:?} not found in popup");
+}
+
+#[test]
+fn saved_account_rate_limit_refresh_is_due_for_active_chatgpt_account_without_snapshot() {
+    let dir = tempdir().unwrap();
+    let auth_dot_json = chatgpt_auth_dot_json("acct-refresh-due", "refresh@example.com");
+    let account_id =
+        codex_core::slop_fork::auth_accounts::upsert_account(dir.path(), &auth_dot_json)
+            .unwrap()
+            .expect("saved account id");
+    let account = codex_core::slop_fork::auth_accounts::list_accounts(dir.path())
+        .unwrap()
+        .into_iter()
+        .find(|account| account.id == account_id)
+        .expect("stored account");
+
+    assert!(
+        crate::slop_fork::saved_account_rate_limit_refresh_is_due(&account, None, Utc::now()),
+        "missing snapshots should be refreshable even for the currently active saved account"
+    );
+}
+
+#[tokio::test]
+async fn login_settings_popup_space_toggles_selected_setting_without_saving() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.open_login_popup(LoginPopupKind::Settings);
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+
+    assert_matches!(rx.try_recv(), Err(TryRecvError::Empty));
+    assert!(!chat.bottom_pane.no_modal_or_popup_active());
+    let popup = render_bottom_popup(&chat, 100);
+    assert!(popup.contains("[ ] Auto switch accounts"));
+}
+
+#[tokio::test]
+async fn login_settings_popup_enter_saves_and_closes_login_menu() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.open_login_popup(LoginPopupKind::Settings);
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::SlopFork(SlopForkEvent::SaveLoginSettings {
+            settings: crate::slop_fork::LoginSettingsState {
+                auto_switch_accounts_on_rate_limit: false,
+                api_key_fallback_on_all_accounts_limited: false,
+                auto_start_five_hour_quota: false,
+                auto_start_weekly_quota: false,
+                follow_external_account_switches: false,
+                show_average_account_limits_in_status_line: false,
+            },
+        }))
+    );
+    assert_matches!(rx.try_recv(), Err(TryRecvError::Empty));
+    assert!(chat.bottom_pane.no_modal_or_popup_active());
+}
+
+#[tokio::test]
+async fn force_refresh_all_accounts_enables_auto_touch_when_weekly_toggle_is_on() {
+    let dir = tempdir().unwrap();
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+
+    codex_core::slop_fork::update_slop_fork_config(&chat.config.codex_home, |config| {
+        config.auto_start_five_hour_quota = false;
+        config.auto_start_weekly_quota = true;
+    })
+    .unwrap();
+
+    chat.slop_fork_ui
+        .set_saved_account_rate_limits_force_refresh_all_for_test(vec!["acct-1".to_string()]);
+
+    assert_eq!(
+        chat.slop_fork_ui
+            .saved_account_rate_limits_auto_touch_request_for_test(
+                &chat.config.codex_home,
+                vec!["acct-1".to_string()],
+            ),
+        Some((
+            ["acct-1".to_string()].into_iter().collect(),
+            crate::slop_fork::TouchQuotaMode::Automatic {
+                start_five_hour: false,
+                start_weekly: true,
+            },
+        ))
+    );
+}
+
+#[tokio::test]
+async fn single_account_refresh_does_not_enable_auto_touch() {
+    let dir = tempdir().unwrap();
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+
+    codex_core::slop_fork::update_slop_fork_config(&chat.config.codex_home, |config| {
+        config.auto_start_five_hour_quota = false;
+        config.auto_start_weekly_quota = true;
+    })
+    .unwrap();
+
+    chat.slop_fork_ui
+        .set_saved_account_rate_limits_refresh_for_test(Some(vec!["acct-1".to_string()]));
+
+    assert_eq!(
+        chat.slop_fork_ui
+            .saved_account_rate_limits_auto_touch_request_for_test(
+                &chat.config.codex_home,
+                vec!["acct-1".to_string()],
+            ),
+        None
+    );
+}
+
+#[tokio::test]
+async fn force_refresh_all_accounts_only_auto_touches_updated_accounts() {
+    let dir = tempdir().unwrap();
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+
+    codex_core::slop_fork::update_slop_fork_config(&chat.config.codex_home, |config| {
+        config.auto_start_five_hour_quota = false;
+        config.auto_start_weekly_quota = true;
+    })
+    .unwrap();
+
+    chat.slop_fork_ui
+        .set_saved_account_rate_limits_force_refresh_all_for_test(vec![
+            "acct-1".to_string(),
+            "acct-2".to_string(),
+        ]);
+
+    assert_eq!(
+        chat.slop_fork_ui
+            .saved_account_rate_limits_auto_touch_request_for_test(
+                &chat.config.codex_home,
+                vec!["acct-2".to_string()],
+            ),
+        Some((
+            ["acct-2".to_string()].into_iter().collect(),
+            crate::slop_fork::TouchQuotaMode::Automatic {
+                start_five_hour: false,
+                start_weekly: true,
+            },
+        ))
+    );
+}
+
+#[tokio::test]
+async fn force_refresh_all_request_does_not_relabel_inflight_refresh_target() {
+    let dir = tempdir().unwrap();
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+
+    codex_core::slop_fork::update_slop_fork_config(&chat.config.codex_home, |config| {
+        config.auto_start_five_hour_quota = false;
+        config.auto_start_weekly_quota = true;
+    })
+    .unwrap();
+
+    chat.slop_fork_ui
+        .set_saved_account_rate_limits_refresh_for_test(Some(vec!["acct-1".to_string()]));
+    let context = chat.slop_fork_context();
+    chat.slop_fork_ui
+        .refresh_all_saved_account_rate_limits(&context);
+
+    assert_eq!(
+        chat.slop_fork_ui
+            .saved_account_rate_limits_auto_touch_request_for_test(
+                &chat.config.codex_home,
+                vec!["acct-1".to_string()],
+            ),
+        None
+    );
+}
+
+#[tokio::test]
+async fn manual_touch_request_ignores_auto_start_settings() {
+    let dir = tempdir().unwrap();
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+
+    codex_core::slop_fork::update_slop_fork_config(&chat.config.codex_home, |config| {
+        config.auto_start_five_hour_quota = false;
+        config.auto_start_weekly_quota = false;
+    })
+    .unwrap();
+
+    chat.slop_fork_ui
+        .set_saved_account_rate_limits_force_refresh_all_and_touch_for_test(vec![
+            "acct-1".to_string(),
+        ]);
+
+    assert_eq!(
+        chat.slop_fork_ui
+            .saved_account_rate_limits_auto_touch_request_for_test(
+                &chat.config.codex_home,
+                vec!["acct-1".to_string()],
+            ),
+        Some((
+            ["acct-1".to_string()].into_iter().collect(),
+            crate::slop_fork::TouchQuotaMode::Manual {
+                start_five_hour: true,
+                start_weekly: true,
+            },
+        ))
+    );
+}
+
+#[tokio::test]
+async fn status_line_limits_show_saved_account_average_when_enabled() {
+    let dir = tempdir().expect("temp dir");
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.config.tui_status_line = Some(vec![
+        "five-hour-limit".to_string(),
+        "weekly-limit".to_string(),
+    ]);
+
+    let first = chatgpt_auth_dot_json("acct-average-1", "average-1@example.com");
+    let second = chatgpt_auth_dot_json("acct-average-2", "average-2@example.com");
+    codex_core::slop_fork::auth_accounts::upsert_account(&chat.config.codex_home, &first)
+        .expect("save first account");
+    codex_core::slop_fork::auth_accounts::upsert_account(&chat.config.codex_home, &second)
+        .expect("save second account");
+    codex_core::slop_fork::account_rate_limits::record_rate_limit_snapshot(
+        &chat.config.codex_home,
+        "acct-average-1",
+        Some("pro"),
+        &RateLimitSnapshot {
+            limit_id: Some("codex".to_string()),
+            limit_name: Some("codex".to_string()),
+            primary: Some(RateLimitWindow {
+                used_percent: 40.0,
+                window_minutes: Some(300),
+                resets_at: None,
+            }),
+            secondary: Some(RateLimitWindow {
+                used_percent: 80.0,
+                window_minutes: Some(10_080),
+                resets_at: None,
+            }),
+            credits: None,
+            plan_type: None,
+        },
+        Utc::now(),
+    )
+    .expect("record first account limits");
+    codex_core::slop_fork::account_rate_limits::record_rate_limit_snapshot(
+        &chat.config.codex_home,
+        "acct-average-2",
+        Some("pro"),
+        &RateLimitSnapshot {
+            limit_id: Some("codex".to_string()),
+            limit_name: Some("codex".to_string()),
+            primary: Some(RateLimitWindow {
+                used_percent: 20.0,
+                window_minutes: Some(300),
+                resets_at: None,
+            }),
+            secondary: Some(RateLimitWindow {
+                used_percent: 60.0,
+                window_minutes: Some(10_080),
+                resets_at: None,
+            }),
+            credits: None,
+            plan_type: None,
+        },
+        Utc::now(),
+    )
+    .expect("record second account limits");
+    codex_core::slop_fork::update_slop_fork_config(&chat.config.codex_home, |config| {
+        config.show_average_account_limits_in_status_line = true;
+    })
+    .expect("enable status line averages");
+
+    chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
+        limit_id: Some("codex".to_string()),
+        limit_name: Some("codex".to_string()),
+        primary: Some(RateLimitWindow {
+            used_percent: 5.0,
+            window_minutes: Some(300),
+            resets_at: None,
+        }),
+        secondary: Some(RateLimitWindow {
+            used_percent: 1.0,
+            window_minutes: Some(10_080),
+            resets_at: None,
+        }),
+        credits: None,
+        plan_type: None,
+    }));
+
+    assert_eq!(
+        status_line_text(&chat),
+        Some("5h 95% (70%) · weekly 99% (30%)".to_string())
+    );
+}
+
+#[tokio::test]
+async fn saved_account_refresh_completion_updates_status_line_limit_average() {
+    let dir = tempdir().expect("temp dir");
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.config.tui_status_line = Some(vec![
+        "five-hour-limit".to_string(),
+        "weekly-limit".to_string(),
+    ]);
+
+    let first = chatgpt_auth_dot_json("acct-average-refresh-1", "average-refresh-1@example.com");
+    let second = chatgpt_auth_dot_json("acct-average-refresh-2", "average-refresh-2@example.com");
+    codex_core::slop_fork::auth_accounts::upsert_account(&chat.config.codex_home, &first)
+        .expect("save first account");
+    codex_core::slop_fork::auth_accounts::upsert_account(&chat.config.codex_home, &second)
+        .expect("save second account");
+    codex_core::slop_fork::update_slop_fork_config(&chat.config.codex_home, |config| {
+        config.show_average_account_limits_in_status_line = true;
+    })
+    .expect("enable status line averages");
+    codex_core::slop_fork::account_rate_limits::record_rate_limit_snapshot(
+        &chat.config.codex_home,
+        "acct-average-refresh-1",
+        Some("pro"),
+        &RateLimitSnapshot {
+            limit_id: Some("codex".to_string()),
+            limit_name: Some("codex".to_string()),
+            primary: Some(RateLimitWindow {
+                used_percent: 40.0,
+                window_minutes: Some(300),
+                resets_at: None,
+            }),
+            secondary: Some(RateLimitWindow {
+                used_percent: 80.0,
+                window_minutes: Some(10_080),
+                resets_at: None,
+            }),
+            credits: None,
+            plan_type: None,
+        },
+        Utc::now(),
+    )
+    .expect("record first account limits");
+    codex_core::slop_fork::account_rate_limits::record_rate_limit_snapshot(
+        &chat.config.codex_home,
+        "acct-average-refresh-2",
+        Some("pro"),
+        &RateLimitSnapshot {
+            limit_id: Some("codex".to_string()),
+            limit_name: Some("codex".to_string()),
+            primary: Some(RateLimitWindow {
+                used_percent: 20.0,
+                window_minutes: Some(300),
+                resets_at: None,
+            }),
+            secondary: Some(RateLimitWindow {
+                used_percent: 60.0,
+                window_minutes: Some(10_080),
+                resets_at: None,
+            }),
+            credits: None,
+            plan_type: None,
+        },
+        Utc::now(),
+    )
+    .expect("record second account limits");
+
+    chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
+        limit_id: Some("codex".to_string()),
+        limit_name: Some("codex".to_string()),
+        primary: Some(RateLimitWindow {
+            used_percent: 5.0,
+            window_minutes: Some(300),
+            resets_at: None,
+        }),
+        secondary: Some(RateLimitWindow {
+            used_percent: 1.0,
+            window_minutes: Some(10_080),
+            resets_at: None,
+        }),
+        credits: None,
+        plan_type: None,
+    }));
+    assert_eq!(
+        status_line_text(&chat),
+        Some("5h 95% (70%) · weekly 99% (30%)".to_string())
+    );
+
+    codex_core::slop_fork::account_rate_limits::record_rate_limit_snapshot(
+        &chat.config.codex_home,
+        "acct-average-refresh-2",
+        Some("pro"),
+        &RateLimitSnapshot {
+            limit_id: Some("codex".to_string()),
+            limit_name: Some("codex".to_string()),
+            primary: Some(RateLimitWindow {
+                used_percent: 0.0,
+                window_minutes: Some(300),
+                resets_at: None,
+            }),
+            secondary: Some(RateLimitWindow {
+                used_percent: 0.0,
+                window_minutes: Some(10_080),
+                resets_at: None,
+            }),
+            credits: None,
+            plan_type: None,
+        },
+        Utc::now(),
+    )
+    .expect("record refreshed second account limits");
+
+    chat.on_saved_account_rate_limits_refresh_completed(vec!["acct-average-refresh-2".to_string()]);
+
+    assert_eq!(
+        status_line_text(&chat),
+        Some("5h 95% (80%) · weekly 99% (60%)".to_string())
+    );
+}
+
+#[tokio::test]
+async fn ctrl_c_cancels_pending_chatgpt_login_without_interrupting_core() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    let wait_handle = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+    chat.enter_pending_chatgpt_login(PendingChatgptLogin::DeviceCode {
+        state: PendingDeviceCodeState::Requesting,
+        wait_handle,
+    });
+
+    assert!(!chat.bottom_pane.is_task_running());
+    assert!(!chat.bottom_pane.no_modal_or_popup_active());
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+    assert_eq!(chat.bottom_pane.composer_text(), "");
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::SlopFork(SlopForkEvent::CancelPendingLogin))
+    );
+    chat.cancel_pending_chatgpt_login();
+
+    assert!(chat.slop_fork_ui.pending_chatgpt_login().is_none());
+    assert!(chat.bottom_pane.no_modal_or_popup_active());
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+
+    let cells = drain_insert_history(&mut rx);
+    let blob = lines_to_single_string(cells.last().unwrap());
+    assert!(blob.contains("Cancelled ChatGPT login."));
+}
+
+#[tokio::test]
+async fn pending_chatgpt_login_popup_snapshot() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+    let wait_handle = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+    chat.enter_pending_chatgpt_login(PendingChatgptLogin::DeviceCode {
+        state: PendingDeviceCodeState::Ready {
+            verification_url: "https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback".to_string(),
+            user_code: "ABCD-EFGH".to_string(),
+        },
+        wait_handle,
+    });
+
+    assert!(!chat.bottom_pane.is_task_running());
+    let popup = render_bottom_popup(&chat, 100);
+    assert_snapshot!(popup);
+}
+
+#[tokio::test]
+async fn pending_browser_chatgpt_login_popup_left_aligns_status_body() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+
+    chat.start_login_flow(LoginFlowKind::Browser);
+
+    let popup = render_bottom_popup(&chat, 120);
+    assert!(popup.contains("\n  Open the sign-in link and finish the browser flow."));
+    assert!(popup.contains("\n  https://auth.openai.com/oauth/authorize?"));
+    assert!(!popup.contains("\n      Open the sign-in link"));
+    chat.cancel_pending_chatgpt_login();
+}
+
+#[tokio::test]
+async fn pending_chatgpt_login_does_not_block_queued_autosend() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.queued_user_messages
+        .push_back(UserMessage::from("check queued send".to_string()));
+    chat.refresh_pending_input_preview();
+
+    let wait_handle = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+    chat.enter_pending_chatgpt_login(PendingChatgptLogin::DeviceCode {
+        state: PendingDeviceCodeState::Requesting,
+        wait_handle,
+    });
+
+    chat.maybe_send_next_queued_input();
+
+    match next_submit_op(&mut op_rx) {
+        Op::UserTurn { items, .. } => {
+            let texts = items
+                .into_iter()
+                .filter_map(|item| match item {
+                    UserInput::Text { text, .. } => Some(text),
+                    UserInput::Image { .. }
+                    | UserInput::LocalImage { .. }
+                    | UserInput::Skill { .. }
+                    | UserInput::Mention { .. } => None,
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(texts, vec!["check queued send".to_string()]);
+        }
+        other => panic!("expected Op::UserTurn while login popup is open, got {other:?}"),
+    }
+    assert!(chat.queued_user_messages.is_empty());
+}
+
+#[tokio::test]
+async fn auto_every_interval_snapshot() {
+    let dir = tempdir().unwrap();
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.thread_id = Some(ThreadId::new());
+
+    chat.dispatch_command_with_args(
+        SlashCommand::Auto,
+        "every 30s check deploy".to_string(),
+        Vec::new(),
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    let blob = lines_to_single_string(cells.last().unwrap());
+    assert_snapshot!(blob);
+}
+
+#[tokio::test]
+async fn auto_every_cron_snapshot() {
+    let dir = tempdir().unwrap();
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.thread_id = Some(ThreadId::new());
+
+    chat.dispatch_command_with_args(
+        SlashCommand::Auto,
+        "every */15 * * * * check deploy".to_string(),
+        Vec::new(),
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    let blob = lines_to_single_string(cells.last().unwrap());
+    assert_snapshot!(blob);
+}
+
+#[tokio::test]
+async fn auto_list_snapshot() {
+    let dir = tempdir().unwrap();
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.thread_id = Some(ThreadId::new());
+
+    chat.dispatch_command_with_args(
+        SlashCommand::Auto,
+        "on-complete --times 2 continue working on this".to_string(),
+        Vec::new(),
+    );
+    drain_insert_history(&mut rx);
+
+    chat.dispatch_command_with_args(
+        SlashCommand::Auto,
+        "every 10m run tests".to_string(),
+        Vec::new(),
+    );
+    drain_insert_history(&mut rx);
+
+    chat.dispatch_command_with_args(SlashCommand::Auto, "list".to_string(), Vec::new());
+
+    let cells = drain_insert_history(&mut rx);
+    let blob = lines_to_single_string(cells.last().unwrap());
+    assert_snapshot!(blob);
+}
+
+#[tokio::test]
+async fn on_complete_automation_submits_prompt_when_task_finishes() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.thread_id = Some(ThreadId::new());
+
+    chat.dispatch_command_with_args(
+        SlashCommand::Auto,
+        "on-complete continue working on this".to_string(),
+        Vec::new(),
+    );
+
+    chat.on_task_complete(Some("next step: update tests".to_string()), false);
+
+    match next_submit_op(&mut op_rx) {
+        Op::UserTurn { items, .. } => {
+            let texts = items
+                .into_iter()
+                .filter_map(|item| match item {
+                    UserInput::Text { text, .. } => Some(text),
+                    UserInput::Image { .. }
+                    | UserInput::LocalImage { .. }
+                    | UserInput::Skill { .. }
+                    | UserInput::Mention { .. } => None,
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(texts, vec!["continue working on this".to_string()]);
+        }
+        other => panic!("expected Op::UserTurn from on-complete automation, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn automation_policy_events_from_other_threads_are_ignored() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.thread_id = Some(ThreadId::new());
+
+    let effects = chat.slop_fork_ui.handle_event(
+        &chat.slop_fork_context(),
+        SlopForkEvent::AutomationPolicyEvaluated {
+            thread_id: ThreadId::new().to_string(),
+            runtime_id: "session:auto-1".to_string(),
+            decision: codex_core::slop_fork::automation::AutomationPolicyDecision::UseDefault {
+                state: None,
+            },
+        },
+    );
+    chat.apply_slop_fork_effects(effects);
+
+    assert_eq!(op_rx.try_recv(), Err(TryRecvError::Empty));
+}
+
+#[tokio::test]
+async fn due_auto_timer_submits_prompt_when_session_is_idle() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+
+    chat.dispatch_command_with_args(
+        SlashCommand::Auto,
+        "every --scope global 10m check deploy".to_string(),
+        Vec::new(),
+    );
+
+    let state_path =
+        codex_core::slop_fork::automation::automation_state_path(&chat.config.codex_home);
+    let mut state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&state_path).expect("state file"))
+            .expect("automation state json");
+    state["threads"][&thread_id.to_string()]["runtime_states"]["global:auto-1"]["next_fire_at"] =
+        serde_json::json!(Local::now().timestamp() - 1);
+    std::fs::write(
+        &state_path,
+        serde_json::to_string_pretty(&state).expect("serialize automation state"),
+    )
+    .expect("rewrite automation state");
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+
+    chat.poll_timer_automations();
+
+    match next_submit_op(&mut op_rx) {
+        Op::UserTurn { items, .. } => {
+            let texts = items
+                .into_iter()
+                .filter_map(|item| match item {
+                    UserInput::Text { text, .. } => Some(text),
+                    UserInput::Image { .. }
+                    | UserInput::LocalImage { .. }
+                    | UserInput::Skill { .. }
+                    | UserInput::Mention { .. } => None,
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(texts, vec!["check deploy".to_string()]);
+        }
+        other => panic!("expected Op::UserTurn from timer automation, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn due_auto_timer_does_not_submit_while_composer_has_draft() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+
+    chat.dispatch_command_with_args(
+        SlashCommand::Auto,
+        "every --scope global 10m check deploy".to_string(),
+        Vec::new(),
+    );
+
+    let state_path =
+        codex_core::slop_fork::automation::automation_state_path(&chat.config.codex_home);
+    let mut state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&state_path).expect("state file"))
+            .expect("automation state json");
+    state["threads"][&thread_id.to_string()]["runtime_states"]["global:auto-1"]["next_fire_at"] =
+        serde_json::json!(Local::now().timestamp() - 1);
+    std::fs::write(
+        &state_path,
+        serde_json::to_string_pretty(&state).expect("serialize automation state"),
+    )
+    .expect("rewrite automation state");
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+    chat.set_composer_text("draft in progress".to_string(), Vec::new(), Vec::new());
+
+    chat.poll_timer_automations();
+    chat.schedule_slop_fork_frames();
+
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+}
+
+#[tokio::test]
+async fn due_auto_timer_does_not_submit_while_accounts_popup_is_open() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+
+    chat.dispatch_command_with_args(
+        SlashCommand::Auto,
+        "every --scope global 10m check deploy".to_string(),
+        Vec::new(),
+    );
+    drain_insert_history(&mut rx);
+
+    let state_path =
+        codex_core::slop_fork::automation::automation_state_path(&chat.config.codex_home);
+    let mut state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&state_path).expect("state file"))
+            .expect("automation state json");
+    state["threads"][&thread_id.to_string()]["runtime_states"]["global:auto-1"]["next_fire_at"] =
+        serde_json::json!(Local::now().timestamp() - 1);
+    std::fs::write(
+        &state_path,
+        serde_json::to_string_pretty(&state).expect("serialize automation state"),
+    )
+    .expect("rewrite automation state");
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+    chat.dispatch_command(SlashCommand::Accounts);
+
+    chat.poll_timer_automations();
+    chat.schedule_slop_fork_frames();
+
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+}
+
+#[tokio::test]
+async fn on_complete_automation_preserves_manual_queue_order() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.thread_id = Some(ThreadId::new());
+
+    chat.dispatch_command_with_args(
+        SlashCommand::Auto,
+        "on-complete continue working on this".to_string(),
+        Vec::new(),
+    );
+    drain_insert_history(&mut rx);
+
+    chat.queued_user_messages
+        .push_back(UserMessage::from("manual follow-up".to_string()));
+    chat.refresh_pending_input_preview();
+
+    chat.on_task_complete(Some("Next step: keep going".to_string()), false);
+
+    match next_submit_op(&mut op_rx) {
+        Op::UserTurn { items, .. } => {
+            let texts = items
+                .into_iter()
+                .filter_map(|item| match item {
+                    UserInput::Text { text, .. } => Some(text),
+                    UserInput::Image { .. }
+                    | UserInput::LocalImage { .. }
+                    | UserInput::Skill { .. }
+                    | UserInput::Mention { .. } => None,
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(texts, vec!["manual follow-up".to_string()]);
+        }
+        other => panic!("expected Op::UserTurn from queued manual follow-up, got {other:?}"),
+    }
+    assert_eq!(chat.queued_user_messages.len(), 1);
+    assert_eq!(
+        chat.queued_user_messages
+            .front()
+            .map(|message| message.text.clone()),
+        Some("continue working on this".to_string())
+    );
+}
+
+#[tokio::test]
 async fn approvals_popup_shows_disabled_presets() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
 
@@ -9628,6 +11158,88 @@ async fn warning_event_adds_warning_history_cell() {
     assert!(
         rendered.contains("test warning message"),
         "warning cell missing content: {rendered}"
+    );
+}
+
+#[tokio::test]
+async fn auth_state_warning_adds_warning_history_cell() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.on_auth_state_changed(
+        "Another Codex instance changed the shared active account.".to_string(),
+        false,
+        true,
+    );
+
+    let cell = match rx.try_recv() {
+        Ok(AppEvent::InsertHistoryCell(cell)) => cell,
+        Ok(event) => panic!("expected inserted history cell, got {event:?}"),
+        Err(err) => panic!("expected inserted history cell, got {err:?}"),
+    };
+    assert!(
+        cell.as_any()
+            .downcast_ref::<PrefixedWrappedHistoryCell>()
+            .is_some(),
+        "expected auth-state warning to render with warning styling"
+    );
+    let rendered = lines_to_single_string(&cell.display_lines(80));
+    assert!(
+        rendered.contains("Another Codex instance changed the shared active account."),
+        "warning cell missing auth-state content: {rendered}"
+    );
+    assert!(rx.try_recv().is_err(), "expected exactly one history cell");
+}
+
+#[tokio::test]
+async fn auto_named_skill_emits_startup_warning_once() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.on_list_skills(ListSkillsResponseEvent {
+        skills: vec![SkillsListEntry {
+            cwd: chat.config.cwd.clone(),
+            skills: vec![ProtocolSkillMetadata {
+                name: "auto".to_string(),
+                description: "Skill with conflicting name".to_string(),
+                short_description: None,
+                interface: None,
+                dependencies: None,
+                path: chat.config.cwd.join(".codex/skills/auto/SKILL.md"),
+                scope: SkillScope::Repo,
+                enabled: true,
+            }],
+            errors: Vec::new(),
+        }],
+    });
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(cells.len(), 1, "expected one warning history cell");
+    let rendered = lines_to_single_string(&cells[0]);
+    assert!(
+        rendered.contains("$auto")
+            && rendered.contains("reserved for the automation")
+            && rendered.contains("insert the skill explicitly"),
+        "warning cell missing auto conflict content: {rendered}"
+    );
+
+    chat.on_list_skills(ListSkillsResponseEvent {
+        skills: vec![SkillsListEntry {
+            cwd: chat.config.cwd.clone(),
+            skills: vec![ProtocolSkillMetadata {
+                name: "auto".to_string(),
+                description: "Skill with conflicting name".to_string(),
+                short_description: None,
+                interface: None,
+                dependencies: None,
+                path: chat.config.cwd.join(".codex/skills/auto/SKILL.md"),
+                scope: SkillScope::Repo,
+                enabled: true,
+            }],
+            errors: Vec::new(),
+        }],
+    });
+
+    assert!(
+        drain_insert_history(&mut rx).is_empty(),
+        "expected auto skill conflict warning to emit only once"
     );
 }
 

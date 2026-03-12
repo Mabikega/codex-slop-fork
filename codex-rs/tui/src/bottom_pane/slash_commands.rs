@@ -19,20 +19,23 @@ pub(crate) struct BuiltinCommandFlags {
     pub(crate) allow_elevate_sandbox: bool,
 }
 
+fn command_is_enabled(cmd: SlashCommand, flags: BuiltinCommandFlags) -> bool {
+    (flags.allow_elevate_sandbox || cmd != SlashCommand::ElevateSandbox)
+        && (flags.collaboration_modes_enabled
+            || !matches!(cmd, SlashCommand::Collab | SlashCommand::Plan))
+        && (flags.connectors_enabled || cmd != SlashCommand::Apps)
+        && (flags.fast_command_enabled || cmd != SlashCommand::Fast)
+        && (flags.personality_command_enabled || cmd != SlashCommand::Personality)
+        && (flags.realtime_conversation_enabled || cmd != SlashCommand::Realtime)
+        && (flags.audio_device_selection_enabled || cmd != SlashCommand::Settings)
+}
+
 /// Return the built-ins that should be visible/usable for the current input.
 pub(crate) fn builtins_for_input(flags: BuiltinCommandFlags) -> Vec<(&'static str, SlashCommand)> {
     built_in_slash_commands()
         .into_iter()
-        .filter(|(_, cmd)| flags.allow_elevate_sandbox || *cmd != SlashCommand::ElevateSandbox)
-        .filter(|(_, cmd)| {
-            flags.collaboration_modes_enabled
-                || !matches!(*cmd, SlashCommand::Collab | SlashCommand::Plan)
-        })
-        .filter(|(_, cmd)| flags.connectors_enabled || *cmd != SlashCommand::Apps)
-        .filter(|(_, cmd)| flags.fast_command_enabled || *cmd != SlashCommand::Fast)
-        .filter(|(_, cmd)| flags.personality_command_enabled || *cmd != SlashCommand::Personality)
-        .filter(|(_, cmd)| flags.realtime_conversation_enabled || *cmd != SlashCommand::Realtime)
-        .filter(|(_, cmd)| flags.audio_device_selection_enabled || *cmd != SlashCommand::Settings)
+        .filter(|(_, cmd)| *cmd != SlashCommand::Auto)
+        .filter(|(_, cmd)| command_is_enabled(*cmd, flags))
         .collect()
 }
 
@@ -109,5 +112,10 @@ mod tests {
         let mut flags = all_enabled_flags();
         flags.audio_device_selection_enabled = false;
         assert_eq!(find_builtin_command("settings", flags), None);
+    }
+
+    #[test]
+    fn auto_command_is_not_available_as_a_slash_command() {
+        assert_eq!(find_builtin_command("auto", all_enabled_flags()), None);
     }
 }

@@ -1,0 +1,22 @@
+---
+source: tui/src/chatwidget/tests.rs
+expression: popup
+---
+  Account Settings
+  Fork-specific account switching behavior.
+  This session: API key (...test)
+  Shared active account: none
+
+› [x] Auto switch accounts       Switch saved accounts when the active one is rate-limited.
+  [ ] Follow external switch     Adopt account changes written by another Codex instance without
+                                 restarting.
+  [ ] API key fallback           Allow API-key accounts only after every ChatGPT account is
+                                 exhausted.
+  [ ] Auto start 5h quota        Automatically send one tiny request when cached data says the 5-
+                                 hour window is untouched.
+  [ ] Auto start weekly quota    Automatically send one tiny request when cached data says the 7-
+                                 day window is untouched.
+  [ ] Avg limits in status line  Show average saved-account 5-hour and weekly limits in the status
+                                 line.
+
+  Press space to select or enter to save for next conversation

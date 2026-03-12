@@ -1,0 +1,14 @@
+---
+source: tui/src/chatwidget/tests.rs
+expression: popup
+---
+  • Waiting for device login (0s)
+  Open the device login page and enter this code.
+  https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hran
+  n&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback
+  Code: ABCD-EFGH
+
+› 1. Open device login page in browser
+  2. Cancel login                       Stop waiting and return to the composer.
+
+  Press enter to confirm or esc to go back

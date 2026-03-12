@@ -1,0 +1,20 @@
+---
+source: tui/src/chatwidget/tests.rs
+expression: popup
+---
+  Accounts
+  Choose an account, auth flow, or fork setting.
+  This session: API key (...test)
+  Shared active account: API key (...1234)
+
+› 1. Login with ChatGPT               Start browser login and wait for the callback.
+  2. Login with device code           Show a one-time code for browser sign-in.
+  3. Add API key                      Enter an API key and make it the active account.
+  4. Switch account                   1 saved account(s) available.
+  5. Switch to shared active account  Another Codex instance activated API key (...1234). Adopt it
+                                      in this session.
+  6. Remove account                   Delete a saved auth blob from ~/.codex/.accounts/.
+  7. View account limits              View the latest saved-account usage and reset times.
+  8. Settings                         Change account settings.
+
+  Press enter to confirm or esc to go back

@@ -1,0 +1,11 @@
+---
+source: tui/src/chatwidget/tests.rs
+assertion_line: 7845
+expression: popup
+---
+▌ Enter API Key
+▌ The key is stored as auth.json and also saved in ~/.codex/.accounts/.
+▌
+▌ Paste the API key and press Enter
+
+Press enter to confirm or esc to go back

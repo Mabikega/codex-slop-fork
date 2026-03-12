@@ -1,0 +1,6 @@
+---
+source: tui/src/chatwidget/tests.rs
+assertion_line: 8570
+expression: blob
+---
+• Created automation session:auto-1. Cron schedules use your local timezone. Session scope only. It will disappear when this conversation ends.

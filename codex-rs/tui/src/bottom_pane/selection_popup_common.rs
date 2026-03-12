@@ -33,8 +33,9 @@ pub(crate) struct GenericDisplayRow {
     pub display_shortcut: Option<KeyBinding>,
     pub match_indices: Option<Vec<usize>>, // indices to bold (char positions)
     pub description: Option<String>,       // optional grey text after the name
-    pub category_tag: Option<String>,      // optional right-side category label
-    pub disabled_reason: Option<String>,   // optional disabled message
+    pub description_spans: Option<Vec<Span<'static>>>,
+    pub category_tag: Option<String>, // optional right-side category label
+    pub disabled_reason: Option<String>, // optional disabled message
     pub is_disabled: bool,
     pub wrap_indent: Option<usize>, // optional indent for wrapped lines
 }
@@ -121,6 +122,28 @@ fn line_to_owned(line: Line<'_>) -> Line<'static> {
     }
 }
 
+fn combined_description_line(row: &GenericDisplayRow) -> Option<Line<'static>> {
+    match (
+        &row.description_spans,
+        &row.description,
+        &row.disabled_reason,
+    ) {
+        (Some(description_spans), _, Some(reason)) => {
+            let mut spans = description_spans.clone();
+            spans.push(format!(" (disabled: {reason})").dim());
+            Some(Line::from(spans))
+        }
+        (Some(description_spans), _, None) => Some(Line::from(description_spans.clone())),
+        (None, Some(description), Some(reason)) => Some(Line::from(vec![
+            description.clone().dim(),
+            format!(" (disabled: {reason})").dim(),
+        ])),
+        (None, Some(description), None) => Some(Line::from(description.clone().dim())),
+        (None, None, Some(reason)) => Some(Line::from(format!("disabled: {reason}").dim())),
+        (None, None, None) => None,
+    }
+}
+
 fn compute_desc_col(
     rows_all: &[GenericDisplayRow],
     start_idx: usize,
@@ -186,7 +209,10 @@ fn compute_desc_col(
 fn wrap_indent(row: &GenericDisplayRow, desc_col: usize, max_width: u16) -> usize {
     let max_indent = max_width.saturating_sub(1) as usize;
     let indent = row.wrap_indent.unwrap_or_else(|| {
-        if row.description.is_some() || row.disabled_reason.is_some() {
+        if row.description.is_some()
+            || row.description_spans.is_some()
+            || row.disabled_reason.is_some()
+        {
             desc_col
         } else {
             0
@@ -199,7 +225,7 @@ fn should_wrap_name_in_column(row: &GenericDisplayRow) -> bool {
     // This path intentionally targets plain option rows that opt into wrapped
     // labels. Styled/fuzzy-matched rows keep the legacy combined-line path.
     row.wrap_indent.is_some()
-        && row.description.is_some()
+        && (row.description.is_some() || row.description_spans.is_some())
         && row.disabled_reason.is_none()
         && row.match_indices.is_none()
         && row.display_shortcut.is_none()
@@ -208,7 +234,7 @@ fn should_wrap_name_in_column(row: &GenericDisplayRow) -> bool {
 }
 
 fn wrap_two_column_row(row: &GenericDisplayRow, desc_col: usize, width: u16) -> Vec<Line<'static>> {
-    let Some(description) = row.description.as_deref() else {
+    let Some(description_line) = combined_description_line(row) else {
         return Vec::new();
     };
 
@@ -234,8 +260,10 @@ fn wrap_two_column_row(row: &GenericDisplayRow, desc_col: usize, width: u16) -> 
         .subsequent_indent(name_subsequent_indent.as_str());
     let name_lines = textwrap::wrap(row.name.as_str(), name_options);
 
-    let desc_options = textwrap::Options::new(right_width).initial_indent("");
-    let desc_lines = textwrap::wrap(description, desc_options);
+    let desc_lines = wrap_styled_line(&description_line, right_width as u16)
+        .into_iter()
+        .map(line_to_owned)
+        .collect::<Vec<_>>();
 
     let rows = name_lines.len().max(desc_lines.len()).max(1);
     let mut out = Vec::with_capacity(rows);
@@ -258,7 +286,7 @@ fn wrap_two_column_row(row: &GenericDisplayRow, desc_col: usize, width: u16) -> 
             if gap > 0 {
                 spans.push(" ".repeat(gap).into());
             }
-            spans.push(desc.to_string().dim());
+            spans.extend(desc.spans.clone());
         }
 
         out.push(Line::from(spans));
@@ -297,7 +325,9 @@ fn apply_row_state_style(lines: &mut [Line<'static>], selected: bool, is_disable
     if selected {
         for line in lines.iter_mut() {
             line.spans.iter_mut().for_each(|span| {
-                span.style = Style::default().fg(Color::Cyan).bold();
+                if span.style == Style::default() {
+                    span.style = Style::default().fg(Color::Cyan).bold();
+                }
             });
         }
     }
@@ -413,12 +443,7 @@ fn adjust_start_for_wrapped_selection_visibility(
 /// at `desc_col`. Applies fuzzy-match bolding when indices are present and
 /// dims the description.
 fn build_full_line(row: &GenericDisplayRow, desc_col: usize) -> Line<'static> {
-    let combined_description = match (&row.description, &row.disabled_reason) {
-        (Some(desc), Some(reason)) => Some(format!("{desc} (disabled: {reason})")),
-        (Some(desc), None) => Some(desc.clone()),
-        (None, Some(reason)) => Some(format!("disabled: {reason}")),
-        (None, None) => None,
-    };
+    let combined_description = combined_description_line(row);
 
     // Enforce single-line name: allow at most desc_col - 2 cells for name,
     // reserving two spaces before the description column.
@@ -481,12 +506,12 @@ fn build_full_line(row: &GenericDisplayRow, desc_col: usize) -> Line<'static> {
         full_spans.push(display_shortcut.into());
         full_spans.push(")".into());
     }
-    if let Some(desc) = combined_description.as_ref() {
+    if let Some(desc) = combined_description {
         let gap = desc_col.saturating_sub(this_name_width);
         if gap > 0 {
             full_spans.push(" ".repeat(gap).into());
         }
-        full_spans.push(desc.clone().dim());
+        full_spans.extend(desc.spans);
     }
     if let Some(tag) = row.category_tag.as_deref().filter(|tag| !tag.is_empty()) {
         full_spans.push("  ".into());
@@ -721,7 +746,9 @@ pub(crate) fn render_rows_single_line(
         let mut full_line = build_full_line(row, desc_col);
         if Some(i) == state.selected_idx && !row.is_disabled {
             full_line.spans.iter_mut().for_each(|span| {
-                span.style = Style::default().fg(Color::Cyan).bold();
+                if span.style == Style::default() {
+                    span.style = Style::default().fg(Color::Cyan).bold();
+                }
             });
         }
         if row.is_disabled {
