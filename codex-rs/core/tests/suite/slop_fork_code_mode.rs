@@ -74,9 +74,16 @@ async fn run_code_mode_turn_with_rmcp(
                 disabled_reason: None,
                 startup_timeout_sec: Some(Duration::from_secs(10)),
                 tool_timeout_sec: None,
+                enabled_tools: None,
+                disabled_tools: None,
+                scopes: None,
+                oauth_resource: None,
             },
         );
-        config.mcp_servers = std::sync::Arc::new(codex_core::config::Constrained::new(servers));
+        config
+            .mcp_servers
+            .set(servers)
+            .expect("test mcp servers should accept any configuration");
     });
     let test = builder.build(server).await?;
 
