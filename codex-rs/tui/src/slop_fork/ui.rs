@@ -213,9 +213,6 @@ impl SlopForkUi {
             SlopForkEvent::RefreshAllSavedAccountRateLimits => {
                 self.refresh_all_saved_account_rate_limits(ctx)
             }
-            SlopForkEvent::RefreshAllSavedAccountRateLimitsAndStartQuotas => {
-                self.refresh_all_saved_account_rate_limits_and_start_quotas(ctx)
-            }
             SlopForkEvent::RefreshSavedAccountRateLimit { account_id } => {
                 self.refresh_saved_account_rate_limit(ctx, &account_id)
             }

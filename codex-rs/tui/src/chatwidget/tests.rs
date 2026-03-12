@@ -8331,6 +8331,7 @@ async fn login_account_limits_popup_snapshot() {
     chat.open_login_popup(LoginPopupKind::AccountLimits);
 
     let popup = render_bottom_popup(&chat, 100);
+    assert!(popup.contains("until 11:29 on 1 Jan"));
     assert_snapshot!(popup);
 }
 
@@ -8626,6 +8627,7 @@ async fn login_switch_account_popup_snapshot() {
     chat.open_login_popup(LoginPopupKind::UseAccount);
 
     let popup = render_bottom_popup(&chat, 100);
+    assert!(popup.contains("until 12:45 on 1 Jan"));
     assert_snapshot!(popup);
 }
 
@@ -8650,32 +8652,6 @@ async fn login_account_limits_popup_force_refresh_all_dispatches_event() {
         rx.try_recv(),
         Ok(AppEvent::SlopFork(
             SlopForkEvent::RefreshAllSavedAccountRateLimits
-        ))
-    );
-}
-
-#[tokio::test]
-async fn login_account_limits_popup_check_and_start_untouched_quotas_dispatches_event() {
-    let dir = tempdir().unwrap();
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
-    chat.config.codex_home = dir.path().to_path_buf();
-    chat.config.cli_auth_credentials_store_mode = codex_core::auth::AuthCredentialsStoreMode::File;
-
-    let auth_dot_json = chatgpt_auth_dot_json("acct-login-limits-touch", "touch@example.com");
-    codex_core::slop_fork::auth_accounts::upsert_account(&chat.config.codex_home, &auth_dot_json)
-        .unwrap()
-        .expect("saved account id");
-
-    chat.open_login_popup(LoginPopupKind::AccountLimits);
-    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
-    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
-    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
-    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
-
-    assert_matches!(
-        rx.try_recv(),
-        Ok(AppEvent::SlopFork(
-            SlopForkEvent::RefreshAllSavedAccountRateLimitsAndStartQuotas
         ))
     );
 }
@@ -8893,39 +8869,6 @@ async fn force_refresh_all_request_does_not_relabel_inflight_refresh_target() {
                 vec!["acct-1".to_string()],
             ),
         None
-    );
-}
-
-#[tokio::test]
-async fn manual_touch_request_ignores_auto_start_settings() {
-    let dir = tempdir().unwrap();
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
-    chat.config.codex_home = dir.path().to_path_buf();
-
-    codex_core::slop_fork::update_slop_fork_config(&chat.config.codex_home, |config| {
-        config.auto_start_five_hour_quota = false;
-        config.auto_start_weekly_quota = false;
-    })
-    .unwrap();
-
-    chat.slop_fork_ui
-        .set_saved_account_rate_limits_force_refresh_all_and_touch_for_test(vec![
-            "acct-1".to_string(),
-        ]);
-
-    assert_eq!(
-        chat.slop_fork_ui
-            .saved_account_rate_limits_auto_touch_request_for_test(
-                &chat.config.codex_home,
-                vec!["acct-1".to_string()],
-            ),
-        Some((
-            ["acct-1".to_string()].into_iter().collect(),
-            crate::slop_fork::TouchQuotaMode::Manual {
-                start_five_hour: true,
-                start_weekly: true,
-            },
-        ))
     );
 }
 

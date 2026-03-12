@@ -43,7 +43,6 @@ pub(crate) enum SlopForkEvent {
     },
     RefreshSavedAccountRateLimits,
     RefreshAllSavedAccountRateLimits,
-    RefreshAllSavedAccountRateLimitsAndStartQuotas,
     RefreshSavedAccountRateLimit {
         account_id: String,
     },

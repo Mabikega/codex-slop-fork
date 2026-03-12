@@ -274,6 +274,21 @@ pub fn quota_window_should_start(
     }
 }
 
+pub fn quota_window_reset_at_if_untouched(
+    snapshot: &StoredRateLimitSnapshot,
+    kind: QuotaWindowKind,
+    now: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    if quota_window_state(snapshot, kind, now) != QuotaWindowState::Untouched {
+        return None;
+    }
+
+    quota_window(snapshot, kind)
+        .limit_window_seconds
+        .filter(|seconds| *seconds > 0)
+        .map(|seconds| now + Duration::seconds(seconds))
+}
+
 pub fn load_rate_limit_snapshot(
     codex_home: &Path,
     account_id: &str,
@@ -1083,6 +1098,33 @@ mod tests {
             QuotaWindowKind::Weekly,
             now
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn quota_window_reset_at_if_untouched_uses_now_plus_full_window() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let now = fixed_now();
+        let snapshot = sample_snapshot(now, 0.0);
+        let raw = sample_raw_snapshot(now, 0);
+        record_rate_limit_snapshot_with_raw(
+            dir.path(),
+            "acct-1",
+            Some("pro"),
+            &snapshot,
+            Some(&raw),
+            now,
+        )?;
+
+        let stored = load_rate_limit_snapshot(dir.path(), "acct-1")?.expect("snapshot");
+        assert_eq!(
+            quota_window_reset_at_if_untouched(&stored, QuotaWindowKind::FiveHour, now),
+            Some(now + Duration::hours(5))
+        );
+        assert_eq!(
+            quota_window_reset_at_if_untouched(&stored, QuotaWindowKind::Weekly, now),
+            Some(now + Duration::days(7))
+        );
         Ok(())
     }
 

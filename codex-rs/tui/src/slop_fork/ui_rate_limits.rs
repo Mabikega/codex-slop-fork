@@ -22,17 +22,6 @@ impl SavedAccountRateLimitsRefreshState {
                     count => format!("Refreshing {count} saved accounts in the background."),
                 }
             }
-            SavedAccountRateLimitsRefreshTarget::AllAccountsAndTouch(account_ids, _) => {
-                match account_ids.len() {
-                    0 => {
-                        "Refreshing saved-account limits and starting untouched quotas.".to_string()
-                    }
-                    1 => "Refreshing 1 saved account and starting untouched quotas.".to_string(),
-                    count => {
-                        format!("Refreshing {count} saved accounts and starting untouched quotas.")
-                    }
-                }
-            }
         }
     }
 
@@ -44,9 +33,6 @@ impl SavedAccountRateLimitsRefreshState {
         let (account_ids, touch_mode) = match &self.target {
             SavedAccountRateLimitsRefreshTarget::AllAccounts(account_ids) => {
                 (account_ids, automatic_touch_mode(codex_home)?)
-            }
-            SavedAccountRateLimitsRefreshTarget::AllAccountsAndTouch(account_ids, touch_mode) => {
-                (account_ids, *touch_mode)
             }
             _ => return None,
         };
@@ -72,7 +58,6 @@ fn automatic_touch_mode(codex_home: &Path) -> Option<TouchQuotaMode> {
             start_five_hour,
             start_weekly,
         } => start_five_hour || start_weekly,
-        TouchQuotaMode::Manual { .. } => false,
     };
 
     has_enabled_window.then_some(touch_mode)
@@ -98,7 +83,6 @@ pub(super) enum SavedAccountRateLimitsRefreshTarget {
     Due,
     Accounts(HashSet<String>),
     AllAccounts(HashSet<String>),
-    AllAccountsAndTouch(HashSet<String>, TouchQuotaMode),
 }
 
 impl SavedAccountRateLimitsRefreshTarget {
@@ -107,18 +91,15 @@ impl SavedAccountRateLimitsRefreshTarget {
             Self::Due => Self::Due,
             Self::Accounts(_) => Self::Accounts(account_ids),
             Self::AllAccounts(_) => Self::AllAccounts(account_ids),
-            Self::AllAccountsAndTouch(_, touch_mode) => {
-                Self::AllAccountsAndTouch(account_ids, touch_mode)
-            }
         }
     }
 
     pub(super) fn includes_account(&self, account_id: &str, account_is_due: bool) -> bool {
         match self {
             Self::Due => account_is_due,
-            Self::Accounts(account_ids)
-            | Self::AllAccounts(account_ids)
-            | Self::AllAccountsAndTouch(account_ids, _) => account_ids.contains(account_id),
+            Self::Accounts(account_ids) | Self::AllAccounts(account_ids) => {
+                account_ids.contains(account_id)
+            }
         }
     }
 }
@@ -214,10 +195,6 @@ const TOUCH_MODEL_CANDIDATES: &[&str] = &[
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TouchQuotaMode {
-    Manual {
-        start_five_hour: bool,
-        start_weekly: bool,
-    },
     Automatic {
         start_five_hour: bool,
         start_weekly: bool,
@@ -227,11 +204,7 @@ pub(crate) enum TouchQuotaMode {
 impl TouchQuotaMode {
     fn enabled_window_kinds(self) -> Vec<account_rate_limits::QuotaWindowKind> {
         match self {
-            Self::Manual {
-                start_five_hour,
-                start_weekly,
-            }
-            | Self::Automatic {
+            Self::Automatic {
                 start_five_hour,
                 start_weekly,
             } => {
@@ -249,7 +222,6 @@ impl TouchQuotaMode {
 
     fn summary_prefix(self) -> &'static str {
         match self {
-            Self::Manual { .. } => "Started cached quotas",
             Self::Automatic { .. } => "Auto-started cached quotas",
         }
     }
@@ -298,23 +270,6 @@ impl SlopForkUi {
     }
 
     #[cfg(test)]
-    pub(crate) fn set_saved_account_rate_limits_force_refresh_all_and_touch_for_test(
-        &mut self,
-        account_ids: Vec<String>,
-    ) {
-        self.saved_account_rate_limits_refresh = Some(SavedAccountRateLimitsRefreshState {
-            started_at: Instant::now(),
-            target: SavedAccountRateLimitsRefreshTarget::AllAccountsAndTouch(
-                account_ids.into_iter().collect::<HashSet<_>>(),
-                TouchQuotaMode::Manual {
-                    start_five_hour: true,
-                    start_weekly: true,
-                },
-            ),
-        });
-    }
-
-    #[cfg(test)]
     pub(crate) fn saved_account_rate_limits_auto_touch_request_for_test(
         &self,
         codex_home: &Path,
@@ -344,22 +299,6 @@ impl SlopForkUi {
         self.refresh_all_saved_account_rate_limits_with_target(
             ctx,
             SavedAccountRateLimitsRefreshTarget::AllAccounts(HashSet::new()),
-        )
-    }
-
-    pub(crate) fn refresh_all_saved_account_rate_limits_and_start_quotas(
-        &mut self,
-        ctx: &SlopForkUiContext,
-    ) -> Vec<SlopForkUiEffect> {
-        self.refresh_all_saved_account_rate_limits_with_target(
-            ctx,
-            SavedAccountRateLimitsRefreshTarget::AllAccountsAndTouch(
-                HashSet::new(),
-                TouchQuotaMode::Manual {
-                    start_five_hour: true,
-                    start_weekly: true,
-                },
-            ),
         )
     }
 

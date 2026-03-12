@@ -1,19 +1,18 @@
 ---
 source: tui/src/chatwidget/tests.rs
+assertion_line: 8335
 expression: popup
 ---
   View Account Limits
   Choose a saved account to review or refresh its latest usage and reset times.
   This session: limits@example.com (Pro)
 
-› 1. limits@example.com (Pro) (current)     pro · 1h  42% until 11:29. Press enter to refresh this
-                                            account now.
+› 1. limits@example.com (Pro) (current)     1h  42% until 11:29 on 1 Jan. Press enter to refresh
+                                            this account now.
   2. Refresh due account limits (disabled)  No saved ChatGPT account currently needs a refresh.
                                             (disabled: There are no due saved-account snapshots
                                             right now.)
   3. Force refresh all accounts             Refresh the saved ChatGPT account limit snapshot now,
                                             even if it is not due yet.
-  4. Check and start untouched quotas       Refresh the saved ChatGPT account and start any
-                                            untouched cached 5-hour or weekly quota windows.
 
   Press enter to confirm or esc to go back
