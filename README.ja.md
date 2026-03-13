@@ -128,16 +128,25 @@ bun install -g https://github.com/Mabikega/codex-slop-fork/releases/latest/downl
 例:
 
 - `$auto on-complete "continue working on this"`
+- `$auto on-complete --now "continue working on this"`
+- `$auto on-complete --last-user-message`
 - `$auto on-complete --times 10 "continue working on this"`
 - `$auto on-complete --until 14:00 --round-robin "msg1" "msg2" "msg3"`
 - `$auto on-complete --policy 'bash ./.codex/automation/next-message.sh' "continue working on this"`
 - `$auto every 10m "run tests"`
+- `$auto every --now --last-user-message 10m`
 - `$auto every "0 14 * * 1-5" "check deploy"`
 - `$auto list`
 - `$auto show session:auto-1`
 - `$auto pause session:auto-1`
 - `$auto resume session:auto-1`
 - `$auto rm session:auto-1`
+
+`--now` は、設定したメッセージをすぐにキューへ入れ、その実行を 1 回目として数えます。
+`--policy` とは併用できません。
+
+`--last-user-message` (または `-l`) は、オートメーション作成時点のスレッド内で直近のテキスト
+ユーザーメッセージを固定で取り込み、その後のユーザー入力で変わらないようにします。
 
 挙動:
 

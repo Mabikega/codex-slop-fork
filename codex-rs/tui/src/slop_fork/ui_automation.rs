@@ -11,6 +11,7 @@ impl SlopForkUi {
         &mut self,
         ctx: &SlopForkUiContext,
         trimmed: &str,
+        last_user_message: Option<&str>,
     ) -> Vec<SlopForkUiEffect> {
         let fork_config = match load_slop_fork_config(&ctx.codex_home) {
             Ok(config) => config,
@@ -20,11 +21,15 @@ impl SlopForkUi {
                 ))];
             }
         };
-        let command =
-            match parse_auto_command(trimmed, fork_config.automation_default_scope, Local::now()) {
-                Ok(command) => command,
-                Err(message) => return vec![SlopForkUiEffect::AddErrorMessage(message)],
-            };
+        let command = match parse_auto_command(
+            trimmed,
+            fork_config.automation_default_scope,
+            Local::now(),
+            last_user_message,
+        ) {
+            Ok(command) => command,
+            Err(message) => return vec![SlopForkUiEffect::AddErrorMessage(message)],
+        };
         match command {
             AutoCommand::Help => self.show_auto_usage(),
             AutoCommand::List => self.auto_status_output(ctx),
@@ -32,7 +37,19 @@ impl SlopForkUi {
             AutoCommand::Pause { runtime_id } => self.auto_set_paused(ctx, &runtime_id, true),
             AutoCommand::Resume { runtime_id } => self.auto_set_paused(ctx, &runtime_id, false),
             AutoCommand::Remove { runtime_id } => self.auto_remove(ctx, &runtime_id),
-            AutoCommand::Create { scope, spec, note } => self.auto_create(ctx, scope, spec, note),
+            AutoCommand::Create {
+                scope,
+                spec,
+                note,
+                send_now,
+            } => self.auto_create(
+                ctx,
+                scope,
+                spec,
+                note,
+                send_now && fork_config.automation_enabled,
+                !fork_config.automation_enabled,
+            ),
         }
     }
 
@@ -362,37 +379,107 @@ impl SlopForkUi {
         scope: AutomationScope,
         spec: AutomationSpec,
         note: Option<String>,
+        send_now: bool,
+        automation_disabled: bool,
     ) -> Vec<SlopForkUiEffect> {
         let registry = match self.ensure_automation_registry(ctx) {
             Ok(registry) => registry,
             Err(err) => return vec![SlopForkUiEffect::AddErrorMessage(err)],
         };
         match registry.upsert(scope, spec, Local::now()) {
-            Ok(entry) => vec![SlopForkUiEffect::AddInfoMessage {
-                message: format!("Created automation {}.", entry.runtime_id),
-                hint: Some(match (note, entry.scope) {
-                    (Some(note), AutomationScope::Session) => format!(
-                        "{note} Session scope only. It will disappear when this conversation ends."
-                    ),
-                    (Some(note), AutomationScope::Repo) => format!(
-                        "{note} Repo scope is saved for future conversations in this repository."
-                    ),
-                    (Some(note), AutomationScope::Global) => {
-                        format!("{note} Global scope is saved for future conversations everywhere.")
+            Ok(entry) => {
+                let mut effects = vec![SlopForkUiEffect::AddInfoMessage {
+                    message: format!("Created automation {}.", entry.runtime_id),
+                    hint: Some(match (note, entry.scope, send_now) {
+                        (Some(note), scope, _) if automation_disabled => match scope {
+                            AutomationScope::Session => format!(
+                                "{note} Automation execution is currently disabled, so it was saved without running now. Session scope only. It will disappear when this conversation ends."
+                            ),
+                            AutomationScope::Repo => format!(
+                                "{note} Automation execution is currently disabled, so it was saved without running now. Repo scope is saved for future conversations in this repository."
+                            ),
+                            AutomationScope::Global => format!(
+                                "{note} Automation execution is currently disabled, so it was saved without running now. Global scope is saved for future conversations everywhere."
+                            ),
+                        },
+                        (Some(note), AutomationScope::Session, true) => format!(
+                            "{note} Queued the first run immediately. Session scope only. It will disappear when this conversation ends."
+                        ),
+                        (Some(note), AutomationScope::Repo, true) => format!(
+                            "{note} Queued the first run immediately. Repo scope is saved for future conversations in this repository."
+                        ),
+                        (Some(note), AutomationScope::Global, true) => format!(
+                            "{note} Queued the first run immediately. Global scope is saved for future conversations everywhere."
+                        ),
+                        (Some(note), AutomationScope::Session, false) => format!(
+                            "{note} Session scope only. It will disappear when this conversation ends."
+                        ),
+                        (Some(note), AutomationScope::Repo, false) => format!(
+                            "{note} Repo scope is saved for future conversations in this repository."
+                        ),
+                        (Some(note), AutomationScope::Global, false) => {
+                            format!(
+                                "{note} Global scope is saved for future conversations everywhere."
+                            )
+                        }
+                        (None, AutomationScope::Session, _) if automation_disabled => {
+                            "Automation execution is currently disabled, so it was saved without running now. Session scope only. It will disappear when this conversation ends."
+                                .to_string()
+                        }
+                        (None, AutomationScope::Repo, _) if automation_disabled => {
+                            "Automation execution is currently disabled, so it was saved without running now. Repo scope is saved for future conversations in this repository."
+                                .to_string()
+                        }
+                        (None, AutomationScope::Global, _) if automation_disabled => {
+                            "Automation execution is currently disabled, so it was saved without running now. Global scope is saved for future conversations everywhere."
+                                .to_string()
+                        }
+                        (None, AutomationScope::Session, true) => {
+                            "Queued the first run immediately. Session scope only. It will disappear when this conversation ends."
+                                .to_string()
+                        }
+                        (None, AutomationScope::Repo, true) => {
+                            "Queued the first run immediately. Repo scope is saved for future conversations in this repository."
+                                .to_string()
+                        }
+                        (None, AutomationScope::Global, true) => {
+                            "Queued the first run immediately. Global scope is saved for future conversations everywhere."
+                                .to_string()
+                        }
+                        (None, AutomationScope::Session, false) => {
+                            "Session scope only. It will disappear when this conversation ends."
+                                .to_string()
+                        }
+                        (None, AutomationScope::Repo, false) => {
+                            "Repo scope is saved for future conversations in this repository."
+                                .to_string()
+                        }
+                        (None, AutomationScope::Global, false) => {
+                            "Global scope is saved for future conversations everywhere.".to_string()
+                        }
+                    }),
+                }];
+                if send_now {
+                    let message = match &entry.spec.message_source {
+                        codex_core::slop_fork::automation::AutomationMessageSource::Static {
+                            message,
+                        } => message.clone(),
+                        codex_core::slop_fork::automation::AutomationMessageSource::RoundRobin {
+                            messages,
+                        } => messages
+                            .get(entry.state.round_robin_index % messages.len().max(1))
+                            .cloned()
+                            .unwrap_or_default(),
+                    };
+                    if let Err(err) = registry.record_delivery(&entry.runtime_id, Local::now()) {
+                        return vec![SlopForkUiEffect::AddErrorMessage(format!(
+                            "Failed to queue first automation run: {err}"
+                        ))];
                     }
-                    (None, AutomationScope::Session) => {
-                        "Session scope only. It will disappear when this conversation ends."
-                            .to_string()
-                    }
-                    (None, AutomationScope::Repo) => {
-                        "Repo scope is saved for future conversations in this repository."
-                            .to_string()
-                    }
-                    (None, AutomationScope::Global) => {
-                        "Global scope is saved for future conversations everywhere.".to_string()
-                    }
-                }),
-            }],
+                    effects.push(SlopForkUiEffect::QueueAutomationPrompt(message));
+                }
+                effects
+            }
             Err(err) => vec![SlopForkUiEffect::AddErrorMessage(format!(
                 "Failed to create automation: {err}"
             ))],

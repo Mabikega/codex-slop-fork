@@ -16,6 +16,12 @@ use crate::bottom_pane::MentionItem;
 pub(crate) const AUTO_COMMAND_NAME: &str = "auto";
 pub(crate) const AUTO_COMMAND_MENTION_PATH: &str = "slop-fork://command/auto";
 
+#[derive(Debug, Clone)]
+struct ShellToken {
+    value: String,
+    span: Range<usize>,
+}
+
 pub(crate) fn auto_command_skill_conflict_warning() -> String {
     format!(
         "A skill named '{AUTO_COMMAND_NAME}' is enabled. '${AUTO_COMMAND_NAME}' is reserved for the automation command, so use the $ popup to insert the skill explicitly."
@@ -42,6 +48,7 @@ pub(crate) enum AutoCommand {
         scope: AutomationScope,
         spec: AutomationSpec,
         note: Option<String>,
+        send_now: bool,
     },
 }
 
@@ -49,19 +56,19 @@ pub(crate) fn parse_auto_command(
     args: &str,
     default_scope: AutomationScope,
     now: DateTime<Local>,
+    last_user_message: Option<&str>,
 ) -> Result<AutoCommand, String> {
     let trimmed = args.trim();
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("help") {
         return Ok(AutoCommand::Help);
     }
 
-    let tokens = shlex::split(trimmed)
-        .ok_or_else(|| "Failed to parse $auto arguments. Check your quoting.".to_string())?;
+    let tokens = split_shell_tokens(trimmed)?;
     if tokens.is_empty() {
         return Ok(AutoCommand::Help);
     }
 
-    match tokens[0].as_str() {
+    match tokens[0].value.as_str() {
         "list" => {
             if tokens.len() != 1 {
                 return Err("Usage: $auto list".to_string());
@@ -73,7 +80,7 @@ pub(crate) fn parse_auto_command(
                 return Err("Usage: $auto show <runtime-id>".to_string());
             }
             Ok(AutoCommand::Show {
-                runtime_id: tokens[1].clone(),
+                runtime_id: tokens[1].value.clone(),
             })
         }
         "pause" => {
@@ -81,7 +88,7 @@ pub(crate) fn parse_auto_command(
                 return Err("Usage: $auto pause <runtime-id>".to_string());
             }
             Ok(AutoCommand::Pause {
-                runtime_id: tokens[1].clone(),
+                runtime_id: tokens[1].value.clone(),
             })
         }
         "resume" => {
@@ -89,7 +96,7 @@ pub(crate) fn parse_auto_command(
                 return Err("Usage: $auto resume <runtime-id>".to_string());
             }
             Ok(AutoCommand::Resume {
-                runtime_id: tokens[1].clone(),
+                runtime_id: tokens[1].value.clone(),
             })
         }
         "rm" | "remove" | "delete" => {
@@ -97,35 +104,43 @@ pub(crate) fn parse_auto_command(
                 return Err("Usage: $auto rm <runtime-id>".to_string());
             }
             Ok(AutoCommand::Remove {
-                runtime_id: tokens[1].clone(),
+                runtime_id: tokens[1].value.clone(),
             })
         }
-        "every" => parse_every_command(&tokens[1..], default_scope, now),
-        "on-complete" => parse_on_complete_command(&tokens[1..], default_scope, now),
+        "every" => {
+            parse_every_command(trimmed, &tokens[1..], default_scope, now, last_user_message)
+        }
+        "on-complete" => {
+            parse_on_complete_command(trimmed, &tokens[1..], default_scope, now, last_user_message)
+        }
         _ => Err(auto_usage().to_string()),
     }
 }
 
 fn parse_on_complete_command(
-    tokens: &[String],
+    input: &str,
+    tokens: &[ShellToken],
     default_scope: AutomationScope,
     now: DateTime<Local>,
+    last_user_message: Option<&str>,
 ) -> Result<AutoCommand, String> {
     let mut scope = default_scope;
     let mut max_runs = None;
     let mut until_at = None;
     let mut round_robin = false;
     let mut policy_command = None;
+    let mut send_now = false;
+    let mut use_last_user_message = false;
     let mut messages = Vec::new();
     let mut index = 0;
 
     while index < tokens.len() {
-        match tokens[index].as_str() {
+        match tokens[index].value.as_str() {
             "--scope" => {
-                let Some(value) = tokens.get(index + 1) else {
+                let Some(value) = tokens.get(index + 1).map(|token| token.value.as_str()) else {
                     return Err("Usage: --scope <session|repo|global>".to_string());
                 };
-                scope = match value.as_str() {
+                scope = match value {
                     "session" => AutomationScope::Session,
                     "repo" => AutomationScope::Repo,
                     "global" => AutomationScope::Global,
@@ -134,7 +149,7 @@ fn parse_on_complete_command(
                 index += 2;
             }
             "--times" => {
-                let Some(value) = tokens.get(index + 1) else {
+                let Some(value) = tokens.get(index + 1).map(|token| token.value.as_str()) else {
                     return Err("Usage: --times <count>".to_string());
                 };
                 max_runs = Some(
@@ -145,7 +160,7 @@ fn parse_on_complete_command(
                 index += 2;
             }
             "--until" => {
-                let Some(value) = tokens.get(index + 1) else {
+                let Some(value) = tokens.get(index + 1).map(|token| token.value.as_str()) else {
                     return Err("Usage: --until <HH:MM>".to_string());
                 };
                 until_at = Some(parse_until_for_today(now, value)?.timestamp());
@@ -155,8 +170,16 @@ fn parse_on_complete_command(
                 round_robin = true;
                 index += 1;
             }
+            "--now" => {
+                send_now = true;
+                index += 1;
+            }
+            "--last-user-message" | "-l" => {
+                use_last_user_message = true;
+                index += 1;
+            }
             "--policy" => {
-                let Some(value) = tokens.get(index + 1) else {
+                let Some(value) = tokens.get(index + 1).map(|token| token.value.as_str()) else {
                     return Err("Usage: --policy '<command>'".to_string());
                 };
                 let command = shlex::split(value)
@@ -175,19 +198,42 @@ fn parse_on_complete_command(
                 return Err(format!("Unknown $auto option {value}."));
             }
             _ => {
-                messages.extend_from_slice(&tokens[index..]);
+                messages.extend(tokens[index..].iter().map(|token| token.value.clone()));
                 break;
             }
         }
     }
 
-    if messages.is_empty() {
+    if use_last_user_message && round_robin {
+        return Err("--last-user-message cannot be combined with --round-robin.".to_string());
+    }
+    if send_now && policy_command.is_some() {
+        return Err("--now cannot be combined with --policy.".to_string());
+    }
+
+    if use_last_user_message && !messages.is_empty() {
+        return Err("Use either <message> or --last-user-message, not both.".to_string());
+    }
+
+    if messages.is_empty() && !use_last_user_message {
         return Err(
             "Usage: $auto on-complete [options] <message> or $auto on-complete --round-robin \"msg 1\" \"msg 2\" ...".to_string(),
         );
     }
 
-    let message_source = if round_robin {
+    let message_source = if use_last_user_message {
+        let Some(message) = last_user_message
+            .map(str::trim)
+            .filter(|message| !message.is_empty())
+        else {
+            return Err(
+                "No previous text user message is available for --last-user-message.".to_string(),
+            );
+        };
+        AutomationMessageSource::Static {
+            message: message.to_string(),
+        }
+    } else if round_robin {
         if messages.len() < 2 {
             return Err(
                 "--round-robin requires at least two messages, each quoted as its own argument."
@@ -197,7 +243,7 @@ fn parse_on_complete_command(
         AutomationMessageSource::RoundRobin { messages }
     } else {
         AutomationMessageSource::Static {
-            message: messages.join(" "),
+            message: rebuild_shell_text(input, &tokens[index..]),
         }
     };
 
@@ -212,27 +258,32 @@ fn parse_on_complete_command(
             policy_command,
         },
         note: None,
+        send_now,
     })
 }
 
 fn parse_every_command(
-    tokens: &[String],
+    input: &str,
+    tokens: &[ShellToken],
     default_scope: AutomationScope,
     now: DateTime<Local>,
+    last_user_message: Option<&str>,
 ) -> Result<AutoCommand, String> {
     let mut scope = default_scope;
     let mut max_runs = None;
     let mut until_at = None;
     let mut policy_command = None;
+    let mut send_now = false;
+    let mut use_last_user_message = false;
     let mut index = 0;
 
     while index < tokens.len() {
-        match tokens[index].as_str() {
+        match tokens[index].value.as_str() {
             "--scope" => {
-                let Some(value) = tokens.get(index + 1) else {
+                let Some(value) = tokens.get(index + 1).map(|token| token.value.as_str()) else {
                     return Err("Usage: --scope <session|repo|global>".to_string());
                 };
-                scope = match value.as_str() {
+                scope = match value {
                     "session" => AutomationScope::Session,
                     "repo" => AutomationScope::Repo,
                     "global" => AutomationScope::Global,
@@ -241,7 +292,7 @@ fn parse_every_command(
                 index += 2;
             }
             "--times" => {
-                let Some(value) = tokens.get(index + 1) else {
+                let Some(value) = tokens.get(index + 1).map(|token| token.value.as_str()) else {
                     return Err("Usage: --times <count>".to_string());
                 };
                 max_runs = Some(
@@ -252,14 +303,22 @@ fn parse_every_command(
                 index += 2;
             }
             "--until" => {
-                let Some(value) = tokens.get(index + 1) else {
+                let Some(value) = tokens.get(index + 1).map(|token| token.value.as_str()) else {
                     return Err("Usage: --until <HH:MM>".to_string());
                 };
                 until_at = Some(parse_until_for_today(now, value)?.timestamp());
                 index += 2;
             }
+            "--now" => {
+                send_now = true;
+                index += 1;
+            }
+            "--last-user-message" | "-l" => {
+                use_last_user_message = true;
+                index += 1;
+            }
             "--policy" => {
-                let Some(value) = tokens.get(index + 1) else {
+                let Some(value) = tokens.get(index + 1).map(|token| token.value.as_str()) else {
                     return Err("Usage: --policy '<command>'".to_string());
                 };
                 let command = shlex::split(value)
@@ -281,14 +340,41 @@ fn parse_every_command(
         }
     }
 
-    let remainder = tokens[index..].join(" ");
-    let request = parse_timer_schedule_request(&remainder, None).map_err(|message| {
-        if message == "Usage: <interval|cron> <prompt>" {
-            "Usage: $auto every [options] <interval|cron> <prompt>".to_string()
-        } else {
-            message
-        }
-    })?;
+    let remainder = rebuild_shell_text(input, &tokens[index..]);
+    if send_now && policy_command.is_some() {
+        return Err("--now cannot be combined with --policy.".to_string());
+    }
+    let request = if use_last_user_message {
+        parse_schedule_only_request(&remainder).map_err(|message| {
+            if message == "Usage: <interval|cron> <prompt>" {
+                "Usage: $auto every [options] <interval|cron>".to_string()
+            } else {
+                message
+            }
+        })?
+    } else {
+        parse_timer_schedule_request(&remainder, None).map_err(|message| {
+            if message == "Usage: <interval|cron> <prompt>" {
+                "Usage: $auto every [options] <interval|cron> <prompt>".to_string()
+            } else {
+                message
+            }
+        })?
+    };
+
+    let message = if use_last_user_message {
+        let Some(message) = last_user_message
+            .map(str::trim)
+            .filter(|message| !message.is_empty())
+        else {
+            return Err(
+                "No previous text user message is available for --last-user-message.".to_string(),
+            );
+        };
+        message.to_string()
+    } else {
+        request.prompt
+    };
 
     let trigger = match request.schedule {
         TimerSchedule::Interval(cadence) => AutomationTrigger::Interval {
@@ -305,18 +391,133 @@ fn parse_every_command(
             id: String::new(),
             enabled: true,
             trigger,
-            message_source: AutomationMessageSource::Static {
-                message: request.prompt,
-            },
+            message_source: AutomationMessageSource::Static { message },
             limits: AutomationLimits { max_runs, until_at },
             policy_command,
         },
         note: request.note,
+        send_now,
     })
 }
 
 pub(crate) fn auto_usage() -> &'static str {
-    "Usage: $auto on-complete [--scope session|repo|global] [--times N] [--until HH:MM] [--policy 'cmd'] <message>\n       $auto on-complete --round-robin \"msg 1\" \"msg 2\" ...\n       $auto every [--scope session|repo|global] [--times N] [--until HH:MM] [--policy 'cmd'] <interval|cron> <prompt>\n       $auto list | $auto show <runtime-id> | $auto pause <runtime-id> | $auto resume <runtime-id> | $auto rm <runtime-id>"
+    "Usage: $auto on-complete [--scope session|repo|global] [--times N] [--until HH:MM] [--now] [--policy 'cmd'] (<message> | --last-user-message|-l)\n       $auto on-complete --round-robin \"msg 1\" \"msg 2\" ...\n       $auto every [--scope session|repo|global] [--times N] [--until HH:MM] [--now] [--policy 'cmd'] (<interval|cron> <prompt> | --last-user-message|-l <interval|cron>)\n       $auto list | $auto show <runtime-id> | $auto pause <runtime-id> | $auto resume <runtime-id> | $auto rm <runtime-id>"
+}
+
+fn split_shell_tokens(input: &str) -> Result<Vec<ShellToken>, String> {
+    let values = shlex::split(input)
+        .ok_or_else(|| "Failed to parse $auto arguments. Check your quoting.".to_string())?;
+    let spans = shell_token_spans(input)
+        .ok_or_else(|| "Failed to parse $auto arguments. Check your quoting.".to_string())?;
+    if values.len() != spans.len() {
+        return Err("Failed to parse $auto arguments. Check your quoting.".to_string());
+    }
+    Ok(values
+        .into_iter()
+        .zip(spans)
+        .map(|(value, span)| ShellToken { value, span })
+        .collect())
+}
+
+fn shell_token_spans(input: &str) -> Option<Vec<Range<usize>>> {
+    #[derive(Clone, Copy)]
+    enum Mode {
+        Normal,
+        SingleQuote,
+        DoubleQuote,
+    }
+
+    let mut spans = Vec::new();
+    let mut index = 0;
+
+    while index < input.len() {
+        let ch = input[index..].chars().next()?;
+        if ch.is_whitespace() {
+            index += ch.len_utf8();
+            continue;
+        }
+
+        let start = index;
+        let mut mode = Mode::Normal;
+        while index < input.len() {
+            let ch = input[index..].chars().next()?;
+            match mode {
+                Mode::Normal if ch.is_whitespace() => break,
+                Mode::Normal if ch == '\'' => {
+                    mode = Mode::SingleQuote;
+                    index += ch.len_utf8();
+                }
+                Mode::Normal if ch == '"' => {
+                    mode = Mode::DoubleQuote;
+                    index += ch.len_utf8();
+                }
+                Mode::Normal if ch == '\\' => {
+                    index += ch.len_utf8();
+                    if index < input.len() {
+                        let escaped = input[index..].chars().next()?;
+                        index += escaped.len_utf8();
+                    }
+                }
+                Mode::Normal => {
+                    index += ch.len_utf8();
+                }
+                Mode::SingleQuote if ch == '\'' => {
+                    mode = Mode::Normal;
+                    index += ch.len_utf8();
+                }
+                Mode::SingleQuote => {
+                    index += ch.len_utf8();
+                }
+                Mode::DoubleQuote if ch == '"' => {
+                    mode = Mode::Normal;
+                    index += ch.len_utf8();
+                }
+                Mode::DoubleQuote if ch == '\\' => {
+                    index += ch.len_utf8();
+                    if index < input.len() {
+                        let escaped = input[index..].chars().next()?;
+                        index += escaped.len_utf8();
+                    }
+                }
+                Mode::DoubleQuote => {
+                    index += ch.len_utf8();
+                }
+            }
+        }
+
+        if !matches!(mode, Mode::Normal) {
+            return None;
+        }
+        spans.push(start..index);
+    }
+
+    Some(spans)
+}
+
+fn rebuild_shell_text(input: &str, tokens: &[ShellToken]) -> String {
+    let Some(first) = tokens.first() else {
+        return String::new();
+    };
+
+    let mut rebuilt = first.value.clone();
+    for window in tokens.windows(2) {
+        rebuilt.push_str(&input[window[0].span.end..window[1].span.start]);
+        rebuilt.push_str(&window[1].value);
+    }
+    rebuilt
+}
+
+fn parse_schedule_only_request(
+    input: &str,
+) -> Result<super::schedule_parser::TimerScheduleRequest, String> {
+    const PLACEHOLDER_PROMPT: &str = "__codex_slop_fork_last_user_message__";
+
+    let request = parse_timer_schedule_request(&format!("{input} {PLACEHOLDER_PROMPT}"), None)?;
+    if request.prompt == PLACEHOLDER_PROMPT {
+        Ok(request)
+    } else {
+        Err("Usage: <interval|cron> <prompt>".to_string())
+    }
 }
 
 pub(crate) fn auto_command_mention_item() -> MentionItem {
@@ -363,4 +564,138 @@ pub(crate) fn is_auto_command_token(token: &str) -> bool {
 pub(crate) fn should_dispatch_auto_command(first_token: &str, bound_path: Option<&str>) -> bool {
     is_auto_command_token(first_token)
         && (bound_path.is_none() || bound_path == Some(AUTO_COMMAND_MENTION_PATH))
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Local;
+    use pretty_assertions::assert_eq;
+
+    use super::AutoCommand;
+    use super::AutomationMessageSource;
+    use super::AutomationScope;
+    use super::parse_auto_command;
+
+    #[test]
+    fn parses_on_complete_now_with_last_user_message_snapshot() {
+        let command = parse_auto_command(
+            "on-complete --now --last-user-message",
+            AutomationScope::Session,
+            Local::now(),
+            Some("hi"),
+        )
+        .expect("command");
+
+        let AutoCommand::Create {
+            scope,
+            spec,
+            note,
+            send_now,
+        } = command
+        else {
+            panic!("expected create command");
+        };
+        assert_eq!(scope, AutomationScope::Session);
+        assert_eq!(note, None);
+        assert_eq!(send_now, true);
+        assert_eq!(
+            spec.message_source,
+            AutomationMessageSource::Static {
+                message: "hi".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn parses_every_with_last_user_message_without_prompt() {
+        let command = parse_auto_command(
+            "every --last-user-message 10m",
+            AutomationScope::Session,
+            Local::now(),
+            Some("run auth"),
+        )
+        .expect("command");
+
+        let AutoCommand::Create { spec, send_now, .. } = command else {
+            panic!("expected create command");
+        };
+        assert_eq!(send_now, false);
+        assert_eq!(
+            spec.message_source,
+            AutomationMessageSource::Static {
+                message: "run auth".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_last_user_message_without_previous_text() {
+        let err = parse_auto_command(
+            "on-complete --last-user-message",
+            AutomationScope::Session,
+            Local::now(),
+            None,
+        )
+        .expect_err("missing last message should fail");
+
+        assert_eq!(
+            err,
+            "No previous text user message is available for --last-user-message.".to_string()
+        );
+    }
+
+    #[test]
+    fn rejects_now_with_policy() {
+        let err = parse_auto_command(
+            "every --now --policy 'echo hi' 10m check deploy",
+            AutomationScope::Session,
+            Local::now(),
+            Some("hi"),
+        )
+        .expect_err("now plus policy should fail");
+
+        assert_eq!(err, "--now cannot be combined with --policy.".to_string());
+    }
+
+    #[test]
+    fn preserves_multiline_on_complete_message() {
+        let command = parse_auto_command(
+            "on-complete first line\nsecond line",
+            AutomationScope::Session,
+            Local::now(),
+            None,
+        )
+        .expect("command");
+
+        let AutoCommand::Create { spec, .. } = command else {
+            panic!("expected create command");
+        };
+        assert_eq!(
+            spec.message_source,
+            AutomationMessageSource::Static {
+                message: "first line\nsecond line".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn preserves_multiline_every_prompt() {
+        let command = parse_auto_command(
+            "every 10m first line\nsecond line",
+            AutomationScope::Session,
+            Local::now(),
+            None,
+        )
+        .expect("command");
+
+        let AutoCommand::Create { spec, .. } = command else {
+            panic!("expected create command");
+        };
+        assert_eq!(
+            spec.message_source,
+            AutomationMessageSource::Static {
+                message: "first line\nsecond line".to_string()
+            }
+        );
+    }
 }

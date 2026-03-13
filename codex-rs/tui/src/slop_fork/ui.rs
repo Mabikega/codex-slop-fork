@@ -156,6 +156,7 @@ pub(crate) enum SlopForkUiEffect {
 #[derive(Debug, Default)]
 pub(crate) struct SlopForkUi {
     automation_registry: Option<AutomationRegistry>,
+    last_manual_user_message: Option<String>,
     pending_chatgpt_login: Option<PendingChatgptLogin>,
     active_login_popup_kind: Option<LoginPopupKind>,
     saved_account_rate_limits_refresh: Option<SavedAccountRateLimitsRefreshState>,
@@ -164,10 +165,22 @@ pub(crate) struct SlopForkUi {
 }
 
 impl SlopForkUi {
+    pub(crate) fn note_manual_user_message(&mut self, message: &str) {
+        let trimmed = message.trim();
+        if !trimmed.is_empty() {
+            self.last_manual_user_message = Some(trimmed.to_string());
+        }
+    }
+
+    pub(crate) fn last_manual_user_message(&self) -> Option<&str> {
+        self.last_manual_user_message.as_deref()
+    }
+
     pub(crate) fn on_session_configured(
         &mut self,
         ctx: &SlopForkUiContext,
     ) -> Vec<SlopForkUiEffect> {
+        self.last_manual_user_message = None;
         self.pending_automation_policies.clear();
         let Some(thread_id) = ctx.thread_id.as_deref() else {
             self.automation_registry = None;

@@ -9248,8 +9248,64 @@ async fn auto_list_snapshot() {
 }
 
 #[tokio::test]
+async fn auto_now_submits_prompt_immediately() {
+    let dir = tempdir().unwrap();
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.thread_id = Some(ThreadId::new());
+
+    chat.dispatch_command_with_args(
+        SlashCommand::Auto,
+        "every --now 10m check deploy".to_string(),
+        Vec::new(),
+    );
+    drain_insert_history(&mut rx);
+
+    match next_submit_op(&mut op_rx) {
+        Op::UserTurn { items, .. } => {
+            let texts = items
+                .into_iter()
+                .filter_map(|item| match item {
+                    UserInput::Text { text, .. } => Some(text),
+                    UserInput::Image { .. }
+                    | UserInput::LocalImage { .. }
+                    | UserInput::Skill { .. }
+                    | UserInput::Mention { .. } => None,
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(texts, vec!["check deploy".to_string()]);
+        }
+        other => panic!("expected Op::UserTurn from --now automation, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn auto_now_respects_disabled_automation_execution() {
+    let dir = tempdir().unwrap();
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.thread_id = Some(ThreadId::new());
+    codex_core::slop_fork::update_slop_fork_config(&chat.config.codex_home, |config| {
+        config.automation_enabled = false;
+    })
+    .expect("disable automation execution");
+
+    chat.dispatch_command_with_args(
+        SlashCommand::Auto,
+        "every --now 10m check deploy".to_string(),
+        Vec::new(),
+    );
+    drain_insert_history(&mut rx);
+
+    assert_eq!(op_rx.try_recv(), Err(TryRecvError::Empty));
+}
+
+#[tokio::test]
 async fn on_complete_automation_submits_prompt_when_task_finishes() {
+    let dir = tempdir().unwrap();
     let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
     chat.thread_id = Some(ThreadId::new());
 
     chat.dispatch_command_with_args(
@@ -9280,6 +9336,117 @@ async fn on_complete_automation_submits_prompt_when_task_finishes() {
 }
 
 #[tokio::test]
+async fn auto_last_user_message_is_snapshotted_at_creation_time() {
+    let dir = tempdir().unwrap();
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.thread_id = Some(ThreadId::new());
+    chat.slop_fork_ui.note_manual_user_message("hi");
+
+    chat.dispatch_command_with_args(
+        SlashCommand::Auto,
+        "on-complete --last-user-message".to_string(),
+        Vec::new(),
+    );
+    drain_insert_history(&mut rx);
+
+    chat.slop_fork_ui.note_manual_user_message("hello");
+
+    chat.on_task_complete(Some("done".to_string()), false);
+
+    match next_submit_op(&mut op_rx) {
+        Op::UserTurn { items, .. } => {
+            let texts = items
+                .into_iter()
+                .filter_map(|item| match item {
+                    UserInput::Text { text, .. } => Some(text),
+                    UserInput::Image { .. }
+                    | UserInput::LocalImage { .. }
+                    | UserInput::Skill { .. }
+                    | UserInput::Mention { .. } => None,
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(texts, vec!["hi".to_string()]);
+        }
+        other => {
+            panic!("expected Op::UserTurn from snapshotted on-complete automation, got {other:?}")
+        }
+    }
+}
+
+#[tokio::test]
+async fn automation_prompt_does_not_replace_last_manual_user_message_snapshot_source() {
+    let dir = tempdir().unwrap();
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.thread_id = Some(ThreadId::new());
+    chat.slop_fork_ui.note_manual_user_message("hi");
+
+    chat.dispatch_command_with_args(
+        SlashCommand::Auto,
+        "on-complete --times 1 hello".to_string(),
+        Vec::new(),
+    );
+    drain_insert_history(&mut rx);
+    chat.on_task_complete(Some("done".to_string()), false);
+    let _ = next_submit_op(&mut op_rx);
+
+    chat.dispatch_command_with_args(
+        SlashCommand::Auto,
+        "on-complete --last-user-message".to_string(),
+        Vec::new(),
+    );
+    drain_insert_history(&mut rx);
+    chat.on_task_complete(Some("done again".to_string()), false);
+
+    match next_submit_op(&mut op_rx) {
+        Op::UserTurn { items, .. } => {
+            let texts = items
+                .into_iter()
+                .filter_map(|item| match item {
+                    UserInput::Text { text, .. } => Some(text),
+                    UserInput::Image { .. }
+                    | UserInput::LocalImage { .. }
+                    | UserInput::Skill { .. }
+                    | UserInput::Mention { .. } => None,
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(texts, vec!["hi".to_string()]);
+        }
+        other => {
+            panic!("expected Op::UserTurn from last manual user message snapshot, got {other:?}")
+        }
+    }
+}
+
+#[tokio::test]
+async fn last_user_message_snapshot_cache_clears_on_session_reconfigure() {
+    let dir = tempdir().unwrap();
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.thread_id = Some(ThreadId::new());
+    chat.slop_fork_ui.note_manual_user_message("hi");
+
+    chat.thread_id = Some(ThreadId::new());
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+
+    chat.dispatch_command_with_args(
+        SlashCommand::Auto,
+        "on-complete --last-user-message".to_string(),
+        Vec::new(),
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    let blob = lines_to_single_string(cells.last().unwrap());
+    assert!(blob.contains("No previous text user message is available"));
+}
+
+#[tokio::test]
 async fn automation_policy_events_from_other_threads_are_ignored() {
     let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
     chat.thread_id = Some(ThreadId::new());
@@ -9301,7 +9468,9 @@ async fn automation_policy_events_from_other_threads_are_ignored() {
 
 #[tokio::test]
 async fn due_auto_timer_submits_prompt_when_session_is_idle() {
+    let dir = tempdir().unwrap();
     let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
     let thread_id = ThreadId::new();
     chat.thread_id = Some(thread_id);
 
@@ -9352,7 +9521,9 @@ async fn due_auto_timer_submits_prompt_when_session_is_idle() {
 
 #[tokio::test]
 async fn due_auto_timer_does_not_submit_while_composer_has_draft() {
+    let dir = tempdir().unwrap();
     let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
     let thread_id = ThreadId::new();
     chat.thread_id = Some(thread_id);
 
@@ -9389,7 +9560,9 @@ async fn due_auto_timer_does_not_submit_while_composer_has_draft() {
 
 #[tokio::test]
 async fn due_auto_timer_does_not_submit_while_accounts_popup_is_open() {
+    let dir = tempdir().unwrap();
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
     let thread_id = ThreadId::new();
     chat.thread_id = Some(thread_id);
 
@@ -9427,7 +9600,9 @@ async fn due_auto_timer_does_not_submit_while_accounts_popup_is_open() {
 
 #[tokio::test]
 async fn on_complete_automation_preserves_manual_queue_order() {
+    let dir = tempdir().unwrap();
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
     chat.thread_id = Some(ThreadId::new());
 
     chat.dispatch_command_with_args(

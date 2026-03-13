@@ -1,3 +1,4 @@
+use std::ops::Range;
 use std::time::Duration;
 
 #[cfg(test)]
@@ -229,11 +230,55 @@ pub(crate) fn timer_schedule_usage(default_schedule: Option<Duration>) -> &'stat
     }
 }
 
+struct WordSpan<'a> {
+    word: &'a str,
+    span: Range<usize>,
+}
+
+fn split_whitespace_with_spans(input: &str) -> Vec<WordSpan<'_>> {
+    let mut words = Vec::new();
+    let mut start = None;
+
+    for (idx, ch) in input.char_indices() {
+        if ch.is_whitespace() {
+            if let Some(start_idx) = start.take() {
+                words.push(WordSpan {
+                    word: &input[start_idx..idx],
+                    span: start_idx..idx,
+                });
+            }
+        } else if start.is_none() {
+            start = Some(idx);
+        }
+    }
+
+    if let Some(start_idx) = start {
+        words.push(WordSpan {
+            word: &input[start_idx..],
+            span: start_idx..input.len(),
+        });
+    }
+
+    words
+}
+
+fn prompt_from_word(input: &str, words: &[WordSpan<'_>], index: usize) -> String {
+    words
+        .get(index)
+        .map_or_else(String::new, |word| input[word.span.start..].to_string())
+}
+
+fn prompt_before_word(input: &str, words: &[WordSpan<'_>], index: usize) -> String {
+    words.get(index).map_or_else(String::new, |word| {
+        input[..word.span.start].trim_end().to_string()
+    })
+}
+
 fn parse_prefixed_schedule(input: &str) -> Result<Option<TimerScheduleRequest>, String> {
-    let words = input.split_whitespace().collect::<Vec<_>>();
+    let words = split_whitespace_with_spans(input);
     if words
         .first()
-        .is_some_and(|word| word.eq_ignore_ascii_case("cron:"))
+        .is_some_and(|word| word.word.eq_ignore_ascii_case("cron:"))
     {
         if words.len() < 6 {
             return Err(
@@ -242,13 +287,17 @@ fn parse_prefixed_schedule(input: &str) -> Result<Option<TimerScheduleRequest>, 
             );
         }
 
-        let candidate = words[1..6].join(" ");
+        let candidate = words[1..6]
+            .iter()
+            .map(|word| word.word)
+            .collect::<Vec<_>>()
+            .join(" ");
         let cron = maybe_parse_cron_expression(&format!("cron:{candidate}"))?.ok_or_else(|| {
             "Cron schedules must have five fields: minute hour day-of-month month day-of-week."
                 .to_string()
         })?;
         return Ok(Some(TimerScheduleRequest {
-            prompt: words[6..].join(" "),
+            prompt: prompt_from_word(input, &words, 6),
             schedule: TimerSchedule::Cron(cron.clone()),
             schedule_label: format!("cron {}", cron.expression()),
             note: Some("Cron schedules use your local timezone.".to_string()),
@@ -266,10 +315,14 @@ fn parse_prefixed_schedule(input: &str) -> Result<Option<TimerScheduleRequest>, 
         );
     }
     if words.len() >= 5 {
-        let candidate = words[..5].join(" ");
+        let candidate = words[..5]
+            .iter()
+            .map(|word| word.word)
+            .collect::<Vec<_>>()
+            .join(" ");
         if let Some(cron) = maybe_parse_cron_expression(&candidate)? {
             return Ok(Some(TimerScheduleRequest {
-                prompt: words[5..].join(" "),
+                prompt: prompt_from_word(input, &words, 5),
                 schedule: TimerSchedule::Cron(cron.clone()),
                 schedule_label: format!("cron {}", cron.expression()),
                 note: Some("Cron schedules use your local timezone.".to_string()),
@@ -294,15 +347,15 @@ fn parse_prefixed_schedule(input: &str) -> Result<Option<TimerScheduleRequest>, 
 }
 
 fn parse_trailing_every_schedule(input: &str) -> Result<Option<TimerScheduleRequest>, String> {
-    let words = input.split_whitespace().collect::<Vec<_>>();
+    let words = split_whitespace_with_spans(input);
     if words.len() < 3 {
         return Ok(None);
     }
     if words.len() >= 2
-        && words[words.len() - 2].eq_ignore_ascii_case("every")
+        && words[words.len() - 2].word.eq_ignore_ascii_case("every")
         && words
             .last()
-            .and_then(|word| word.get(..5))
+            .and_then(|word| word.word.get(..5))
             .is_some_and(|prefix| prefix.eq_ignore_ascii_case("cron:"))
     {
         return Err(
@@ -313,8 +366,12 @@ fn parse_trailing_every_schedule(input: &str) -> Result<Option<TimerScheduleRequ
 
     if words.len() >= 7 {
         let every_index = words.len().saturating_sub(7);
-        if words[every_index].eq_ignore_ascii_case("every") {
-            let candidate = words[every_index + 1..].join(" ");
+        if words[every_index].word.eq_ignore_ascii_case("every") {
+            let candidate = words[every_index + 1..]
+                .iter()
+                .map(|word| word.word)
+                .collect::<Vec<_>>()
+                .join(" ");
             if looks_like_six_field_cron(&candidate) {
                 return Err(
                     "Cron schedules must have five fields: minute hour day-of-month month day-of-week."
@@ -325,8 +382,12 @@ fn parse_trailing_every_schedule(input: &str) -> Result<Option<TimerScheduleRequ
     }
     if words.len() >= 6 {
         let every_index = words.len().saturating_sub(6);
-        if words[every_index].eq_ignore_ascii_case("every") {
-            let candidate = words[every_index + 1..].join(" ");
+        if words[every_index].word.eq_ignore_ascii_case("every") {
+            let candidate = words[every_index + 1..]
+                .iter()
+                .map(|word| word.word)
+                .collect::<Vec<_>>()
+                .join(" ");
             if looks_like_six_field_cron(&candidate) {
                 return Err(
                     "Cron schedules must have five fields: minute hour day-of-month month day-of-week."
@@ -335,7 +396,7 @@ fn parse_trailing_every_schedule(input: &str) -> Result<Option<TimerScheduleRequ
             }
             if let Some(cron) = maybe_parse_cron_expression(&candidate)? {
                 return Ok(Some(TimerScheduleRequest {
-                    prompt: words[..every_index].join(" "),
+                    prompt: prompt_before_word(input, &words, every_index),
                     schedule: TimerSchedule::Cron(cron.clone()),
                     schedule_label: format!("cron {}", cron.expression()),
                     note: Some("Cron schedules use your local timezone.".to_string()),
@@ -344,22 +405,20 @@ fn parse_trailing_every_schedule(input: &str) -> Result<Option<TimerScheduleRequ
         }
     }
 
-    let last = words.last().copied().unwrap_or_default();
+    let last = words.last().map_or("", |word| word.word);
     let penultimate = words
         .get(words.len().saturating_sub(2))
-        .copied()
-        .unwrap_or_default();
+        .map_or("", |word| word.word);
     let antepenultimate = words
         .get(words.len().saturating_sub(3))
-        .copied()
-        .unwrap_or_default();
+        .map_or("", |word| word.word);
 
     if !antepenultimate.eq_ignore_ascii_case("every") {
         return Ok(None);
     }
     if let Ok((cadence, note)) = parse_interval_pair(penultimate, last) {
         return Ok(Some(TimerScheduleRequest {
-            prompt: words[..words.len() - 3].join(" "),
+            prompt: prompt_before_word(input, &words, words.len() - 3),
             schedule: TimerSchedule::Interval(cadence),
             schedule_label: compact_duration_label(cadence),
             note,
@@ -370,7 +429,7 @@ fn parse_trailing_every_schedule(input: &str) -> Result<Option<TimerScheduleRequ
         && let Ok((cadence, note)) = parse_interval_token(last)
     {
         return Ok(Some(TimerScheduleRequest {
-            prompt: words[..words.len() - 2].join(" "),
+            prompt: prompt_before_word(input, &words, words.len() - 2),
             schedule: TimerSchedule::Interval(cadence),
             schedule_label: compact_duration_label(cadence),
             note,
@@ -599,6 +658,17 @@ mod tests {
         let request =
             parse_timer_schedule_request("run tests every 5 minutes", None).expect("schedule");
         assert_eq!(request.prompt, "run tests");
+        assert_eq!(
+            request.schedule,
+            TimerSchedule::Interval(Duration::from_secs(5 * 60))
+        );
+    }
+
+    #[test]
+    fn parses_trailing_every_interval_schedule_with_multiline_prompt() {
+        let request = parse_timer_schedule_request("run tests\nthen report every 5 minutes", None)
+            .expect("schedule");
+        assert_eq!(request.prompt, "run tests\nthen report");
         assert_eq!(
             request.schedule,
             TimerSchedule::Interval(Duration::from_secs(5 * 60))

@@ -140,16 +140,25 @@ Maintenance note:
 Examples:
 
 - `$auto on-complete "continue working on this"`
+- `$auto on-complete --now "continue working on this"`
+- `$auto on-complete --last-user-message`
 - `$auto on-complete --times 10 "continue working on this"`
 - `$auto on-complete --until 14:00 --round-robin "msg1" "msg2" "msg3"`
 - `$auto on-complete --policy 'bash ./.codex/automation/next-message.sh' "continue working on this"`
 - `$auto every 10m "run tests"`
+- `$auto every --now --last-user-message 10m`
 - `$auto every "0 14 * * 1-5" "check deploy"`
 - `$auto list`
 - `$auto show session:auto-1`
 - `$auto pause session:auto-1`
 - `$auto resume session:auto-1`
 - `$auto rm session:auto-1`
+
+`--now` queues the configured message immediately and counts as the first run. It cannot be
+combined with `--policy`.
+
+`--last-user-message` (or `-l`) snapshots the current thread's most recent text user message when
+the automation is created, so later user turns do not change it.
 
 Behavior:
 

@@ -3852,6 +3852,8 @@ impl ChatWidget {
                     {
                         return;
                     }
+                    self.slop_fork_ui
+                        .note_manual_user_message(&user_message.text);
                     let Some(user_message) =
                         self.maybe_defer_user_message_for_realtime(user_message)
                     else {
@@ -3887,6 +3889,8 @@ impl ChatWidget {
                             .bottom_pane
                             .take_recent_submission_mention_bindings(),
                     };
+                    self.slop_fork_ui
+                        .note_manual_user_message(&user_message.text);
                     let Some(user_message) =
                         self.maybe_defer_user_message_for_realtime(user_message)
                     else {
@@ -4385,6 +4389,8 @@ impl ChatWidget {
                     text_elements: prepared_elements,
                     mention_bindings: self.bottom_pane.take_recent_submission_mention_bindings(),
                 };
+                self.slop_fork_ui
+                    .note_manual_user_message(&user_message.text);
                 if self.is_session_configured() {
                     self.reasoning_buffer.clear();
                     self.full_reasoning_buffer.clear();
@@ -4428,9 +4434,15 @@ impl ChatWidget {
                     .prepare_inline_args_submission(false)
                     .map(|(prepared_args, _prepared_elements)| prepared_args)
                     .unwrap_or(args);
-                let effects = self
+                let last_user_message = self
                     .slop_fork_ui
-                    .handle_auto_command(&self.slop_fork_context(), prepared_args.trim());
+                    .last_manual_user_message()
+                    .map(str::to_string);
+                let effects = self.slop_fork_ui.handle_auto_command(
+                    &self.slop_fork_context(),
+                    prepared_args.trim(),
+                    last_user_message.as_deref(),
+                );
                 self.apply_slop_fork_effects(effects);
                 self.bottom_pane.drain_pending_submission_state();
             }
@@ -8505,6 +8517,8 @@ impl ChatWidget {
             text_elements: Vec::new(),
             mention_bindings: Vec::new(),
         };
+        self.slop_fork_ui
+            .note_manual_user_message(&user_message.text);
         if should_queue {
             self.queue_user_message(user_message);
         } else {
