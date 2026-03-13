@@ -1,5 +1,12 @@
 use super::*;
 
+#[derive(Clone, Copy)]
+enum AutomationCreateInitialRun {
+    Immediate,
+    Deferred,
+    SuppressedByDisabled,
+}
+
 impl SlopForkUi {
     pub(crate) fn show_auto_usage(&self) -> Vec<SlopForkUiEffect> {
         vec![SlopForkUiEffect::AddPlainHistoryLines(
@@ -43,12 +50,18 @@ impl SlopForkUi {
                 note,
                 send_now,
             } => self.auto_create(
+                &fork_config,
                 ctx,
                 scope,
                 spec,
                 note,
-                send_now && fork_config.automation_enabled,
-                !fork_config.automation_enabled,
+                if !fork_config.automation_enabled {
+                    AutomationCreateInitialRun::SuppressedByDisabled
+                } else if send_now {
+                    AutomationCreateInitialRun::Immediate
+                } else {
+                    AutomationCreateInitialRun::Deferred
+                },
             ),
         }
     }
@@ -73,7 +86,7 @@ impl SlopForkUi {
             return Vec::new();
         };
 
-        self.dispatch_automation_actions(ctx, fork_config.automation_shell_timeout_ms, actions)
+        self.dispatch_automation_actions(&fork_config, ctx, actions)
     }
 
     pub(crate) fn automation_frame_effects(
@@ -139,13 +152,13 @@ impl SlopForkUi {
             }
         };
 
-        self.dispatch_automation_actions(ctx, fork_config.automation_shell_timeout_ms, actions)
+        self.dispatch_automation_actions(&fork_config, ctx, actions)
     }
 
     fn dispatch_automation_actions(
         &mut self,
+        fork_config: &SlopForkConfig,
         ctx: &SlopForkUiContext,
-        default_timeout_ms: u64,
         actions: Vec<AutomationPreparedAction>,
     ) -> Vec<SlopForkUiEffect> {
         let mut effects = Vec::new();
@@ -158,7 +171,12 @@ impl SlopForkUi {
                     if let Ok(registry) = self.ensure_automation_registry(ctx) {
                         let _ = registry.record_delivery(&runtime_id, Local::now());
                     }
-                    effects.push(SlopForkUiEffect::QueueAutomationPrompt(message));
+                    effects.push(SlopForkUiEffect::QueueAutomationPrompt {
+                        prompt: message,
+                        suppress_legacy_notify: fork_config.automation_disable_notify_script,
+                        suppress_terminal_notification: fork_config
+                            .automation_disable_terminal_notifications,
+                    });
                 }
                 AutomationPreparedAction::RunPolicy(policy) => {
                     let Some(thread_id) = ctx.thread_id.as_ref() else {
@@ -170,7 +188,11 @@ impl SlopForkUi {
                     {
                         continue;
                     }
-                    self.spawn_automation_policy_task(ctx, *policy, default_timeout_ms);
+                    self.spawn_automation_policy_task(
+                        ctx,
+                        *policy,
+                        fork_config.automation_shell_timeout_ms,
+                    );
                 }
             }
         }
@@ -375,12 +397,12 @@ impl SlopForkUi {
 
     fn auto_create(
         &mut self,
+        fork_config: &SlopForkConfig,
         ctx: &SlopForkUiContext,
         scope: AutomationScope,
         spec: AutomationSpec,
         note: Option<String>,
-        send_now: bool,
-        automation_disabled: bool,
+        initial_run: AutomationCreateInitialRun,
     ) -> Vec<SlopForkUiEffect> {
         let registry = match self.ensure_automation_registry(ctx) {
             Ok(registry) => registry,
@@ -390,8 +412,12 @@ impl SlopForkUi {
             Ok(entry) => {
                 let mut effects = vec![SlopForkUiEffect::AddInfoMessage {
                     message: format!("Created automation {}.", entry.runtime_id),
-                    hint: Some(match (note, entry.scope, send_now) {
-                        (Some(note), scope, _) if automation_disabled => match scope {
+                    hint: Some(match (note, entry.scope, initial_run) {
+                        (
+                            Some(note),
+                            scope,
+                            AutomationCreateInitialRun::SuppressedByDisabled,
+                        ) => match scope {
                             AutomationScope::Session => format!(
                                 "{note} Automation execution is currently disabled, so it was saved without running now. Session scope only. It will disappear when this conversation ends."
                             ),
@@ -402,64 +428,76 @@ impl SlopForkUi {
                                 "{note} Automation execution is currently disabled, so it was saved without running now. Global scope is saved for future conversations everywhere."
                             ),
                         },
-                        (Some(note), AutomationScope::Session, true) => format!(
+                        (Some(note), AutomationScope::Session, AutomationCreateInitialRun::Immediate) => format!(
                             "{note} Queued the first run immediately. Session scope only. It will disappear when this conversation ends."
                         ),
-                        (Some(note), AutomationScope::Repo, true) => format!(
+                        (Some(note), AutomationScope::Repo, AutomationCreateInitialRun::Immediate) => format!(
                             "{note} Queued the first run immediately. Repo scope is saved for future conversations in this repository."
                         ),
-                        (Some(note), AutomationScope::Global, true) => format!(
+                        (Some(note), AutomationScope::Global, AutomationCreateInitialRun::Immediate) => format!(
                             "{note} Queued the first run immediately. Global scope is saved for future conversations everywhere."
                         ),
-                        (Some(note), AutomationScope::Session, false) => format!(
+                        (Some(note), AutomationScope::Session, AutomationCreateInitialRun::Deferred) => format!(
                             "{note} Session scope only. It will disappear when this conversation ends."
                         ),
-                        (Some(note), AutomationScope::Repo, false) => format!(
+                        (Some(note), AutomationScope::Repo, AutomationCreateInitialRun::Deferred) => format!(
                             "{note} Repo scope is saved for future conversations in this repository."
                         ),
-                        (Some(note), AutomationScope::Global, false) => {
+                        (Some(note), AutomationScope::Global, AutomationCreateInitialRun::Deferred) => {
                             format!(
                                 "{note} Global scope is saved for future conversations everywhere."
                             )
                         }
-                        (None, AutomationScope::Session, _) if automation_disabled => {
+                        (
+                            None,
+                            AutomationScope::Session,
+                            AutomationCreateInitialRun::SuppressedByDisabled,
+                        ) => {
                             "Automation execution is currently disabled, so it was saved without running now. Session scope only. It will disappear when this conversation ends."
                                 .to_string()
                         }
-                        (None, AutomationScope::Repo, _) if automation_disabled => {
+                        (
+                            None,
+                            AutomationScope::Repo,
+                            AutomationCreateInitialRun::SuppressedByDisabled,
+                        ) => {
                             "Automation execution is currently disabled, so it was saved without running now. Repo scope is saved for future conversations in this repository."
                                 .to_string()
                         }
-                        (None, AutomationScope::Global, _) if automation_disabled => {
+                        (
+                            None,
+                            AutomationScope::Global,
+                            AutomationCreateInitialRun::SuppressedByDisabled,
+                        ) => {
                             "Automation execution is currently disabled, so it was saved without running now. Global scope is saved for future conversations everywhere."
                                 .to_string()
                         }
-                        (None, AutomationScope::Session, true) => {
+                        (None, AutomationScope::Session, AutomationCreateInitialRun::Immediate) => {
                             "Queued the first run immediately. Session scope only. It will disappear when this conversation ends."
                                 .to_string()
                         }
-                        (None, AutomationScope::Repo, true) => {
+                        (None, AutomationScope::Repo, AutomationCreateInitialRun::Immediate) => {
                             "Queued the first run immediately. Repo scope is saved for future conversations in this repository."
                                 .to_string()
                         }
-                        (None, AutomationScope::Global, true) => {
+                        (None, AutomationScope::Global, AutomationCreateInitialRun::Immediate) => {
                             "Queued the first run immediately. Global scope is saved for future conversations everywhere."
                                 .to_string()
                         }
-                        (None, AutomationScope::Session, false) => {
+                        (None, AutomationScope::Session, AutomationCreateInitialRun::Deferred) => {
                             "Session scope only. It will disappear when this conversation ends."
                                 .to_string()
                         }
-                        (None, AutomationScope::Repo, false) => {
+                        (None, AutomationScope::Repo, AutomationCreateInitialRun::Deferred) => {
                             "Repo scope is saved for future conversations in this repository."
                                 .to_string()
                         }
-                        (None, AutomationScope::Global, false) => {
+                        (None, AutomationScope::Global, AutomationCreateInitialRun::Deferred) => {
                             "Global scope is saved for future conversations everywhere.".to_string()
                         }
                     }),
                 }];
-                if send_now {
+                if matches!(initial_run, AutomationCreateInitialRun::Immediate) {
                     let message = match &entry.spec.message_source {
                         codex_core::slop_fork::automation::AutomationMessageSource::Static {
                             message,
@@ -476,7 +514,7 @@ impl SlopForkUi {
                             "Failed to queue first automation run: {err}"
                         ))];
                     }
-                    effects.push(SlopForkUiEffect::QueueAutomationPrompt(message));
+                    effects.push(self.automation_prompt_effect(fork_config, message));
                 }
                 effects
             }
@@ -563,7 +601,15 @@ impl SlopForkUi {
                     "Failed to apply automation policy result for {runtime_id_to_update}: {err}"
                 ))];
             }
-            vec![SlopForkUiEffect::QueueAutomationPrompt(message)]
+            let fork_config = match load_slop_fork_config(&ctx.codex_home) {
+                Ok(config) => config,
+                Err(err) => {
+                    return vec![SlopForkUiEffect::AddErrorMessage(format!(
+                        "Failed to load fork config: {err}"
+                    ))];
+                }
+            };
+            vec![self.automation_prompt_effect(&fork_config, message)]
         } else {
             match registry.apply_policy_decision(runtime_id_to_update, decision, Local::now()) {
                 Ok(Some(_)) | Ok(None) => Vec::new(),
@@ -592,5 +638,17 @@ impl SlopForkUi {
         vec![SlopForkUiEffect::AddErrorMessage(format!(
             "Automation {runtime_id_to_update} paused after policy failure: {error}"
         ))]
+    }
+
+    fn automation_prompt_effect(
+        &self,
+        fork_config: &SlopForkConfig,
+        prompt: String,
+    ) -> SlopForkUiEffect {
+        SlopForkUiEffect::QueueAutomationPrompt {
+            prompt,
+            suppress_legacy_notify: fork_config.automation_disable_notify_script,
+            suppress_terminal_notification: fork_config.automation_disable_terminal_notifications,
+        }
     }
 }

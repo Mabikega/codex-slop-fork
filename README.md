@@ -170,6 +170,8 @@ Behavior:
 - `automation_enabled = false` disables execution without deleting saved definitions
 - `automation_default_scope` controls the default storage scope for new rules
 - `automation_shell_timeout_ms` sets the default timeout for `--policy` shell commands
+- `automation_disable_notify_script = true` suppresses the legacy `notify` script for automation-triggered turns only
+- `automation_disable_terminal_notifications = true` suppresses terminal desktop notifications for automation-triggered turns only
 - supports `session`, `repo`, and `global` scope
 - supports `--times` and `--until`
 - supports round-robin messages

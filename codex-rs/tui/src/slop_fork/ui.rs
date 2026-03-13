@@ -150,7 +150,11 @@ pub(crate) enum SlopForkUiEffect {
         is_error: bool,
         is_warning: bool,
     },
-    QueueAutomationPrompt(String),
+    QueueAutomationPrompt {
+        prompt: String,
+        suppress_legacy_notify: bool,
+        suppress_terminal_notification: bool,
+    },
     ScheduleFrameIn(Duration),
 }
 

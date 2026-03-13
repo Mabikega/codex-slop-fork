@@ -13,6 +13,7 @@ use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
 use async_trait::async_trait;
+use codex_hooks::HookDispatchMetadata;
 use codex_hooks::HookEvent;
 use codex_hooks::HookEventAfterToolUse;
 use codex_hooks::HookPayload;
@@ -480,6 +481,7 @@ async fn dispatch_after_tool_use_hook(
                     output_preview: dispatch.output_preview.clone(),
                 },
             },
+            dispatch_metadata: HookDispatchMetadata::default(),
         })
         .await;
 

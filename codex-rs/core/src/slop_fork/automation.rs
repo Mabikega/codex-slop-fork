@@ -1,12 +1,14 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::fs::OpenOptions;
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use chrono::DateTime;
@@ -19,6 +21,7 @@ use chrono::TimeZone;
 use chrono::Timelike;
 use chrono::Weekday;
 use fd_lock::RwLock as FileRwLock;
+use once_cell::sync::Lazy;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
@@ -36,6 +39,63 @@ use codex_protocol::permissions::NetworkSandboxPolicy;
 const GLOBAL_AUTOMATIONS_FILE: &str = "codex-slop-fork-automations.toml";
 const AUTOMATION_STATE_FILE: &str = ".codex-slop-fork-automation-state.json";
 const AUTOMATION_STATE_LOCK_FILE: &str = ".codex-slop-fork-automation-state.lock";
+static PENDING_TURN_SUPPRESSIONS: Lazy<
+    Mutex<HashMap<String, VecDeque<AutomationTurnSuppression>>>,
+> = Lazy::new(|| Mutex::new(HashMap::new()));
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AutomationTurnSuppression {
+    pub suppress_legacy_notify: bool,
+}
+
+pub fn enqueue_automation_turn_suppression(
+    thread_id: &str,
+    suppression: AutomationTurnSuppression,
+) {
+    if suppression == AutomationTurnSuppression::default() {
+        return;
+    }
+    let mut pending = match PENDING_TURN_SUPPRESSIONS.lock() {
+        Ok(pending) => pending,
+        Err(_) => panic!("automation turn suppression queue poisoned"),
+    };
+    pending
+        .entry(thread_id.to_string())
+        .or_default()
+        .push_back(suppression);
+}
+
+pub fn discard_queued_automation_turn_suppression(thread_id: &str) {
+    let mut pending = match PENDING_TURN_SUPPRESSIONS.lock() {
+        Ok(pending) => pending,
+        Err(_) => panic!("automation turn suppression queue poisoned"),
+    };
+    let should_remove = pending
+        .get_mut(thread_id)
+        .map(|queue| {
+            queue.pop_back();
+            queue.is_empty()
+        })
+        .unwrap_or(false);
+    if should_remove {
+        pending.remove(thread_id);
+    }
+}
+
+pub fn take_automation_turn_suppression(thread_id: &str) -> AutomationTurnSuppression {
+    let mut pending = match PENDING_TURN_SUPPRESSIONS.lock() {
+        Ok(pending) => pending,
+        Err(_) => panic!("automation turn suppression queue poisoned"),
+    };
+    let Some(queue) = pending.get_mut(thread_id) else {
+        return AutomationTurnSuppression::default();
+    };
+    let suppression = queue.pop_front().unwrap_or_default();
+    if queue.is_empty() {
+        pending.remove(thread_id);
+    }
+    suppression
+}
 
 fn previous_fork_filename(parts: &[&str]) -> String {
     parts.join("-")

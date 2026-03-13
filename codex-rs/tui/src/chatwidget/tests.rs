@@ -1935,6 +1935,8 @@ async fn make_chatwidget_manual(
         startup_tooltip_override: None,
         slop_fork_ui: SlopForkUi::default(),
         queued_user_messages: VecDeque::new(),
+        queued_user_message_metadata: VecDeque::new(),
+        current_turn_user_message_metadata: QueuedUserMessageMetadata::default(),
         pending_steers: VecDeque::new(),
         submit_pending_steers_after_interrupt: false,
         queued_message_edit_binding: crate::key_hint::alt(KeyCode::Up),
@@ -3662,9 +3664,11 @@ async fn restore_thread_input_state_syncs_sleep_inhibitor_state() {
         composer: None,
         pending_steers: VecDeque::new(),
         queued_user_messages: VecDeque::new(),
+        queued_user_message_metadata: VecDeque::new(),
         current_collaboration_mode: chat.current_collaboration_mode.clone(),
         active_collaboration_mask: chat.active_collaboration_mask.clone(),
         agent_turn_running: true,
+        current_turn_user_message_metadata: QueuedUserMessageMetadata::default(),
     }));
 
     assert!(chat.agent_turn_running);
@@ -9363,6 +9367,57 @@ async fn on_complete_automation_submits_prompt_when_task_finishes() {
         }
         other => panic!("expected Op::UserTurn from on-complete automation, got {other:?}"),
     }
+}
+
+async fn run_automation_notification_suppression_case(
+    suppress_legacy_notify: bool,
+    suppress_terminal_notification: bool,
+) {
+    let dir = tempdir().unwrap();
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    codex_core::slop_fork::update_slop_fork_config(&chat.config.codex_home, |config| {
+        config.automation_disable_notify_script = suppress_legacy_notify;
+        config.automation_disable_terminal_notifications = suppress_terminal_notification;
+    })
+    .expect("enable automation notification suppression");
+
+    chat.dispatch_command_with_args(
+        SlashCommand::Auto,
+        "on-complete continue working on this".to_string(),
+        Vec::new(),
+    );
+
+    chat.on_task_complete(Some("next step".to_string()), false);
+    chat.pending_notification = None;
+
+    match next_submit_op(&mut op_rx) {
+        Op::UserTurn { .. } => {}
+        other => panic!("expected Op::UserTurn from automation, got {other:?}"),
+    }
+    let suppression =
+        codex_core::slop_fork::automation::take_automation_turn_suppression(&thread_id.to_string());
+    assert_eq!(suppression.suppress_legacy_notify, suppress_legacy_notify,);
+
+    chat.on_task_complete(Some("automation finished".to_string()), false);
+    if suppress_terminal_notification {
+        assert!(chat.pending_notification.is_none());
+    } else {
+        assert_matches!(
+            chat.pending_notification,
+            Some(Notification::AgentTurnComplete { ref response })
+                if response == "automation finished"
+        );
+    }
+}
+
+#[tokio::test]
+async fn automation_notification_suppression_settings_are_independent() {
+    run_automation_notification_suppression_case(true, false).await;
+    run_automation_notification_suppression_case(false, true).await;
+    run_automation_notification_suppression_case(true, true).await;
 }
 
 #[tokio::test]

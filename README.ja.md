@@ -156,6 +156,8 @@ bun install -g https://github.com/Mabikega/codex-slop-fork/releases/latest/downl
 - `automation_enabled = false` は、保存済み定義を削除せずに実行だけを無効化します
 - `automation_default_scope` は、新しいルールの既定保存スコープを制御します
 - `automation_shell_timeout_ms` は、`--policy` シェルコマンドの既定タイムアウトを設定します
+- `automation_disable_notify_script = true` は、オートメーション由来のターンに限って従来の `notify` スクリプトを抑止します
+- `automation_disable_terminal_notifications = true` は、オートメーション由来のターンに限って端末のデスクトップ通知を抑止します
 - `session`、`repo`、`global` スコープをサポートします
 - `--times` と `--until` をサポートします
 - ラウンドロビンのメッセージをサポートします

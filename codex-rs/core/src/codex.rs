@@ -4,6 +4,7 @@ use std::fmt::Debug;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::AtomicU64;
 
 use crate::AuthManager;
@@ -42,6 +43,7 @@ use crate::realtime_conversation::handle_text as handle_realtime_conversation_te
 use crate::rollout::session_index;
 use crate::slop_fork;
 use crate::slop_fork::RateLimitSwitchState;
+use crate::slop_fork::automation::AutomationTurnSuppression;
 use crate::stream_events_utils::HandleOutputCtx;
 use crate::stream_events_utils::handle_non_tool_response_item;
 use crate::stream_events_utils::handle_output_item_done;
@@ -59,6 +61,7 @@ use chrono::Local;
 use chrono::Utc;
 use codex_app_server_protocol::McpServerElicitationRequest;
 use codex_app_server_protocol::McpServerElicitationRequestParams;
+use codex_hooks::HookDispatchMetadata;
 use codex_hooks::HookEvent;
 use codex_hooks::HookEventAfterAgent;
 use codex_hooks::HookPayload;
@@ -730,6 +733,7 @@ pub(crate) struct TurnContext {
     pub(crate) turn_metadata_state: Arc<TurnMetadataState>,
     pub(crate) turn_skills: TurnSkillsContext,
     pub(crate) turn_timing_state: Arc<TurnTimingState>,
+    pub(crate) slop_fork_automation_turn_suppression: Arc<StdMutex<AutomationTurnSuppression>>,
 }
 impl TurnContext {
     pub(crate) fn model_context_window(&self) -> Option<i64> {
@@ -828,6 +832,30 @@ impl TurnContext {
             turn_metadata_state: self.turn_metadata_state.clone(),
             turn_skills: self.turn_skills.clone(),
             turn_timing_state: Arc::clone(&self.turn_timing_state),
+            slop_fork_automation_turn_suppression: Arc::clone(
+                &self.slop_fork_automation_turn_suppression,
+            ),
+        }
+    }
+
+    pub(crate) fn merge_slop_fork_automation_turn_suppression(
+        &self,
+        suppression: AutomationTurnSuppression,
+    ) {
+        if suppression == AutomationTurnSuppression::default() {
+            return;
+        }
+        let mut current = match self.slop_fork_automation_turn_suppression.lock() {
+            Ok(current) => current,
+            Err(_) => panic!("automation turn suppression state poisoned"),
+        };
+        current.suppress_legacy_notify |= suppression.suppress_legacy_notify;
+    }
+
+    pub(crate) fn slop_fork_automation_turn_suppression(&self) -> AutomationTurnSuppression {
+        match self.slop_fork_automation_turn_suppression.lock() {
+            Ok(suppression) => *suppression,
+            Err(_) => panic!("automation turn suppression state poisoned"),
         }
     }
 
@@ -1168,6 +1196,7 @@ impl Session {
         sub_id: String,
         js_repl: Arc<JsReplHandle>,
         skills_outcome: Arc<SkillLoadOutcome>,
+        slop_fork_automation_turn_suppression: AutomationTurnSuppression,
     ) -> TurnContext {
         let reasoning_effort = session_configuration.collaboration_mode.reasoning_effort();
         let reasoning_summary = session_configuration
@@ -1244,6 +1273,9 @@ impl Session {
             turn_metadata_state,
             turn_skills: TurnSkillsContext::new(skills_outcome),
             turn_timing_state: Arc::new(TurnTimingState::default()),
+            slop_fork_automation_turn_suppression: Arc::new(StdMutex::new(
+                slop_fork_automation_turn_suppression,
+            )),
         }
     }
 
@@ -2197,6 +2229,7 @@ impl Session {
         &self,
         sub_id: String,
         updates: SessionSettingsUpdate,
+        slop_fork_automation_turn_suppression: AutomationTurnSuppression,
     ) -> ConstraintResult<Arc<TurnContext>> {
         let (
             session_configuration,
@@ -2250,6 +2283,7 @@ impl Session {
                 session_configuration,
                 updates.final_output_json_schema,
                 sandbox_policy_changed,
+                slop_fork_automation_turn_suppression,
             )
             .await)
     }
@@ -2260,6 +2294,7 @@ impl Session {
         session_configuration: SessionConfiguration,
         final_output_json_schema: Option<Option<Value>>,
         sandbox_policy_changed: bool,
+        slop_fork_automation_turn_suppression: AutomationTurnSuppression,
     ) -> Arc<TurnContext> {
         let per_turn_config = Self::build_per_turn_config(&session_configuration);
         self.services
@@ -2317,6 +2352,7 @@ impl Session {
             sub_id,
             Arc::clone(&self.js_repl),
             skills_outcome,
+            slop_fork_automation_turn_suppression,
         );
         turn_context.realtime_active = self.conversation.running_state().await.is_some();
 
@@ -2476,8 +2512,14 @@ impl Session {
             let state = self.state.lock().await;
             state.session_configuration.clone()
         };
-        self.new_turn_from_configuration(sub_id, session_configuration, None, false)
-            .await
+        self.new_turn_from_configuration(
+            sub_id,
+            session_configuration,
+            None,
+            false,
+            AutomationTurnSuppression::default(),
+        )
+        .await
     }
 
     async fn build_settings_update_items(
@@ -4302,6 +4344,8 @@ mod handlers {
     use crate::review_prompts::resolve_review_request;
     use crate::rollout::RolloutRecorder;
     use crate::rollout::session_index;
+    use crate::slop_fork::automation::AutomationTurnSuppression;
+    use crate::slop_fork::automation::take_automation_turn_suppression;
     use crate::tasks::CompactTask;
     use crate::tasks::UndoTask;
     use crate::tasks::UserShellCommandMode;
@@ -4426,21 +4470,42 @@ mod handlers {
             _ => unreachable!(),
         };
 
-        let Ok(current_context) = sess.new_turn_with_sub_id(sub_id, updates).await else {
+        let Ok(current_context) = sess
+            .new_turn_with_sub_id(sub_id, updates, AutomationTurnSuppression::default())
+            .await
+        else {
             // new_turn_with_sub_id already emits the error event.
             return;
         };
         sess.maybe_emit_unknown_model_warning_for_turn(current_context.as_ref())
             .await;
         current_context.session_telemetry.user_prompt(&items);
+        let active_turn_context = sess
+            .active_turn_context_and_cancellation_token()
+            .await
+            .map(|(turn_context, _)| turn_context);
 
         // Attempt to inject input into current task.
-        if let Err(SteerInputError::NoActiveTurn(items)) = sess.steer_input(items, None).await {
-            sess.refresh_mcp_servers_if_requested(&current_context)
-                .await;
-            let regular_task = sess.take_startup_regular_task().await.unwrap_or_default();
-            sess.spawn_task(Arc::clone(&current_context), items, regular_task)
-                .await;
+        match sess.steer_input(items.clone(), None).await {
+            Ok(_) => {
+                if let Some(turn_context) = active_turn_context {
+                    turn_context.merge_slop_fork_automation_turn_suppression(
+                        take_automation_turn_suppression(&sess.conversation_id.to_string()),
+                    );
+                }
+            }
+            Err(SteerInputError::NoActiveTurn(items)) => {
+                current_context.merge_slop_fork_automation_turn_suppression(
+                    take_automation_turn_suppression(&sess.conversation_id.to_string()),
+                );
+                sess.refresh_mcp_servers_if_requested(&current_context)
+                    .await;
+                let regular_task = sess.take_startup_regular_task().await.unwrap_or_default();
+                sess.spawn_task(Arc::clone(&current_context), items, regular_task)
+                    .await;
+            }
+            Err(SteerInputError::ExpectedTurnMismatch { .. })
+            | Err(SteerInputError::EmptyInput) => {}
         }
     }
 
@@ -5262,6 +5327,9 @@ async fn spawn_review_thread(
         turn_metadata_state,
         turn_skills: TurnSkillsContext::new(parent_turn_context.turn_skills.outcome.clone()),
         turn_timing_state: Arc::new(TurnTimingState::default()),
+        slop_fork_automation_turn_suppression: Arc::new(StdMutex::new(
+            AutomationTurnSuppression::default(),
+        )),
     };
 
     // Seed the child task with the review prompt as the initial user message.
@@ -5778,6 +5846,11 @@ pub(crate) async fn run_turn(
                                     input_messages: sampling_request_input_messages,
                                     last_assistant_message: last_agent_message.clone(),
                                 },
+                            },
+                            dispatch_metadata: HookDispatchMetadata {
+                                skip_legacy_notify: turn_context
+                                    .slop_fork_automation_turn_suppression()
+                                    .suppress_legacy_notify,
                             },
                         })
                         .await;

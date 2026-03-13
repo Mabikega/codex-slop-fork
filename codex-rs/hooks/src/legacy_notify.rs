@@ -50,6 +50,9 @@ pub fn notify_hook(argv: Vec<String>) -> Hook {
         func: Arc::new(move |payload: &HookPayload| {
             let argv = Arc::clone(&argv);
             Box::pin(async move {
+                if payload.dispatch_metadata.skip_legacy_notify {
+                    return HookResult::Success;
+                }
                 let mut command = match command_from_argv(&argv) {
                     Some(command) => command,
                     None => return HookResult::Success,
@@ -134,6 +137,7 @@ mod tests {
                     ),
                 },
             },
+            dispatch_metadata: crate::types::HookDispatchMetadata::default(),
         };
 
         let serialized = legacy_notify_json(&payload)?;

@@ -82,6 +82,9 @@ use codex_core::models_manager::manager::ModelsManager;
 use codex_core::plugins::PluginsManager;
 use codex_core::project_doc::DEFAULT_PROJECT_DOC_FILENAME;
 use codex_core::skills::model::SkillMetadata;
+use codex_core::slop_fork::automation::AutomationTurnSuppression;
+use codex_core::slop_fork::automation::discard_queued_automation_turn_suppression;
+use codex_core::slop_fork::automation::enqueue_automation_turn_suppression;
 use codex_core::terminal::TerminalName;
 use codex_core::terminal::terminal_info;
 use codex_core::windows_sandbox::WindowsSandboxLevelExt;
@@ -639,6 +642,8 @@ pub(crate) struct ChatWidget {
     suppress_session_configured_redraw: bool,
     // User messages queued while a turn is in progress
     queued_user_messages: VecDeque<UserMessage>,
+    queued_user_message_metadata: VecDeque<QueuedUserMessageMetadata>,
+    current_turn_user_message_metadata: QueuedUserMessageMetadata,
     slop_fork_ui: SlopForkUi,
     // Steers already submitted to core but not yet committed into history.
     //
@@ -779,14 +784,22 @@ impl ThreadComposerState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct QueuedUserMessageMetadata {
+    suppress_terminal_notification: bool,
+    suppress_legacy_notify: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ThreadInputState {
     composer: Option<ThreadComposerState>,
     pending_steers: VecDeque<UserMessage>,
     queued_user_messages: VecDeque<UserMessage>,
+    queued_user_message_metadata: VecDeque<QueuedUserMessageMetadata>,
     current_collaboration_mode: CollaborationMode,
     active_collaboration_mask: Option<CollaborationModeMask>,
     agent_turn_running: bool,
+    current_turn_user_message_metadata: QueuedUserMessageMetadata,
 }
 
 impl From<String> for UserMessage {
@@ -1651,6 +1664,8 @@ impl ChatWidget {
 
         let had_pending_steers = !self.pending_steers.is_empty();
         self.refresh_pending_input_preview();
+        let completed_turn_metadata = self.current_turn_user_message_metadata;
+        self.current_turn_user_message_metadata = QueuedUserMessageMetadata::default();
 
         if !from_replay && self.queued_user_messages.is_empty() && !had_pending_steers {
             self.maybe_prompt_plan_implementation();
@@ -1669,9 +1684,11 @@ impl ChatWidget {
         // If there is a queued user message, send exactly one now to begin the next turn.
         self.maybe_send_next_queued_input();
         // Emit a notification when the turn completes (suppressed if focused).
-        self.notify(Notification::AgentTurnComplete {
-            response: last_agent_message.unwrap_or_default(),
-        });
+        if !completed_turn_metadata.suppress_terminal_notification {
+            self.notify(Notification::AgentTurnComplete {
+                response: last_agent_message.unwrap_or_default(),
+            });
+        }
 
         self.maybe_show_pending_rate_limit_prompt();
     }
@@ -1954,6 +1971,7 @@ impl ChatWidget {
         self.adaptive_chunking.reset();
         self.stream_controller = None;
         self.plan_stream_controller = None;
+        self.current_turn_user_message_metadata = QueuedUserMessageMetadata::default();
         self.pending_status_indicator_restore = false;
         self.request_status_line_branch_refresh();
         self.maybe_show_pending_rate_limit_prompt();
@@ -2128,6 +2146,7 @@ impl ChatWidget {
             .map(|steer| steer.user_message)
             .collect();
         to_merge.extend(self.queued_user_messages.drain(..));
+        self.queued_user_message_metadata.clear();
         if !existing_message.text.is_empty()
             || !existing_message.local_images.is_empty()
             || !existing_message.remote_image_urls.is_empty()
@@ -2173,9 +2192,11 @@ impl ChatWidget {
                 .map(|pending| pending.user_message.clone())
                 .collect(),
             queued_user_messages: self.queued_user_messages.clone(),
+            queued_user_message_metadata: self.queued_user_message_metadata.clone(),
             current_collaboration_mode: self.current_collaboration_mode.clone(),
             active_collaboration_mask: self.active_collaboration_mask.clone(),
             agent_turn_running: self.agent_turn_running,
+            current_turn_user_message_metadata: self.current_turn_user_message_metadata,
         })
     }
 
@@ -2213,8 +2234,16 @@ impl ChatWidget {
             }
             self.pending_steers.clear();
             self.queued_user_messages = input_state.pending_steers;
+            self.queued_user_message_metadata = VecDeque::from(vec![
+                    QueuedUserMessageMetadata::default();
+                    self.queued_user_messages.len()
+                ]);
             self.queued_user_messages
                 .extend(input_state.queued_user_messages);
+            self.queued_user_message_metadata
+                .extend(input_state.queued_user_message_metadata);
+            self.current_turn_user_message_metadata =
+                input_state.current_turn_user_message_metadata;
         } else {
             self.agent_turn_running = false;
             self.pending_steers.clear();
@@ -2227,6 +2256,8 @@ impl ChatWidget {
             );
             self.bottom_pane.set_composer_pending_pastes(Vec::new());
             self.queued_user_messages.clear();
+            self.queued_user_message_metadata.clear();
+            self.current_turn_user_message_metadata = QueuedUserMessageMetadata::default();
         }
         self.turn_sleep_inhibitor
             .set_turn_running(self.agent_turn_running);
@@ -3295,6 +3326,8 @@ impl ChatWidget {
             thread_name: None,
             forked_from: None,
             queued_user_messages: VecDeque::new(),
+            queued_user_message_metadata: VecDeque::new(),
+            current_turn_user_message_metadata: QueuedUserMessageMetadata::default(),
             slop_fork_ui: SlopForkUi::default(),
             pending_steers: VecDeque::new(),
             submit_pending_steers_after_interrupt: false,
@@ -3486,6 +3519,8 @@ impl ChatWidget {
             plan_delta_buffer: String::new(),
             plan_item_active: false,
             queued_user_messages: VecDeque::new(),
+            queued_user_message_metadata: VecDeque::new(),
+            current_turn_user_message_metadata: QueuedUserMessageMetadata::default(),
             slop_fork_ui: SlopForkUi::default(),
             pending_steers: VecDeque::new(),
             submit_pending_steers_after_interrupt: false,
@@ -3661,6 +3696,8 @@ impl ChatWidget {
             thread_name: None,
             forked_from: None,
             queued_user_messages: VecDeque::new(),
+            queued_user_message_metadata: VecDeque::new(),
+            current_turn_user_message_metadata: QueuedUserMessageMetadata::default(),
             slop_fork_ui: SlopForkUi::default(),
             pending_steers: VecDeque::new(),
             submit_pending_steers_after_interrupt: false,
@@ -3797,6 +3834,7 @@ impl ChatWidget {
             && !self.queued_user_messages.is_empty()
         {
             if let Some(user_message) = self.queued_user_messages.pop_back() {
+                let _ = self.queued_user_message_metadata.pop_back();
                 self.restore_user_message_to_composer(user_message);
                 self.refresh_pending_input_preview();
                 self.request_redraw();
@@ -4533,15 +4571,24 @@ impl ChatWidget {
     }
 
     fn queue_user_message(&mut self, user_message: UserMessage) {
+        self.queue_user_message_with_metadata(user_message, QueuedUserMessageMetadata::default());
+    }
+
+    fn queue_user_message_with_metadata(
+        &mut self,
+        user_message: UserMessage,
+        metadata: QueuedUserMessageMetadata,
+    ) {
         if !self.is_session_configured()
             || self.bottom_pane.is_task_running()
             || self.is_review_mode
             || !self.queued_user_messages.is_empty()
         {
             self.queued_user_messages.push_back(user_message);
+            self.queued_user_message_metadata.push_back(metadata);
             self.refresh_pending_input_preview();
         } else {
-            self.submit_user_message(user_message);
+            self.submit_user_message_with_metadata(user_message, metadata);
         }
     }
 
@@ -4598,14 +4645,24 @@ impl ChatWidget {
                 } => {
                     self.on_auth_state_changed(message, is_error, is_warning);
                 }
-                SlopForkUiEffect::QueueAutomationPrompt(prompt) => {
-                    self.queue_user_message(UserMessage {
-                        text: prompt,
-                        local_images: Vec::new(),
-                        remote_image_urls: Vec::new(),
-                        text_elements: Vec::new(),
-                        mention_bindings: Vec::new(),
-                    });
+                SlopForkUiEffect::QueueAutomationPrompt {
+                    prompt,
+                    suppress_legacy_notify,
+                    suppress_terminal_notification,
+                } => {
+                    self.queue_user_message_with_metadata(
+                        UserMessage {
+                            text: prompt,
+                            local_images: Vec::new(),
+                            remote_image_urls: Vec::new(),
+                            text_elements: Vec::new(),
+                            mention_bindings: Vec::new(),
+                        },
+                        QueuedUserMessageMetadata {
+                            suppress_terminal_notification,
+                            suppress_legacy_notify,
+                        },
+                    );
                 }
                 SlopForkUiEffect::ScheduleFrameIn(delay) => {
                     self.frame_requester.schedule_frame_in(delay);
@@ -4650,14 +4707,24 @@ impl ChatWidget {
     }
 
     fn submit_user_message(&mut self, user_message: UserMessage) {
+        self.submit_user_message_with_metadata(user_message, QueuedUserMessageMetadata::default());
+    }
+
+    fn submit_user_message_with_metadata(
+        &mut self,
+        user_message: UserMessage,
+        metadata: QueuedUserMessageMetadata,
+    ) {
         if !self.is_session_configured() {
             tracing::warn!("cannot submit user message before session is configured; queueing");
             self.queued_user_messages.push_front(user_message);
+            self.queued_user_message_metadata.push_front(metadata);
             self.refresh_pending_input_preview();
             return;
         }
         if self.is_review_mode {
             self.queued_user_messages.push_back(user_message);
+            self.queued_user_message_metadata.push_back(metadata);
             self.refresh_pending_input_preview();
             return;
         }
@@ -4869,9 +4936,28 @@ impl ChatWidget {
             personality,
         };
 
+        let suppression_enqueued = metadata.suppress_legacy_notify
+            && self
+                .thread_id
+                .as_ref()
+                .map(|thread_id| {
+                    enqueue_automation_turn_suppression(
+                        &thread_id.to_string(),
+                        AutomationTurnSuppression {
+                            suppress_legacy_notify: true,
+                        },
+                    );
+                    true
+                })
+                .unwrap_or(false);
+
         if !self.submit_op(op) {
+            if suppression_enqueued && let Some(thread_id) = self.thread_id.as_ref() {
+                discard_queued_automation_turn_suppression(&thread_id.to_string());
+            }
             return;
         }
+        self.current_turn_user_message_metadata = metadata;
 
         // Persist the text to cross-session message history.
         if !text.is_empty() {
@@ -5414,7 +5500,11 @@ impl ChatWidget {
             return;
         }
         if let Some(user_message) = self.queued_user_messages.pop_front() {
-            self.submit_user_message(user_message);
+            let metadata = self
+                .queued_user_message_metadata
+                .pop_front()
+                .unwrap_or_default();
+            self.submit_user_message_with_metadata(user_message, metadata);
         }
         // Update the list to reflect the remaining queued messages (if any).
         self.refresh_pending_input_preview();
