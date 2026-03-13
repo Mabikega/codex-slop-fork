@@ -9,6 +9,7 @@ pub(crate) struct LoginSettingsState {
     pub(crate) api_key_fallback_on_all_accounts_limited: bool,
     pub(crate) auto_start_five_hour_quota: bool,
     pub(crate) auto_start_weekly_quota: bool,
+    pub(crate) show_account_numbers_instead_of_emails: bool,
     pub(crate) show_average_account_limits_in_status_line: bool,
 }
 

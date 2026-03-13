@@ -1,5 +1,6 @@
 ---
 source: tui/src/chatwidget/tests.rs
+assertion_line: 8260
 expression: popup
 ---
   Account Settings
@@ -16,6 +17,8 @@ expression: popup
                                  hour window is untouched.
   [ ] Auto start weekly quota    Automatically send one tiny request when cached data says the 7-
                                  day window is untouched.
+  [ ] Number account labels      Show saved ChatGPT accounts as Account N, ordered by UID when
+                                 available, instead of exposing email addresses.
   [ ] Avg limits in status line  Show average saved-account 5-hour and weekly limits in the status
                                  line.
 

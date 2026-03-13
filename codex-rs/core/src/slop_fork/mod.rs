@@ -211,12 +211,14 @@ pub(crate) async fn maybe_switch_account_for_rate_limit(
         }
     }
     *client_session = sess.services.model_client.new_session();
+    let display_labels =
+        auth_accounts::load_account_display_labels(&turn_context.config.codex_home);
     sess.send_event(
         turn_context,
         EventMsg::Warning(WarningEvent {
             message: format!(
                 "Switched to saved account {} after hitting a rate limit.",
-                auth_accounts::account_label(&next_account)
+                display_labels.label_for_account(&next_account)
             ),
         }),
     )

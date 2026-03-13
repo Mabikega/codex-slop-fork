@@ -67,7 +67,7 @@ impl LoginSettingsView {
     }
 
     fn visible_len(&self) -> usize {
-        6
+        7
     }
 
     fn build_rows(&self) -> Vec<GenericDisplayRow> {
@@ -96,6 +96,11 @@ impl LoginSettingsView {
                 "Auto start weekly quota",
                 "Automatically send one tiny request when cached data says the 7-day window is untouched.",
                 self.settings.auto_start_weekly_quota,
+            ),
+            (
+                "Number account labels",
+                "Show saved ChatGPT accounts as Account N, ordered by UID when available, instead of exposing email addresses.",
+                self.settings.show_account_numbers_instead_of_emails,
             ),
             (
                 "Avg limits in status line",
@@ -156,6 +161,10 @@ impl LoginSettingsView {
                 self.settings.auto_start_weekly_quota = !self.settings.auto_start_weekly_quota;
             }
             Some(5) => {
+                self.settings.show_account_numbers_instead_of_emails =
+                    !self.settings.show_account_numbers_instead_of_emails;
+            }
+            Some(6) => {
                 self.settings.show_average_account_limits_in_status_line =
                     !self.settings.show_average_account_limits_in_status_line;
             }

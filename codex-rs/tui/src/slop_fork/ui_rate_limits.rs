@@ -307,7 +307,7 @@ impl SlopForkUi {
         ctx: &SlopForkUiContext,
         target: SavedAccountRateLimitsRefreshTarget,
     ) -> Vec<SlopForkUiEffect> {
-        let (_, _, _, accounts, _, _) = match self.login_popup_state(ctx) {
+        let (_, _, _, accounts, _, _, _) = match self.login_popup_state(ctx) {
             Ok(state) => state,
             Err(err) => {
                 return vec![SlopForkUiEffect::AddErrorMessage(format!(

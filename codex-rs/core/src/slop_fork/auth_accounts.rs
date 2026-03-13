@@ -3,6 +3,7 @@ use chrono::Utc;
 use codex_app_server_protocol::AuthMode;
 use sha2::Digest;
 use sha2::Sha256;
+use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -13,6 +14,8 @@ use crate::auth::load_auth_dot_json;
 use crate::path_utils::write_atomically;
 
 use super::account_rate_limits;
+use super::config::SlopForkConfig;
+use super::config::maybe_load_slop_fork_config;
 use super::save_auth_with_account_sync;
 
 const ACCOUNTS_DIR: &str = ".accounts";
@@ -42,6 +45,11 @@ pub struct RenameAllAccountsResult {
     pub skipped_existing_count: usize,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AccountDisplayLabels {
+    chatgpt_labels_by_lookup_key: HashMap<String, String>,
+}
+
 pub fn accounts_dir(codex_home: &Path) -> PathBuf {
     codex_home.join(ACCOUNTS_DIR)
 }
@@ -52,6 +60,12 @@ pub fn account_switch_lock_path(codex_home: &Path) -> PathBuf {
 
 pub fn account_label(account: &StoredAccount) -> String {
     auth_label(&account.auth)
+}
+
+pub fn load_account_display_labels(codex_home: &Path) -> AccountDisplayLabels {
+    let config = maybe_load_slop_fork_config(codex_home).unwrap_or_default();
+    let accounts = list_accounts(codex_home).unwrap_or_default();
+    AccountDisplayLabels::from_config(&config, &accounts)
 }
 
 pub fn auth_label(auth: &AuthDotJson) -> String {
@@ -65,20 +79,18 @@ pub fn auth_label(auth: &AuthDotJson) -> String {
             format!("API key ({suffix})")
         }
         AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => {
-            let Some(tokens) = auth.tokens.as_ref() else {
-                return "ChatGPT account".to_string();
-            };
-            let email = tokens
-                .id_token
-                .email
-                .clone()
-                .or_else(|| tokens.account_id.clone())
+            let base_label = auth
+                .tokens
+                .as_ref()
+                .and_then(|tokens| {
+                    tokens
+                        .id_token
+                        .email
+                        .clone()
+                        .or_else(|| tokens.account_id.clone())
+                })
                 .unwrap_or_else(|| "ChatGPT account".to_string());
-            let plan = tokens.id_token.get_chatgpt_plan_type();
-            match plan {
-                Some(plan) => format!("{email} ({plan})"),
-                None => email,
-            }
+            chatgpt_label_with_base(auth, base_label)
         }
     }
 }
@@ -95,6 +107,99 @@ pub fn codex_auth_label(auth: &CodexAuth) -> String {
     auth.get_account_email()
         .or_else(|| auth.get_account_id())
         .unwrap_or_else(|| "ChatGPT account".to_string())
+}
+
+impl AccountDisplayLabels {
+    pub fn from_config(config: &SlopForkConfig, accounts: &[StoredAccount]) -> Self {
+        if !config.show_account_numbers_instead_of_emails {
+            return Self::default();
+        }
+
+        let mut ordered_accounts = accounts
+            .iter()
+            .filter(|account| account.auth.is_chatgpt_mode())
+            .map(chatgpt_account_label_keys)
+            .collect::<Vec<_>>();
+        ordered_accounts.sort_by(|lhs, rhs| lhs.sort_key.cmp(&rhs.sort_key));
+
+        let mut chatgpt_labels_by_lookup_key = HashMap::new();
+        for (index, keys) in ordered_accounts.into_iter().enumerate() {
+            chatgpt_labels_by_lookup_key.insert(keys.lookup_key, format!("Account {}", index + 1));
+        }
+
+        Self {
+            chatgpt_labels_by_lookup_key,
+        }
+    }
+
+    pub fn label_for_account(&self, account: &StoredAccount) -> String {
+        self.label_for_auth(&account.auth)
+    }
+
+    pub fn label_for_auth(&self, auth: &AuthDotJson) -> String {
+        self.label_for_auth_with_lookup_key(auth, chatgpt_account_lookup_key(auth))
+    }
+
+    pub fn label_for_codex_auth(&self, auth: &CodexAuth) -> String {
+        if let Some(auth_dot_json) = auth.auth_dot_json() {
+            return self.label_for_auth(&auth_dot_json);
+        }
+
+        if let Some(lookup_key) = auth
+            .get_account_id()
+            .or_else(|| auth.get_chatgpt_user_id())
+            .or_else(|| stored_account_id_for_auth(auth))
+            && let Some(label) = self.chatgpt_labels_by_lookup_key.get(&lookup_key)
+        {
+            return label.clone();
+        }
+
+        codex_auth_label(auth)
+    }
+
+    fn label_for_auth_with_lookup_key(
+        &self,
+        auth: &AuthDotJson,
+        lookup_key: Option<String>,
+    ) -> String {
+        if let Some(lookup_key) = lookup_key
+            && let Some(numbered_label) = self.chatgpt_labels_by_lookup_key.get(&lookup_key)
+        {
+            return chatgpt_label_with_base(auth, numbered_label.clone());
+        }
+
+        auth_label(auth)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChatgptAccountLabelKeys {
+    lookup_key: String,
+    sort_key: (String, String, String),
+}
+
+fn chatgpt_account_label_keys(account: &StoredAccount) -> ChatgptAccountLabelKeys {
+    let fallback = account.id.clone();
+    let lookup_key = chatgpt_account_lookup_key(&account.auth).unwrap_or_else(|| fallback.clone());
+    let user_id = account
+        .auth
+        .tokens
+        .as_ref()
+        .and_then(|tokens| tokens.id_token.chatgpt_user_id.clone())
+        .unwrap_or_else(|| lookup_key.clone());
+    ChatgptAccountLabelKeys {
+        lookup_key: lookup_key.clone(),
+        sort_key: (user_id, lookup_key, fallback),
+    }
+}
+
+fn chatgpt_account_lookup_key(auth: &AuthDotJson) -> Option<String> {
+    let tokens = auth.tokens.as_ref()?;
+    tokens
+        .account_id
+        .clone()
+        .or_else(|| tokens.id_token.chatgpt_account_id.clone())
+        .or_else(|| tokens.id_token.chatgpt_user_id.clone())
 }
 
 pub fn list_accounts(codex_home: &Path) -> std::io::Result<Vec<StoredAccount>> {
@@ -403,6 +508,17 @@ fn should_prefer_account_file(
     }
 }
 
+fn chatgpt_label_with_base(auth: &AuthDotJson, base_label: String) -> String {
+    match auth
+        .tokens
+        .as_ref()
+        .and_then(|tokens| tokens.id_token.get_chatgpt_plan_type())
+    {
+        Some(plan) => format!("{base_label} ({plan})"),
+        None => base_label,
+    }
+}
+
 fn account_identity(auth: &AuthDotJson) -> Option<String> {
     match auth.resolved_mode() {
         AuthMode::ApiKey => auth
@@ -595,6 +711,73 @@ mod tests {
         let saved = find_account(dir.path(), &account_id)?.expect("saved account");
 
         assert_eq!(saved.auth, auth);
+        Ok(())
+    }
+
+    #[test]
+    fn numbered_display_labels_sort_chatgpt_accounts_by_uid() -> anyhow::Result<()> {
+        let config = SlopForkConfig {
+            show_account_numbers_instead_of_emails: true,
+            ..SlopForkConfig::default()
+        };
+        let auth_b = chatgpt_auth("acct-b", "beta@example.com");
+        let auth_a = chatgpt_auth("acct-a", "alpha@example.com");
+        let account_b = StoredAccount {
+            id: stored_account_id(&auth_b).expect("saved account id"),
+            path: PathBuf::from("acct-b.json"),
+            auth: auth_b.clone(),
+            modified_at: None,
+        };
+        let account_a = StoredAccount {
+            id: stored_account_id(&auth_a).expect("saved account id"),
+            path: PathBuf::from("acct-a.json"),
+            auth: auth_a.clone(),
+            modified_at: None,
+        };
+        let labels =
+            AccountDisplayLabels::from_config(&config, &[account_b.clone(), account_a.clone()]);
+
+        assert_eq!(
+            labels.label_for_account(&account_a),
+            "Account 1 (Pro)".to_string()
+        );
+        assert_eq!(
+            labels.label_for_account(&account_b),
+            "Account 2 (Pro)".to_string()
+        );
+        assert_eq!(
+            labels.label_for_auth(&auth_a),
+            "Account 1 (Pro)".to_string()
+        );
+        assert_eq!(
+            labels.label_for_auth(&auth_b),
+            "Account 2 (Pro)".to_string()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn numbered_display_labels_ignore_email_differences_for_same_account() -> anyhow::Result<()> {
+        let config = SlopForkConfig {
+            show_account_numbers_instead_of_emails: true,
+            ..SlopForkConfig::default()
+        };
+        let saved_auth = chatgpt_auth("acct-a", "alpha@example.com");
+        let mut current_auth = saved_auth.clone();
+        current_auth.tokens.as_mut().expect("tokens").id_token.email =
+            Some("renamed@example.com".to_string());
+        let account = StoredAccount {
+            id: stored_account_id(&saved_auth).expect("saved account id"),
+            path: PathBuf::from("acct-a.json"),
+            auth: saved_auth,
+            modified_at: None,
+        };
+        let labels = AccountDisplayLabels::from_config(&config, &[account]);
+
+        assert_eq!(
+            labels.label_for_auth(&current_auth),
+            "Account 1 (Pro)".to_string()
+        );
         Ok(())
     }
 

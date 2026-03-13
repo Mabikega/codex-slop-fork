@@ -8632,6 +8632,35 @@ async fn login_switch_account_popup_snapshot() {
 }
 
 #[tokio::test]
+async fn login_switch_account_popup_uses_numbered_labels_when_enabled() {
+    let dir = tempdir().unwrap();
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.config.cli_auth_credentials_store_mode = codex_core::auth::AuthCredentialsStoreMode::File;
+
+    let auth_b = chatgpt_auth_dot_json("acct-b", "beta@example.com");
+    let auth_a = chatgpt_auth_dot_json("acct-a", "alpha@example.com");
+    codex_core::slop_fork::auth_accounts::upsert_account(&chat.config.codex_home, &auth_b)
+        .unwrap()
+        .expect("saved account id");
+    codex_core::slop_fork::auth_accounts::upsert_account(&chat.config.codex_home, &auth_a)
+        .unwrap()
+        .expect("saved account id");
+    codex_core::slop_fork::update_slop_fork_config(&chat.config.codex_home, |config| {
+        config.show_account_numbers_instead_of_emails = true;
+    })
+    .unwrap();
+
+    chat.open_login_popup(LoginPopupKind::UseAccount);
+
+    let popup = render_bottom_popup(&chat, 100);
+    assert!(popup.contains("Account 1 (Pro)"));
+    assert!(popup.contains("Account 2 (Pro)"));
+    assert!(!popup.contains("alpha@example.com"));
+    assert!(!popup.contains("beta@example.com"));
+}
+
+#[tokio::test]
 async fn login_account_limits_popup_force_refresh_all_dispatches_event() {
     let dir = tempdir().unwrap();
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
@@ -8746,6 +8775,7 @@ async fn login_settings_popup_enter_saves_and_closes_login_menu() {
                 auto_start_five_hour_quota: false,
                 auto_start_weekly_quota: false,
                 follow_external_account_switches: false,
+                show_account_numbers_instead_of_emails: false,
                 show_average_account_limits_in_status_line: false,
             },
         }))

@@ -112,6 +112,7 @@ type LoginPopupState = (
     Option<String>,
     Option<String>,
     Vec<auth_accounts::StoredAccount>,
+    auth_accounts::AccountDisplayLabels,
     Vec<auth_accounts::AccountRenameSuggestion>,
     HashMap<String, account_rate_limits::StoredRateLimitSnapshot>,
 );

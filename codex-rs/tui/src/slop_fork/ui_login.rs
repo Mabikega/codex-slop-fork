@@ -112,6 +112,7 @@ impl SlopForkUi {
                     session_account_id,
                     shared_active_account_id,
                     accounts,
+                    display_labels,
                     rename_suggestions,
                     _,
                 ) = match self.login_popup_state(ctx) {
@@ -122,10 +123,17 @@ impl SlopForkUi {
                         ))];
                     }
                 };
-                let session_account_label =
-                    self.session_login_account_label(ctx, session_account_id.as_deref(), &accounts);
-                let shared_active_account_label =
-                    self.login_account_label(shared_active_account_id.as_deref(), &accounts);
+                let session_account_label = self.session_login_account_label(
+                    ctx,
+                    session_account_id.as_deref(),
+                    &accounts,
+                    &display_labels,
+                );
+                let shared_active_account_label = self.login_account_label(
+                    shared_active_account_id.as_deref(),
+                    &accounts,
+                    &display_labels,
+                );
                 let header = self.login_popup_header(
                     "Account Settings",
                     "Fork-specific account switching behavior.",
@@ -144,6 +152,8 @@ impl SlopForkUi {
                                 .api_key_fallback_on_all_accounts_limited,
                             auto_start_five_hour_quota: fork_config.auto_start_five_hour_quota,
                             auto_start_weekly_quota: fork_config.auto_start_weekly_quota,
+                            show_account_numbers_instead_of_emails: fork_config
+                                .show_account_numbers_instead_of_emails,
                             show_average_account_limits_in_status_line: fork_config
                                 .show_average_account_limits_in_status_line,
                         },
@@ -258,13 +268,14 @@ impl SlopForkUi {
         ctx: &SlopForkUiContext,
         account_id: &str,
     ) -> Vec<SlopForkUiEffect> {
+        let display_labels = auth_accounts::load_account_display_labels(&ctx.codex_home);
         match ctx.auth_manager.activate_saved_account(account_id) {
             Ok(true) => {
                 self.active_login_popup_kind = None;
                 let label = auth_accounts::find_account(&ctx.codex_home, account_id)
                     .ok()
                     .flatten()
-                    .map(|account| auth_accounts::account_label(&account))
+                    .map(|account| display_labels.label_for_account(&account))
                     .unwrap_or_else(|| account_id.to_string());
                 vec![SlopForkUiEffect::AuthStateChanged {
                     message: format!("Activated {label}."),
@@ -286,11 +297,17 @@ impl SlopForkUi {
         ctx: &SlopForkUiContext,
         account_id: &str,
     ) -> Vec<SlopForkUiEffect> {
+        let display_labels = auth_accounts::load_account_display_labels(&ctx.codex_home);
+        let label = auth_accounts::find_account(&ctx.codex_home, account_id)
+            .ok()
+            .flatten()
+            .map(|account| display_labels.label_for_account(&account))
+            .unwrap_or_else(|| account_id.to_string());
         match ctx.auth_manager.remove_saved_account(account_id) {
             Ok(true) => {
                 self.active_login_popup_kind = None;
                 vec![SlopForkUiEffect::AuthStateChanged {
-                    message: format!("Removed saved account {account_id}."),
+                    message: format!("Removed saved account {label}."),
                     is_error: false,
                     is_warning: false,
                 }]
@@ -377,6 +394,8 @@ impl SlopForkUi {
                 settings.api_key_fallback_on_all_accounts_limited;
             config.auto_start_five_hour_quota = settings.auto_start_five_hour_quota;
             config.auto_start_weekly_quota = settings.auto_start_weekly_quota;
+            config.show_account_numbers_instead_of_emails =
+                settings.show_account_numbers_instead_of_emails;
             config.show_average_account_limits_in_status_line =
                 settings.show_average_account_limits_in_status_line;
         }) {
@@ -420,13 +439,21 @@ impl SlopForkUi {
             session_account_id,
             shared_active_account_id,
             accounts,
+            display_labels,
             rename_suggestions,
             rate_limit_snapshots,
         ) = self.login_popup_state(ctx)?;
-        let session_account_label =
-            self.session_login_account_label(ctx, session_account_id.as_deref(), &accounts);
-        let shared_active_account_label =
-            self.login_account_label(shared_active_account_id.as_deref(), &accounts);
+        let session_account_label = self.session_login_account_label(
+            ctx,
+            session_account_id.as_deref(),
+            &accounts,
+            &display_labels,
+        );
+        let shared_active_account_label = self.login_account_label(
+            shared_active_account_id.as_deref(),
+            &accounts,
+            &display_labels,
+        );
         let saved_accounts = accounts.len();
 
         let mut items = vec![
@@ -528,7 +555,7 @@ impl SlopForkUi {
                 .find(|account| account.id == shared_active_account_id)
         {
             let account_id = account.id.clone();
-            let label = auth_accounts::account_label(account);
+            let label = display_labels.label_for_account(account);
             items.insert(
                 4,
                 SelectionItem {
@@ -612,13 +639,21 @@ impl SlopForkUi {
             session_account_id,
             shared_active_account_id,
             accounts,
+            display_labels,
             rename_suggestions,
             rate_limit_snapshots,
         ) = self.login_popup_state(ctx)?;
-        let session_account_label =
-            self.session_login_account_label(ctx, session_account_id.as_deref(), &accounts);
-        let shared_active_account_label =
-            self.login_account_label(shared_active_account_id.as_deref(), &accounts);
+        let session_account_label = self.session_login_account_label(
+            ctx,
+            session_account_id.as_deref(),
+            &accounts,
+            &display_labels,
+        );
+        let shared_active_account_label = self.login_account_label(
+            shared_active_account_id.as_deref(),
+            &accounts,
+            &display_labels,
+        );
         let now = Utc::now();
         let title = if activate {
             "Switch Account"
@@ -643,7 +678,7 @@ impl SlopForkUi {
                 .into_iter()
                 .map(|account| {
                     let account_id = account.id.clone();
-                    let account_label = auth_accounts::account_label(&account);
+                    let account_label = display_labels.label_for_account(&account);
                     let summary = self.login_account_rate_limit_summary(
                         &account,
                         rate_limit_snapshots.get(&account_id),
@@ -743,14 +778,22 @@ impl SlopForkUi {
             session_account_id,
             shared_active_account_id,
             accounts,
+            display_labels,
             rename_suggestions,
             rate_limit_snapshots,
         ) = self.login_popup_state(ctx)?;
         let refresh_state = self.saved_account_rate_limits_refresh.as_ref();
-        let session_account_label =
-            self.session_login_account_label(ctx, session_account_id.as_deref(), &accounts);
-        let shared_active_account_label =
-            self.login_account_label(shared_active_account_id.as_deref(), &accounts);
+        let session_account_label = self.session_login_account_label(
+            ctx,
+            session_account_id.as_deref(),
+            &accounts,
+            &display_labels,
+        );
+        let shared_active_account_label = self.login_account_label(
+            shared_active_account_id.as_deref(),
+            &accounts,
+            &display_labels,
+        );
         let now = Utc::now();
         let refreshable_account_count = accounts
             .iter()
@@ -779,7 +822,7 @@ impl SlopForkUi {
                 .into_iter()
                 .map(|account| {
                     let account_id = account.id.clone();
-                    let account_label = auth_accounts::account_label(&account);
+                    let account_label = display_labels.label_for_account(&account);
                     let stored_snapshot = rate_limit_snapshots.get(&account.id);
                     let summary =
                         self.login_account_rate_limit_summary(&account, stored_snapshot, now);
@@ -960,12 +1003,26 @@ impl SlopForkUi {
         &self,
         ctx: &SlopForkUiContext,
     ) -> std::io::Result<SelectionViewParams> {
-        let (_, session_account_id, shared_active_account_id, accounts, rename_suggestions, _) =
-            self.login_popup_state(ctx)?;
-        let session_account_label =
-            self.session_login_account_label(ctx, session_account_id.as_deref(), &accounts);
-        let shared_active_account_label =
-            self.login_account_label(shared_active_account_id.as_deref(), &accounts);
+        let (
+            _,
+            session_account_id,
+            shared_active_account_id,
+            accounts,
+            display_labels,
+            rename_suggestions,
+            _,
+        ) = self.login_popup_state(ctx)?;
+        let session_account_label = self.session_login_account_label(
+            ctx,
+            session_account_id.as_deref(),
+            &accounts,
+            &display_labels,
+        );
+        let shared_active_account_label = self.login_account_label(
+            shared_active_account_id.as_deref(),
+            &accounts,
+            &display_labels,
+        );
         let renameable_count = rename_suggestions
             .iter()
             .filter(|suggestion| !suggestion.target_exists)
@@ -1016,7 +1073,7 @@ impl SlopForkUi {
                     .and_then(|name| name.to_str())
                     .unwrap_or("<invalid>")
                     .to_string();
-                let account_label = auth_accounts::auth_label(&suggestion.auth);
+                let account_label = display_labels.label_for_auth(&suggestion.auth);
                 let description = if suggestion.target_exists {
                     format!("{account_label}. Ignored duplicate; {suggested_name} already exists.")
                 } else {
@@ -1071,6 +1128,8 @@ impl SlopForkUi {
             ctx.auth_credentials_store_mode,
         )?;
         let accounts = auth_accounts::list_accounts(&ctx.codex_home)?;
+        let display_labels =
+            auth_accounts::AccountDisplayLabels::from_config(&fork_config, &accounts);
         let rename_suggestions = auth_accounts::list_account_rename_suggestions(&ctx.codex_home)?;
         let rate_limit_snapshots =
             account_rate_limits::snapshot_map_for_accounts(&ctx.codex_home, &accounts)?;
@@ -1079,6 +1138,7 @@ impl SlopForkUi {
             session_account_id,
             shared_active_account_id,
             accounts,
+            display_labels,
             rename_suggestions,
             rate_limit_snapshots,
         ))
@@ -1180,12 +1240,13 @@ impl SlopForkUi {
         &self,
         account_id: Option<&str>,
         accounts: &[auth_accounts::StoredAccount],
+        display_labels: &auth_accounts::AccountDisplayLabels,
     ) -> Option<String> {
         account_id.and_then(|account_id| {
             accounts
                 .iter()
                 .find(|account| account.id == account_id)
-                .map(auth_accounts::account_label)
+                .map(|account| display_labels.label_for_account(account))
         })
     }
 
@@ -1194,13 +1255,14 @@ impl SlopForkUi {
         ctx: &SlopForkUiContext,
         session_account_id: Option<&str>,
         accounts: &[auth_accounts::StoredAccount],
+        display_labels: &auth_accounts::AccountDisplayLabels,
     ) -> Option<String> {
-        self.login_account_label(session_account_id, accounts)
+        self.login_account_label(session_account_id, accounts, display_labels)
             .or_else(|| {
                 ctx.auth_manager
                     .auth_cached()
                     .as_ref()
-                    .map(auth_accounts::codex_auth_label)
+                    .map(|auth| display_labels.label_for_codex_auth(auth))
             })
     }
 

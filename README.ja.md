@@ -88,6 +88,7 @@ bun install -g https://github.com/Mabikega/codex-slop-fork/releases/latest/downl
 - `api_key_fallback_on_all_accounts_limited = false`
 - `auto_start_five_hour_quota = false`
 - `auto_start_weekly_quota = false`
+- `show_account_numbers_instead_of_emails = false`
 - `show_average_account_limits_in_status_line = false`
 
 これらの設定は `/accounts -> Settings` から切り替えるか、次のファイルを直接編集できます。
@@ -97,6 +98,8 @@ bun install -g https://github.com/Mabikega/codex-slop-fork/releases/latest/downl
 スイッチャーは、保存済み ChatGPT アカウントを、最新で判明している使用量スナップショットが最も低いものから優先します。API キーアカウントは、保存済み ChatGPT アカウントがすべて利用不能で、かつフォールバックが有効な場合にのみ使われます。
 
 `follow_external_account_switches` を有効にすると、実行中のセッションは別の Codex インスタンスによって書き込まれたアカウント変更を取り込めます。
+
+`show_account_numbers_instead_of_emails` を有効にすると、フォークのアカウント一覧や切り替え通知では、保存済み ChatGPT アカウントのメールアドレスを表示せず `Account N` を表示します。番号は、保存済み ChatGPT アカウントを利用可能なら UID 順に並べて決まります。
 
 ### 保存済みアカウント制限の一覧
 

@@ -89,6 +89,7 @@ Settings:
 - `api_key_fallback_on_all_accounts_limited = false`
 - `auto_start_five_hour_quota = false`
 - `auto_start_weekly_quota = false`
+- `show_account_numbers_instead_of_emails = false`
 - `show_average_account_limits_in_status_line = false`
 
 Those settings can be toggled from `/accounts -> Settings`, or edited directly in:
@@ -100,6 +101,10 @@ accounts are only used when every saved ChatGPT account is unavailable and fallb
 
 When `follow_external_account_switches` is enabled, a running session can adopt account changes
 written by another Codex instance.
+
+When `show_account_numbers_instead_of_emails` is enabled, fork account menus and switch
+notifications replace saved ChatGPT account emails with `Account N`. The numbering is assigned by
+sorting the saved ChatGPT accounts by UID when available.
 
 ### Saved account limits overview
 
