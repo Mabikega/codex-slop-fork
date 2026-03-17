@@ -15,7 +15,6 @@ use codex_core::CodexAuth;
 use codex_core::auth::AuthCredentialsStoreMode;
 use codex_core::auth::AuthDotJson;
 use codex_core::auth::CLIENT_ID;
-use codex_core::auth::auth_for_saved_account;
 use codex_core::auth::login_with_api_key;
 use codex_core::slop_fork::SlopForkConfig;
 use codex_core::slop_fork::account_rate_limits;

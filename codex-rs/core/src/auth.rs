@@ -23,6 +23,7 @@ pub use crate::auth::storage::AuthCredentialsStoreMode;
 pub use crate::auth::storage::AuthDotJson;
 use crate::auth::storage::AuthStorageBackend;
 use crate::auth::storage::create_auth_storage;
+use crate::auth::storage::create_auth_storage_for_auth_file;
 use crate::config::Config;
 use crate::error::RefreshTokenFailedError;
 use crate::error::RefreshTokenFailedReason;
@@ -157,11 +158,10 @@ impl From<RefreshTokenError> for std::io::Error {
 }
 
 impl CodexAuth {
-    fn from_auth_dot_json(
-        codex_home: &Path,
+    fn from_auth_dot_json_with_storage(
         auth_dot_json: AuthDotJson,
-        auth_credentials_store_mode: AuthCredentialsStoreMode,
         client: CodexHttpClient,
+        storage: Arc<dyn AuthStorageBackend>,
     ) -> std::io::Result<Self> {
         let auth_mode = auth_dot_json.resolved_mode();
         if auth_mode == ApiAuthMode::ApiKey {
@@ -171,22 +171,29 @@ impl CodexAuth {
             return Ok(CodexAuth::from_api_key_with_client(api_key, client));
         }
 
-        let storage_mode = auth_dot_json.storage_mode(auth_credentials_store_mode);
         let state = ChatgptAuthState {
             auth_dot_json: Arc::new(Mutex::new(Some(auth_dot_json))),
             client,
         };
 
         match auth_mode {
-            ApiAuthMode::Chatgpt => {
-                let storage = create_auth_storage(codex_home.to_path_buf(), storage_mode);
-                Ok(Self::Chatgpt(ChatgptAuth { state, storage }))
-            }
+            ApiAuthMode::Chatgpt => Ok(Self::Chatgpt(ChatgptAuth { state, storage })),
             ApiAuthMode::ChatgptAuthTokens => {
                 Ok(Self::ChatgptAuthTokens(ChatgptAuthTokens { state }))
             }
             ApiAuthMode::ApiKey => unreachable!("api key mode is handled above"),
         }
+    }
+
+    fn from_auth_dot_json(
+        codex_home: &Path,
+        auth_dot_json: AuthDotJson,
+        auth_credentials_store_mode: AuthCredentialsStoreMode,
+        client: CodexHttpClient,
+    ) -> std::io::Result<Self> {
+        let storage_mode = auth_dot_json.storage_mode(auth_credentials_store_mode);
+        let storage = create_auth_storage(codex_home.to_path_buf(), storage_mode);
+        Self::from_auth_dot_json_with_storage(auth_dot_json, client, storage)
     }
 
     /// Loads the available auth information from auth storage.
@@ -382,6 +389,11 @@ impl ChatgptAuth {
         &self.storage
     }
 
+    #[cfg(test)]
+    pub(crate) fn storage_for_test(&self) -> &Arc<dyn AuthStorageBackend> {
+        self.storage()
+    }
+
     fn client(&self) -> &CodexHttpClient {
         &self.state.client
     }
@@ -490,6 +502,24 @@ pub fn auth_for_saved_account(
     auth_credentials_store_mode: AuthCredentialsStoreMode,
 ) -> std::io::Result<CodexAuth> {
     CodexAuth::from_saved_account(codex_home, auth, auth_credentials_store_mode)
+}
+
+pub(crate) fn auth_for_auth_file(
+    codex_home: &Path,
+    auth_file: PathBuf,
+    auth: AuthDotJson,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> std::io::Result<CodexAuth> {
+    if auth.resolved_mode() != ApiAuthMode::Chatgpt {
+        return auth_for_saved_account(codex_home, auth, auth_credentials_store_mode);
+    }
+
+    let storage = create_auth_storage_for_auth_file(auth_file);
+    CodexAuth::from_auth_dot_json_with_storage(
+        auth,
+        crate::default_client::create_client(),
+        storage,
+    )
 }
 
 pub fn enforce_login_restrictions(config: &Config) -> std::io::Result<()> {
@@ -664,6 +694,12 @@ fn persist_tokens(
     Ok(auth_dot_json)
 }
 
+fn replace_cached_auth_json(state: &ChatgptAuthState, auth_dot_json: AuthDotJson) {
+    #[expect(clippy::unwrap_used)]
+    let mut guard = state.auth_dot_json.lock().unwrap();
+    *guard = Some(auth_dot_json);
+}
+
 // Requests refreshed ChatGPT OAuth tokens from the auth service using a refresh token.
 // The caller is responsible for persisting any returned tokens.
 async fn request_chatgpt_token_refresh(
@@ -706,6 +742,40 @@ async fn request_chatgpt_token_refresh(
                 format!("Failed to refresh token: {status}: {message}"),
             )))
         }
+    }
+}
+
+async fn refresh_chatgpt_auth_from_authority(
+    chatgpt_auth: &ChatgptAuth,
+) -> Result<AuthDotJson, RefreshTokenError> {
+    let token_data = chatgpt_auth.current_token_data().ok_or_else(|| {
+        RefreshTokenError::Transient(std::io::Error::other("Token data is not available."))
+    })?;
+    let refresh_response =
+        request_chatgpt_token_refresh(token_data.refresh_token, chatgpt_auth.client()).await?;
+    let refreshed_auth = persist_tokens(
+        chatgpt_auth.storage(),
+        refresh_response.id_token,
+        refresh_response.access_token,
+        refresh_response.refresh_token,
+    )
+    .map_err(RefreshTokenError::from)?;
+    replace_cached_auth_json(&chatgpt_auth.state, refreshed_auth.clone());
+    Ok(refreshed_auth)
+}
+
+pub(crate) async fn refresh_chatgpt_auth_from_authority_for_auth(
+    auth: &CodexAuth,
+) -> Result<(), RefreshTokenError> {
+    match auth {
+        CodexAuth::Chatgpt(chatgpt_auth) => {
+            refresh_chatgpt_auth_from_authority(chatgpt_auth).await?;
+            Ok(())
+        }
+        CodexAuth::ChatgptAuthTokens(_) => Err(RefreshTokenError::Transient(
+            std::io::Error::other("Auth is externally managed."),
+        )),
+        CodexAuth::ApiKey(_) => Ok(()),
     }
 }
 
@@ -1420,12 +1490,12 @@ impl AuthManager {
                     .await
             }
             CodexAuth::Chatgpt(chatgpt_auth) => {
-                let token_data = chatgpt_auth.current_token_data().ok_or_else(|| {
+                chatgpt_auth.current_token_data().ok_or_else(|| {
                     RefreshTokenError::Transient(std::io::Error::other(
                         "Token data is not available.",
                     ))
                 })?;
-                self.refresh_and_persist_chatgpt_token(&chatgpt_auth, token_data.refresh_token)
+                self.refresh_and_persist_chatgpt_token(&chatgpt_auth)
                     .await?;
                 Ok(())
             }
@@ -1466,10 +1536,9 @@ impl AuthManager {
             Some(auth_dot_json) => auth_dot_json,
             None => return Ok(false),
         };
-        let tokens = match auth_dot_json.tokens {
-            Some(tokens) => tokens,
-            None => return Ok(false),
-        };
+        if auth_dot_json.tokens.is_none() {
+            return Ok(false);
+        }
         let last_refresh = match auth_dot_json.last_refresh {
             Some(last_refresh) => last_refresh,
             None => return Ok(false),
@@ -1477,8 +1546,7 @@ impl AuthManager {
         if last_refresh >= Utc::now() - chrono::Duration::days(TOKEN_REFRESH_INTERVAL) {
             return Ok(false);
         }
-        self.refresh_and_persist_chatgpt_token(chatgpt_auth, tokens.refresh_token)
-            .await?;
+        self.refresh_and_persist_chatgpt_token(chatgpt_auth).await?;
         Ok(true)
     }
 
@@ -1539,17 +1607,8 @@ impl AuthManager {
     async fn refresh_and_persist_chatgpt_token(
         &self,
         auth: &ChatgptAuth,
-        refresh_token: String,
     ) -> Result<(), RefreshTokenError> {
-        let refresh_response = request_chatgpt_token_refresh(refresh_token, auth.client()).await?;
-
-        let refreshed_auth = persist_tokens(
-            auth.storage(),
-            refresh_response.id_token,
-            refresh_response.access_token,
-            refresh_response.refresh_token,
-        )
-        .map_err(RefreshTokenError::from)?;
+        let refreshed_auth = refresh_chatgpt_auth_from_authority(auth).await?;
         crate::slop_fork::sync_refreshed_auth(&self.codex_home, &refreshed_auth);
         self.reload();
 

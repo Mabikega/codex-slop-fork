@@ -57,6 +57,24 @@ pub(crate) fn spawn_rate_limit_poller(
                 start_weekly: fork_config.auto_start_weekly_quota,
             };
 
+            if first_iteration {
+                let result = touch_cached_quotas_for_saved_accounts(
+                    codex_home.clone(),
+                    base_url.clone(),
+                    auth_credentials_store_mode,
+                    touch_mode,
+                )
+                .await;
+                if result.checked_accounts > 0 {
+                    app_event_tx.send(AppEvent::SlopFork(
+                        SlopForkEvent::SavedAccountQuotaTouchCompleted {
+                            updated_account_ids: result.updated_account_ids,
+                            message: result.message,
+                        },
+                    ));
+                }
+            }
+
             if let Some(auth) = auth_manager.auth().await
                 && auth.is_chatgpt_auth()
             {
@@ -96,24 +114,6 @@ pub(crate) fn spawn_rate_limit_poller(
                     app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
                         history_cell::new_info_event(result.message, None),
                     )));
-                }
-            }
-
-            if first_iteration {
-                let result = touch_cached_quotas_for_saved_accounts(
-                    codex_home.clone(),
-                    base_url.clone(),
-                    auth_credentials_store_mode,
-                    touch_mode,
-                )
-                .await;
-                if !result.updated_account_ids.is_empty() {
-                    app_event_tx.send(AppEvent::SlopFork(
-                        SlopForkEvent::SavedAccountQuotaTouchCompleted {
-                            updated_account_ids: result.updated_account_ids,
-                            message: result.message,
-                        },
-                    ));
                 }
             }
 

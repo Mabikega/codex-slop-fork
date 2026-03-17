@@ -7,7 +7,10 @@ use anyhow::Result;
 use codex_client::build_reqwest_client_with_custom_ca;
 use codex_core::auth::CodexAuth;
 use codex_core::default_client::get_codex_user_agent;
+use codex_core::models_manager::client_version_to_whole;
 use codex_protocol::account::PlanType as AccountPlanType;
+use codex_protocol::openai_models::ModelInfo;
+use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::protocol::CreditsSnapshot;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::RateLimitWindow;
@@ -271,7 +274,16 @@ impl Client {
     pub async fn get_detailed_rate_limits_many(
         &self,
     ) -> Result<Vec<(RateLimitSnapshot, RawRateLimitSnapshotInput)>> {
-        let payload = self.get_rate_limits_payload().await?;
+        self.get_detailed_rate_limits_many_detailed()
+            .await
+            .map_err(anyhow::Error::from)
+    }
+
+    pub async fn get_detailed_rate_limits_many_detailed(
+        &self,
+    ) -> std::result::Result<Vec<(RateLimitSnapshot, RawRateLimitSnapshotInput)>, RequestError>
+    {
+        let payload = self.get_rate_limits_payload_detailed().await?;
         Ok(Self::detailed_rate_limit_snapshots_from_payload(payload))
     }
 
@@ -285,13 +297,22 @@ impl Client {
     }
 
     pub async fn get_rate_limits_payload(&self) -> Result<RateLimitStatusPayload> {
+        self.get_rate_limits_payload_detailed()
+            .await
+            .map_err(anyhow::Error::from)
+    }
+
+    async fn get_rate_limits_payload_detailed(
+        &self,
+    ) -> std::result::Result<RateLimitStatusPayload, RequestError> {
         let url = match self.path_style {
             PathStyle::CodexApi => format!("{}/api/codex/usage", self.base_url),
             PathStyle::ChatGptApi => format!("{}/wham/usage", self.base_url),
         };
         let req = self.http.get(&url).headers(self.headers());
-        let (body, ct) = self.exec_request(req, "GET", &url).await?;
+        let (body, ct) = self.exec_request_detailed(req, "GET", &url).await?;
         self.decode_json(&url, &ct, &body)
+            .map_err(RequestError::from)
     }
 
     pub async fn create_response(
@@ -310,6 +331,30 @@ impl Client {
             .json(request_body);
         self.exec_request_detailed(req, "POST", &url).await?;
         Ok(())
+    }
+
+    pub async fn list_models_detailed(&self) -> std::result::Result<Vec<ModelInfo>, RequestError> {
+        let client_version = client_version_to_whole();
+        let url = match self.path_style {
+            PathStyle::CodexApi => {
+                format!(
+                    "{}/api/codex/models?client_version={client_version}",
+                    self.base_url
+                )
+            }
+            PathStyle::ChatGptApi => {
+                format!(
+                    "{}/codex/models?client_version={client_version}",
+                    self.base_url
+                )
+            }
+        };
+        let req = self.http.get(&url).headers(self.headers());
+        let (body, ct) = self.exec_request_detailed(req, "GET", &url).await?;
+        let response = self
+            .decode_json::<ModelsResponse>(&url, &ct, &body)
+            .map_err(RequestError::from)?;
+        Ok(response.models)
     }
 
     pub async fn list_tasks(

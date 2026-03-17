@@ -24,6 +24,7 @@ use crate::test_backend::VT100Backend;
 use crate::tui::FrameRequester;
 use assert_matches::assert_matches;
 use base64::Engine;
+use chrono::Local;
 use chrono::TimeZone;
 use chrono::Utc;
 use codex_app_server_protocol::AuthMode;
@@ -8575,6 +8576,91 @@ async fn login_account_limits_popup_snapshot() {
 
     let popup = render_bottom_popup(&chat, 100);
     assert!(popup.contains("until 11:29 on 1 Jan"));
+    assert_snapshot!(popup);
+}
+
+#[tokio::test]
+async fn login_account_limits_popup_hides_untouched_marker_after_confirmed_auto_start() {
+    let dir = tempdir().unwrap();
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.config.cli_auth_credentials_store_mode = codex_core::auth::AuthCredentialsStoreMode::File;
+
+    let auth_dot_json =
+        chatgpt_auth_dot_json("acct-login-limits-confirmed", "confirmed@example.com");
+    let account_id = codex_core::slop_fork::auth_accounts::upsert_account(
+        &chat.config.codex_home,
+        &auth_dot_json,
+    )
+    .unwrap()
+    .expect("saved account id");
+    codex_core::auth::save_auth(
+        &chat.config.codex_home,
+        &auth_dot_json,
+        chat.config.cli_auth_credentials_store_mode,
+    )
+    .unwrap();
+
+    let observed_at = Utc
+        .with_ymd_and_hms(2100, 1, 1, 10, 0, 0)
+        .single()
+        .expect("valid timestamp");
+    let rate_limit_snapshot = RateLimitSnapshot {
+        limit_id: Some("codex".to_string()),
+        limit_name: Some("codex".to_string()),
+        primary: Some(RateLimitWindow {
+            used_percent: 0.0,
+            window_minutes: Some(300),
+            resets_at: Some((observed_at + chrono::Duration::hours(5)).timestamp()),
+        }),
+        secondary: None,
+        credits: None,
+        plan_type: Some(PlanType::Pro),
+    };
+    let raw = codex_core::slop_fork::account_rate_limits::RawRateLimitSnapshotInput {
+        primary: Some(
+            codex_core::slop_fork::account_rate_limits::RawRateLimitWindowSnapshot {
+                used_percent: 0,
+                limit_window_seconds: 5 * 60 * 60,
+                reset_after_seconds: 5 * 60 * 60,
+                reset_at: (observed_at + chrono::Duration::hours(5)).timestamp() as i32,
+            },
+        ),
+        secondary: None,
+    };
+    codex_core::slop_fork::account_rate_limits::record_rate_limit_snapshot_with_raw(
+        &chat.config.codex_home,
+        &account_id,
+        Some("pro"),
+        &rate_limit_snapshot,
+        Some(&raw),
+        observed_at,
+    )
+    .unwrap();
+    codex_core::slop_fork::account_rate_limits::mark_quota_window_touch_confirmed(
+        &chat.config.codex_home,
+        &account_id,
+        Some("pro"),
+        codex_core::slop_fork::account_rate_limits::QuotaWindowKind::FiveHour,
+        Some(observed_at + chrono::Duration::hours(5)),
+        observed_at + chrono::Duration::seconds(1),
+    )
+    .unwrap();
+
+    chat.open_login_popup(LoginPopupKind::AccountLimits);
+
+    let popup = render_bottom_popup(&chat, 100);
+    let expected_reset = format!(
+        "{} on {}",
+        (observed_at + chrono::Duration::hours(5))
+            .with_timezone(&Local)
+            .format("%H:%M"),
+        (observed_at + chrono::Duration::hours(5))
+            .with_timezone(&Local)
+            .format("%-d %b")
+    );
+    assert!(popup.contains(&format!("until {expected_reset}")));
+    assert!(!popup.contains(&format!("until {expected_reset}~")));
     assert_snapshot!(popup);
 }
 

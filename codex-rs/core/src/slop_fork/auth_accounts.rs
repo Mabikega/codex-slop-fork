@@ -573,6 +573,10 @@ fn write_auth_file(path: &Path, auth: &AuthDotJson) -> std::io::Result<()> {
     write_atomically(path, &json)
 }
 
+pub(crate) fn saved_account_path(codex_home: &Path, account_id: &str) -> PathBuf {
+    account_path(codex_home, account_id)
+}
+
 fn account_path(codex_home: &Path, account_id: &str) -> PathBuf {
     accounts_dir(codex_home).join(format!("{account_id}.json"))
 }

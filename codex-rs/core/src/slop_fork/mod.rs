@@ -5,6 +5,7 @@ mod auth_sync;
 pub mod automation;
 mod config;
 pub mod pilot;
+mod saved_account_auth;
 
 pub const FORK_DISPLAY_NAME: &str = "Codex Slop Fork";
 
@@ -37,6 +38,8 @@ pub use config::load_slop_fork_config;
 pub use config::maybe_load_slop_fork_config;
 pub(crate) use config::push_unique_project_doc_path;
 pub use config::update_slop_fork_config;
+pub use saved_account_auth::auth_for_saved_account_file;
+pub use saved_account_auth::refresh_saved_account_auth_from_authority;
 
 static ACCOUNT_SWITCH_MUTEX: Lazy<tokio::sync::Mutex<()>> =
     Lazy::new(|| tokio::sync::Mutex::new(()));

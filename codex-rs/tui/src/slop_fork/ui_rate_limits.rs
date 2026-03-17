@@ -1,5 +1,12 @@
 use super::*;
 
+#[path = "ui_rate_limits_touch.rs"]
+mod touch;
+
+use touch::QuotaTouchClient;
+use touch::SavedAccountBackendSession;
+use touch::touch_quota_windows;
+
 #[derive(Debug)]
 pub(super) struct SavedAccountRateLimitsRefreshState {
     pub(super) started_at: Instant,
@@ -185,14 +192,6 @@ impl Renderable for SavedAccountRateLimitsRefreshRenderable {
     }
 }
 
-const TOUCH_MODEL_CANDIDATES: &[&str] = &[
-    "gpt-5.1-codex-mini",
-    "gpt-5-codex-mini",
-    "gpt-5.1-codex",
-    "gpt-5-codex",
-    "gpt-5.3-codex",
-];
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TouchQuotaMode {
     Automatic {
@@ -229,6 +228,7 @@ impl TouchQuotaMode {
 
 #[derive(Default)]
 pub(crate) struct CachedQuotaTouchResult {
+    pub(crate) checked_accounts: usize,
     pub(crate) message: String,
     pub(crate) updated_account_ids: Vec<String>,
 }
@@ -567,118 +567,6 @@ fn cached_window_kinds_to_start(
         .collect()
 }
 
-fn minimal_touch_response_request(model: &str) -> serde_json::Value {
-    serde_json::json!({
-        "model": model,
-        "instructions": "",
-        "input": [
-            {
-                "type": "message",
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": "Reply with exactly: OK"
-                    }
-                ]
-            }
-        ],
-        "tools": [],
-        "tool_choice": "auto",
-        "parallel_tool_calls": false,
-        "reasoning": {
-            "effort": "minimal"
-        },
-        "store": false,
-        "stream": false,
-        "include": []
-    })
-}
-
-async fn touch_quota_windows_for_auth(
-    codex_home: &Path,
-    base_url: &str,
-    account_id: &str,
-    plan: Option<&str>,
-    auth: &CodexAuth,
-    window_kinds: &[account_rate_limits::QuotaWindowKind],
-) -> anyhow::Result<bool> {
-    if window_kinds.is_empty() {
-        return Ok(false);
-    }
-
-    let attempted_at = Utc::now();
-    for kind in window_kinds {
-        account_rate_limits::mark_quota_window_touch_attempt(
-            codex_home,
-            account_id,
-            plan,
-            *kind,
-            attempted_at,
-        )?;
-    }
-
-    let client = BackendClient::from_auth(base_url.to_string(), auth)?;
-    let mut last_error = None;
-    for model in TOUCH_MODEL_CANDIDATES {
-        let request = minimal_touch_response_request(model);
-        match client.create_response(&request).await {
-            Ok(()) => {
-                let snapshots = client
-                    .get_detailed_rate_limits_many()
-                    .await?
-                    .into_iter()
-                    .map(|(snapshot, raw)| (snapshot, backend_raw_rate_limit_snapshot_input(raw)))
-                    .collect::<Vec<_>>();
-                let Some((snapshot, raw)) = codex_rate_limit_snapshot(&snapshots) else {
-                    anyhow::bail!("quota touch succeeded but /usage returned no snapshots");
-                };
-                account_rate_limits::record_rate_limit_snapshot_with_raw(
-                    codex_home,
-                    account_id,
-                    plan,
-                    snapshot,
-                    Some(raw),
-                    Utc::now(),
-                )?;
-                let stored = account_rate_limits::load_rate_limit_snapshot(codex_home, account_id)?
-                    .ok_or_else(|| anyhow::anyhow!("updated quota snapshot missing from cache"))?;
-                let confirmed_at = Utc::now();
-                for kind in window_kinds {
-                    if account_rate_limits::quota_window_state(&stored, *kind, confirmed_at)
-                        == account_rate_limits::QuotaWindowState::Started
-                    {
-                        let reset_at = account_rate_limits::quota_window(&stored, *kind).reset_at;
-                        account_rate_limits::mark_quota_window_touch_confirmed(
-                            codex_home,
-                            account_id,
-                            plan,
-                            *kind,
-                            reset_at,
-                            confirmed_at,
-                        )?;
-                    }
-                }
-                return Ok(true);
-            }
-            Err(err) => {
-                tracing::debug!(
-                    account_id,
-                    model,
-                    error = ?err,
-                    "failed to touch cached quota window"
-                );
-                last_error = Some(err);
-            }
-        }
-    }
-
-    let last_error = last_error
-        .map(|err| err.to_string())
-        .unwrap_or_else(|| "all touch models failed".to_string());
-    anyhow::bail!("{last_error}")
-}
-
 pub(crate) async fn touch_cached_quotas_for_saved_accounts(
     codex_home: PathBuf,
     base_url: String,
@@ -736,12 +624,14 @@ pub(super) async fn touch_cached_quotas_for_requested_saved_accounts(
                 .as_ref()
                 .and_then(|tokens| tokens.id_token.get_chatgpt_plan_type())
         });
-        let auth = match auth_for_saved_account(
-            &codex_home,
+        let session = match SavedAccountBackendSession::new(
+            codex_home.clone(),
+            base_url.clone(),
+            account.id.clone(),
             account.auth.clone(),
             auth_credentials_store_mode,
         ) {
-            Ok(auth) => auth,
+            Ok(session) => session,
             Err(err) => {
                 tracing::warn!(
                     "failed to build auth for saved account {} while touching quotas: {err}",
@@ -750,13 +640,13 @@ pub(super) async fn touch_cached_quotas_for_requested_saved_accounts(
                 continue;
             }
         };
-        match touch_quota_windows_for_auth(
+        let mut touch_client = QuotaTouchClient::from_saved_account_session(session);
+        match touch_quota_windows(
             &codex_home,
-            &base_url,
             &account.id,
             plan.as_deref(),
-            &auth,
             &window_kinds,
+            &mut touch_client,
         )
         .await
         {
@@ -791,6 +681,7 @@ pub(super) async fn touch_cached_quotas_for_requested_saved_accounts(
     };
 
     CachedQuotaTouchResult {
+        checked_accounts,
         message,
         updated_account_ids,
     }
@@ -808,6 +699,7 @@ pub(crate) async fn maybe_touch_active_account_cached_quotas(
         .or_else(|| auth.get_account_id())
     else {
         return CachedQuotaTouchResult {
+            checked_accounts: 0,
             message: format!("{}: no active account id available.", mode.summary_prefix()),
             updated_account_ids: Vec::new(),
         };
@@ -817,6 +709,7 @@ pub(crate) async fn maybe_touch_active_account_cached_quotas(
         .flatten()
     else {
         return CachedQuotaTouchResult {
+            checked_accounts: 0,
             message: format!(
                 "{}: no cached active-account snapshot found.",
                 mode.summary_prefix()
@@ -828,6 +721,7 @@ pub(crate) async fn maybe_touch_active_account_cached_quotas(
     let window_kinds = cached_window_kinds_to_start(&snapshot, mode, Utc::now());
     if window_kinds.is_empty() {
         return CachedQuotaTouchResult {
+            checked_accounts: 0,
             message: format!(
                 "{}: no cached active-account windows needed a start.",
                 mode.summary_prefix()
@@ -836,17 +730,30 @@ pub(crate) async fn maybe_touch_active_account_cached_quotas(
         };
     }
 
-    match touch_quota_windows_for_auth(
+    let mut touch_client = match QuotaTouchClient::from_auth(&base_url, &auth) {
+        Ok(client) => client,
+        Err(err) => {
+            return CachedQuotaTouchResult {
+                checked_accounts: 1,
+                message: format!(
+                    "{}: failed to build active-account backend client: {err}",
+                    mode.summary_prefix()
+                ),
+                updated_account_ids: Vec::new(),
+            };
+        }
+    };
+    match touch_quota_windows(
         &codex_home,
-        &base_url,
         &account_id,
         snapshot.plan.as_deref(),
-        &auth,
         &window_kinds,
+        &mut touch_client,
     )
     .await
     {
         Ok(true) => CachedQuotaTouchResult {
+            checked_accounts: 1,
             message: format!(
                 "{}: started {} window(s) for the active account.",
                 mode.summary_prefix(),
@@ -855,6 +762,7 @@ pub(crate) async fn maybe_touch_active_account_cached_quotas(
             updated_account_ids: vec![account_id],
         },
         Ok(false) => CachedQuotaTouchResult {
+            checked_accounts: 1,
             message: format!(
                 "{}: no active-account touch was needed.",
                 mode.summary_prefix()
@@ -862,6 +770,7 @@ pub(crate) async fn maybe_touch_active_account_cached_quotas(
             updated_account_ids: Vec::new(),
         },
         Err(err) => CachedQuotaTouchResult {
+            checked_accounts: 1,
             message: format!(
                 "{}: failed for the active account: {err}",
                 mode.summary_prefix()
@@ -935,21 +844,35 @@ pub(crate) async fn refresh_saved_account_rate_limits_once(
 
     let mut updated_account_ids = Vec::new();
     for (account, plan) in due_accounts {
-        let auth = match auth_for_saved_account(
-            &codex_home,
+        let mut session = match SavedAccountBackendSession::new(
+            codex_home.clone(),
+            base_url.clone(),
+            account.id.clone(),
             account.auth.clone(),
             auth_credentials_store_mode,
         ) {
-            Ok(auth) => auth,
+            Ok(session) => session,
             Err(err) => {
                 tracing::warn!(
-                    "failed to build auth for saved account {}: {err}",
+                    "failed to build background auth for saved account {}: {err}",
                     account.id
                 );
                 continue;
             }
         };
-        let snapshots = fetch_rate_limits(base_url.clone(), auth).await;
+        let snapshots = match session.get_detailed_rate_limits_many().await {
+            Ok(snapshots) => snapshots
+                .into_iter()
+                .map(|(snapshot, raw)| (snapshot, backend_raw_rate_limit_snapshot_input(raw)))
+                .collect::<Vec<_>>(),
+            Err(err) => {
+                tracing::warn!(
+                    "failed to refresh rate limits for saved account {}: {err}",
+                    account.id
+                );
+                continue;
+            }
+        };
         let Some((snapshot, raw)) = codex_rate_limit_snapshot(&snapshots) else {
             continue;
         };

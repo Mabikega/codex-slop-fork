@@ -25,6 +25,7 @@ const LEGACY_RATE_LIMITS_DIR: &str = ".account-rate-limits";
 const RESET_PASSED_TOLERANCE_SECS: i64 = 5;
 const RATE_LIMIT_REFRESH_STALE_INTERVAL_SECS: i64 = 30 * 60;
 const TOUCH_ATTEMPT_COOLDOWN_SECS: i64 = 10 * 60;
+const UNTOUCHED_RESET_AFTER_TOLERANCE_SECS: i64 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -246,11 +247,15 @@ pub fn quota_window_state(
     let Some(reset_after_seconds) = reset_after_seconds else {
         return QuotaWindowState::Unknown;
     };
-    if reset_after_seconds == limit_window_seconds {
+    if reset_after_matches_full_window(reset_after_seconds, limit_window_seconds) {
         QuotaWindowState::Untouched
     } else {
         QuotaWindowState::Started
     }
+}
+
+fn reset_after_matches_full_window(reset_after_seconds: i64, limit_window_seconds: i64) -> bool {
+    (reset_after_seconds - limit_window_seconds).abs() <= UNTOUCHED_RESET_AFTER_TOLERANCE_SECS
 }
 
 pub fn quota_window_should_start(
@@ -266,12 +271,14 @@ pub fn quota_window_should_start(
         return false;
     }
     match quota_window_state(snapshot, kind, now) {
-        QuotaWindowState::Untouched => window
-            .reset_at
-            .is_none_or(|reset_at| window.last_touch_reset_at != Some(reset_at)),
+        QuotaWindowState::Untouched => quota_window_is_unconfirmed_untouched(window),
         QuotaWindowState::ResetPassed => true,
         QuotaWindowState::Unknown | QuotaWindowState::Started => false,
     }
+}
+
+fn quota_window_is_unconfirmed_untouched(window: &StoredQuotaWindow) -> bool {
+    window.last_touch_confirmed_at.is_none() || window.last_touch_reset_at != window.reset_at
 }
 
 pub fn quota_window_reset_at_if_untouched(
@@ -279,11 +286,14 @@ pub fn quota_window_reset_at_if_untouched(
     kind: QuotaWindowKind,
     now: DateTime<Utc>,
 ) -> Option<DateTime<Utc>> {
-    if quota_window_state(snapshot, kind, now) != QuotaWindowState::Untouched {
+    let window = quota_window(snapshot, kind);
+    if quota_window_state(snapshot, kind, now) != QuotaWindowState::Untouched
+        || !quota_window_is_unconfirmed_untouched(window)
+    {
         return None;
     }
 
-    quota_window(snapshot, kind)
+    window
         .limit_window_seconds
         .filter(|seconds| *seconds > 0)
         .map(|seconds| now + Duration::seconds(seconds))
@@ -1102,6 +1112,40 @@ mod tests {
     }
 
     #[test]
+    fn quota_window_state_treats_one_second_reset_after_drift_as_untouched() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let now = fixed_now();
+        let snapshot = sample_snapshot(now, 0.0);
+        let mut raw = sample_raw_snapshot(now, 0);
+        raw.secondary = Some(RawRateLimitWindowSnapshot {
+            used_percent: 0,
+            limit_window_seconds: 7 * 24 * 60 * 60,
+            reset_after_seconds: 7 * 24 * 60 * 60 + 1,
+            reset_at: (now + Duration::days(7)).timestamp() as i32,
+        });
+        record_rate_limit_snapshot_with_raw(
+            dir.path(),
+            "acct-1",
+            Some("pro"),
+            &snapshot,
+            Some(&raw),
+            now,
+        )?;
+
+        let stored = load_rate_limit_snapshot(dir.path(), "acct-1")?.expect("snapshot");
+        assert_eq!(
+            quota_window_state(&stored, QuotaWindowKind::Weekly, now),
+            QuotaWindowState::Untouched
+        );
+        assert!(quota_window_should_start(
+            &stored,
+            QuotaWindowKind::Weekly,
+            now
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn quota_window_reset_at_if_untouched_uses_now_plus_full_window() -> anyhow::Result<()> {
         let dir = tempdir()?;
         let now = fixed_now();
@@ -1262,6 +1306,10 @@ mod tests {
             QuotaWindowKind::Weekly,
             now
         ));
+        assert_eq!(
+            quota_window_reset_at_if_untouched(&stored, QuotaWindowKind::Weekly, now),
+            None
+        );
         Ok(())
     }
 }
