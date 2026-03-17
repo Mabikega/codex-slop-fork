@@ -30,6 +30,8 @@ use codex_core::slop_fork::automation::AutomationScope;
 use codex_core::slop_fork::automation::AutomationSpec;
 use codex_core::slop_fork::automation::run_policy_command;
 use codex_core::slop_fork::load_slop_fork_config;
+use codex_core::slop_fork::pilot::PilotCycleKind;
+use codex_core::slop_fork::pilot::PilotRuntime;
 use codex_core::slop_fork::update_slop_fork_config;
 use codex_login::ServerOptions;
 use codex_login::ShutdownHandle;
@@ -88,6 +90,8 @@ use super::schedule_parser::compact_duration_label;
 mod ui_automation;
 #[path = "ui_login.rs"]
 mod ui_login;
+#[path = "ui_pilot.rs"]
+mod ui_pilot;
 #[path = "ui_rate_limits.rs"]
 mod ui_rate_limits;
 
@@ -121,6 +125,7 @@ pub(crate) struct SlopForkUiContext {
     pub(crate) codex_home: PathBuf,
     pub(crate) cwd: PathBuf,
     pub(crate) thread_id: Option<String>,
+    pub(crate) task_running: bool,
     pub(crate) chatgpt_base_url: String,
     pub(crate) auth_credentials_store_mode: AuthCredentialsStoreMode,
     pub(crate) forced_chatgpt_workspace_id: Option<String>,
@@ -131,6 +136,7 @@ pub(crate) struct SlopForkUiContext {
     pub(crate) network_sandbox_policy: NetworkSandboxPolicy,
     pub(crate) codex_linux_sandbox_exe: Option<PathBuf>,
     pub(crate) windows_sandbox_level: WindowsSandboxLevel,
+    pub(crate) windows_sandbox_private_desktop: bool,
     pub(crate) app_event_tx: AppEventSender,
     pub(crate) frame_requester: FrameRequester,
 }
@@ -155,12 +161,19 @@ pub(crate) enum SlopForkUiEffect {
         suppress_legacy_notify: bool,
         suppress_terminal_notification: bool,
     },
+    SubmitPilotTurn {
+        prompt: String,
+        cycle_kind: PilotCycleKind,
+        notify_on_completion: bool,
+    },
     ScheduleFrameIn(Duration),
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct SlopForkUi {
     automation_registry: Option<AutomationRegistry>,
+    pilot_runtime: Option<PilotRuntime>,
+    awaiting_pilot_turn_start: bool,
     last_manual_user_message: Option<String>,
     pending_chatgpt_login: Option<PendingChatgptLogin>,
     active_login_popup_kind: Option<LoginPopupKind>,
@@ -187,22 +200,36 @@ impl SlopForkUi {
     ) -> Vec<SlopForkUiEffect> {
         self.last_manual_user_message = None;
         self.pending_automation_policies.clear();
+        self.awaiting_pilot_turn_start = false;
         let Some(thread_id) = ctx.thread_id.as_deref() else {
             self.automation_registry = None;
+            self.pilot_runtime = None;
             return Vec::new();
         };
+        let mut effects = Vec::new();
         match AutomationRegistry::load(&ctx.codex_home, &ctx.cwd, thread_id) {
             Ok(registry) => {
                 self.automation_registry = Some(registry);
-                Vec::new()
             }
             Err(err) => {
                 self.automation_registry = None;
-                vec![SlopForkUiEffect::AddErrorMessage(format!(
+                effects.push(SlopForkUiEffect::AddErrorMessage(format!(
                     "Failed to load automation state: {err}"
-                ))]
+                )));
             }
         }
+        match PilotRuntime::load(&ctx.codex_home, thread_id) {
+            Ok(runtime) => {
+                self.pilot_runtime = Some(runtime);
+            }
+            Err(err) => {
+                self.pilot_runtime = None;
+                effects.push(SlopForkUiEffect::AddErrorMessage(format!(
+                    "Failed to load pilot state: {err}"
+                )));
+            }
+        }
+        effects
     }
 
     pub(crate) fn on_skills_loaded(&mut self, skills: &[ProtocolSkillMetadata]) -> Option<String> {

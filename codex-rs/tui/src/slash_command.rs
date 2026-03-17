@@ -43,6 +43,7 @@ pub enum SlashCommand {
     Mcp,
     Apps,
     Auto,
+    Pilot,
     Accounts,
     Logout,
     Quit,
@@ -50,12 +51,14 @@ pub enum SlashCommand {
     Feedback,
     Rollout,
     Ps,
-    Clean,
+    #[strum(to_string = "stop", serialize = "clean")]
+    Stop,
     Clear,
     Personality,
     Realtime,
     Settings,
     TestApproval,
+    #[strum(serialize = "subagents")]
     MultiAgents,
     // Debugging commands.
     #[strum(serialize = "debug-m-drop")]
@@ -88,7 +91,7 @@ impl SlashCommand {
             SlashCommand::Statusline => "configure which items appear in the status line",
             SlashCommand::Theme => "choose a syntax highlighting theme",
             SlashCommand::Ps => "list background terminals",
-            SlashCommand::Clean => "stop all background terminals",
+            SlashCommand::Stop => "stop all background terminals",
             SlashCommand::MemoryDrop => "DO NOT USE",
             SlashCommand::MemoryUpdate => "DO NOT USE",
             SlashCommand::Model => "choose what model and reasoning effort to use",
@@ -109,6 +112,7 @@ impl SlashCommand {
             SlashCommand::Mcp => "list configured MCP tools",
             SlashCommand::Apps => "manage apps",
             SlashCommand::Auto => "automate follow-up prompts after Codex completes work",
+            SlashCommand::Pilot => "run an assistant-controlled autonomous work loop",
             SlashCommand::Accounts => "manage saved accounts and auth flows",
             SlashCommand::Logout => "log out of Codex",
             SlashCommand::Rollout => "print the rollout file path",
@@ -134,6 +138,7 @@ impl SlashCommand {
                 | SlashCommand::Plan
                 | SlashCommand::Fast
                 | SlashCommand::Auto
+                | SlashCommand::Pilot
                 | SlashCommand::SandboxReadRoot
         )
     }
@@ -171,9 +176,10 @@ impl SlashCommand {
             | SlashCommand::Status
             | SlashCommand::DebugConfig
             | SlashCommand::Ps
-            | SlashCommand::Clean
+            | SlashCommand::Stop
             | SlashCommand::Mcp
             | SlashCommand::Apps
+            | SlashCommand::Pilot
             | SlashCommand::Feedback
             | SlashCommand::Quit
             | SlashCommand::Exit => true,
@@ -208,11 +214,20 @@ pub fn built_in_slash_commands() -> Vec<(&'static str, SlashCommand)> {
 
 #[cfg(test)]
 mod tests {
+    use pretty_assertions::assert_eq;
     use std::str::FromStr;
 
-    use pretty_assertions::assert_eq;
-
     use super::SlashCommand;
+
+    #[test]
+    fn stop_command_is_canonical_name() {
+        assert_eq!(SlashCommand::Stop.command(), "stop");
+    }
+
+    #[test]
+    fn clean_alias_parses_to_stop_command() {
+        assert_eq!(SlashCommand::from_str("clean"), Ok(SlashCommand::Stop));
+    }
 
     #[test]
     fn accounts_is_the_only_supported_command_name() {

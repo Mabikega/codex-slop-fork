@@ -129,6 +129,7 @@ async fn websocket_first_turn_handles_handshake_delay_with_startup_prewarm() -> 
         response_headers: Vec::new(),
         // Delay handshake so turn processing must tolerate websocket startup latency.
         accept_delay: Some(Duration::from_millis(150)),
+        close_after_requests: true,
     }])
     .await;
 
@@ -358,19 +359,21 @@ async fn websocket_v2_first_turn_drops_fast_tier_after_startup_prewarm() -> Resu
 async fn websocket_v2_next_turn_uses_updated_service_tier() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let server = start_websocket_server(vec![vec![
-        vec![ev_response_created("warm-1"), ev_completed("warm-1")],
+    let server = start_websocket_server(vec![
         vec![
-            ev_response_created("resp-1"),
-            ev_assistant_message("msg-1", "fast"),
-            ev_completed("resp-1"),
+            vec![ev_response_created("warm-1"), ev_completed("warm-1")],
+            vec![
+                ev_response_created("resp-1"),
+                ev_assistant_message("msg-1", "fast"),
+                ev_completed("resp-1"),
+            ],
         ],
-        vec![
+        vec![vec![
             ev_response_created("resp-2"),
             ev_assistant_message("msg-2", "standard"),
             ev_completed("resp-2"),
-        ],
-    ]])
+        ]],
+    ])
     .await;
 
     let mut builder = test_codex().with_config(|config| {
@@ -390,16 +393,16 @@ async fn websocket_v2_next_turn_uses_updated_service_tier() -> Result<()> {
         .await?;
     test.submit_turn_with_service_tier("second", None).await?;
 
-    assert_eq!(server.handshakes().len(), 1);
-    let connection = server.single_connection();
-    assert_eq!(connection.len(), 3);
+    assert_eq!(server.handshakes().len(), 2);
+    let connections = server.connections();
+    assert_eq!(connections.len(), 2);
 
-    let first_turn = connection
+    let first_turn = connections[0]
         .get(1)
         .expect("missing first turn request")
         .body_json();
-    let second_turn = connection
-        .get(2)
+    let second_turn = connections[1]
+        .first()
         .expect("missing second turn request")
         .body_json();
 

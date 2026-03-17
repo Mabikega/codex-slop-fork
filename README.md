@@ -135,8 +135,8 @@ Untouched quota behavior:
 Maintenance note:
 
 - the fork TUI keeps `codex-rs/tui/src/slop_fork/ui.rs` as the dispatch/controller seam and splits
-  login popup rendering, saved-account rate-limit handling, and automation UI code into dedicated
-  internal modules so future fork changes stay local
+  login popup rendering, saved-account rate-limit handling, automation UI code, and Pilot UI code
+  into dedicated internal modules so future fork changes stay local
 
 ### Automation engine
 
@@ -184,6 +184,44 @@ Persisted automation files:
 - global definitions: `~/.codex/codex-slop-fork-automations.toml`
 - repo definitions: `<repo>/.codex/codex-slop-fork-automations.toml`
 - runtime state: `~/.codex/.codex-slop-fork-automation-state.json`
+
+### Pilot autonomous runs
+
+`$pilot` runs an assistant-controlled autonomous loop without fabricating a new user message for
+every continuation cycle. The same persisted Pilot run can also be inspected and controlled through
+the experimental app-server methods `pilot/read`, `pilot/start`, and `pilot/control`, with
+`pilot/updated` notifications streaming state transitions to subscribed clients.
+
+Examples:
+
+- `$pilot start --for 4h Improve benchmark accuracy end-to-end`
+- `$pilot status`
+- `$pilot pause`
+- `$pilot resume`
+- `$pilot wrap-up`
+- `$pilot stop`
+
+Behavior:
+
+- Pilot uses controller-owned continuation turns instead of prompting the model to remember to keep
+  going on its own
+- each Pilot cycle is injected as a developer instruction, not as a synthetic user turn
+- TUI and app-server clients coordinate through the saved run state under a file lock, so status
+  reads and control actions stay shared even when a thread is not currently loaded
+- scheduling still happens only at idle boundaries on a loaded thread, so the outer loop stays
+  controller-owned instead of relying on prompt text
+- `--for` is a hard scheduling limit for new work; once the deadline is reached, Pilot schedules a
+  final wrap-up cycle instead of continuing indefinitely
+- `wrap-up` stops broad exploration and asks the model to finish cleanly with a final report
+- `pause` lets the active cycle finish but stops further Pilot cycles
+- `stop` prevents further Pilot cycles; if a Pilot-controlled turn is already running, it may still
+  finish
+- disconnecting a client does not fabricate more work; Pilot only schedules new cycles while some
+  loaded client or listener reaches an idle boundary for that thread
+
+Persisted Pilot files:
+
+- runtime state: `~/.codex/.codex-slop-fork-pilot-state.json`
 
 ### Additional instruction injection
 

@@ -166,6 +166,7 @@ use super::footer::footer_hint_items_width;
 use super::footer::footer_line_width;
 use super::footer::inset_footer_hint_area;
 use super::footer::max_left_width_for_right;
+use super::footer::passive_footer_status_line;
 use super::footer::render_context_right;
 use super::footer::render_footer_from_props;
 use super::footer::render_footer_hint_items;
@@ -173,6 +174,7 @@ use super::footer::render_footer_line;
 use super::footer::reset_mode_after_activity;
 use super::footer::single_line_footer_layout;
 use super::footer::toggle_shortcut_mode;
+use super::footer::uses_passive_footer_status_layout;
 use super::paste_burst::CharDecision;
 use super::paste_burst::PasteBurst;
 use super::skill_popup::MentionItem;
@@ -193,7 +195,11 @@ use crate::slash_command::SlashCommand;
 use crate::slop_fork::auto_command_first_token;
 use crate::slop_fork::auto_command_mention_item;
 use crate::slop_fork::parse_auto_command_args;
+use crate::slop_fork::parse_pilot_command_args;
+use crate::slop_fork::pilot_command_first_token;
+use crate::slop_fork::pilot_command_mention_item;
 use crate::slop_fork::should_dispatch_auto_command;
+use crate::slop_fork::should_dispatch_pilot_command;
 use crate::style::user_message_style;
 use codex_protocol::custom_prompts::CustomPrompt;
 use codex_protocol::custom_prompts::PROMPTS_CMD_PREFIX;
@@ -412,6 +418,8 @@ pub(crate) struct ChatComposer {
     windows_degraded_sandbox_active: bool,
     status_line_value: Option<Line<'static>>,
     status_line_enabled: bool,
+    // Agent label injected into the footer's contextual row when multi-agent mode is active.
+    active_agent_label: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -532,6 +540,7 @@ impl ChatComposer {
             windows_degraded_sandbox_active: false,
             status_line_value: None,
             status_line_enabled: false,
+            active_agent_label: None,
         };
         // Apply configuration via the setter to keep side-effects centralized.
         this.set_disable_paste_burst(disable_paste_burst);
@@ -1962,10 +1971,12 @@ impl ChatComposer {
             .as_ref()
             .is_some_and(|plugins| !plugins.is_empty());
         let connectors_ready = self.connectors_enabled
-            && self
-                .connectors_snapshot
-                .as_ref()
-                .is_some_and(|snapshot| !snapshot.connectors.is_empty());
+            && self.connectors_snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot
+                    .connectors
+                    .iter()
+                    .any(|connector| connector.is_accessible && connector.is_enabled)
+            });
         skills_ready || plugins_ready || connectors_ready
     }
 
@@ -2236,6 +2247,13 @@ impl ChatComposer {
             return false;
         };
         should_dispatch_auto_command(first_token, self.mention_binding_path_for_range(range))
+    }
+
+    fn should_dispatch_pilot_dollar_command(&self, text: &str) -> bool {
+        let Some((first_token, range)) = pilot_command_first_token(text) else {
+            return false;
+        };
+        should_dispatch_pilot_command(first_token, self.mention_binding_path_for_range(range))
     }
 
     fn snapshot_mention_bindings(&self) -> Vec<MentionBinding> {
@@ -2514,6 +2532,27 @@ impl ChatComposer {
                     .to_string();
                 return (
                     InputResult::CommandWithArgs(SlashCommand::Auto, args, Vec::new()),
+                    true,
+                );
+            }
+
+            self.set_text_content_with_mention_bindings(
+                original_input,
+                original_text_elements,
+                original_local_image_paths,
+                original_mention_bindings,
+            );
+            self.pending_pastes = original_pending_pastes;
+            return (InputResult::None, true);
+        }
+
+        if self.should_dispatch_pilot_dollar_command(&original_input) {
+            if let Some((prepared_text, _prepared_elements)) = self.prepare_submission_text(false) {
+                let args = parse_pilot_command_args(&prepared_text)
+                    .unwrap_or_default()
+                    .to_string();
+                return (
+                    InputResult::CommandWithArgs(SlashCommand::Pilot, args, Vec::new()),
                     true,
                 );
             }
@@ -3241,6 +3280,7 @@ impl ChatComposer {
             context_window_used_tokens: self.context_window_used_tokens,
             status_line_value: self.status_line_value.clone(),
             status_line_enabled: self.status_line_enabled,
+            active_agent_label: self.active_agent_label.clone(),
         }
     }
 
@@ -3616,6 +3656,7 @@ impl ChatComposer {
         let mut mentions = Vec::new();
 
         mentions.push(auto_command_mention_item());
+        mentions.push(pilot_command_mention_item());
 
         if let Some(skills) = self.skills.as_ref() {
             for skill in skills {
@@ -3812,6 +3853,19 @@ impl ChatComposer {
             return false;
         }
         self.status_line_enabled = enabled;
+        true
+    }
+
+    /// Replaces the contextual footer label for the currently viewed agent.
+    ///
+    /// Returning `false` means the value was unchanged, so callers can skip redraw work. This
+    /// field is intentionally just cached presentation state; `ChatComposer` does not infer which
+    /// thread is active on its own.
+    pub(crate) fn set_active_agent_label(&mut self, active_agent_label: Option<String>) -> bool {
+        if self.active_agent_label == active_agent_label {
+            return false;
+        }
+        self.active_agent_label = active_agent_label;
         true
     }
 }
@@ -4247,26 +4301,19 @@ impl ChatComposer {
                 };
                 let available_width =
                     hint_rect.width.saturating_sub(FOOTER_INDENT_COLS as u16) as usize;
-                let status_line = footer_props
-                    .status_line_value
-                    .as_ref()
-                    .map(|line| line.clone().dim());
-                let status_line_candidate = footer_props.status_line_enabled
-                    && match footer_props.mode {
-                        FooterMode::ComposerEmpty => true,
-                        FooterMode::ComposerHasDraft => !footer_props.is_task_running,
-                        FooterMode::QuitShortcutReminder
-                        | FooterMode::ShortcutOverlay
-                        | FooterMode::EscHint => false,
-                    };
-                let mut truncated_status_line = if status_line_candidate {
-                    status_line.as_ref().map(|line| {
+                let status_line_active = uses_passive_footer_status_layout(&footer_props);
+                let combined_status_line = if status_line_active {
+                    passive_footer_status_line(&footer_props).map(ratatui::prelude::Stylize::dim)
+                } else {
+                    None
+                };
+                let mut truncated_status_line = if status_line_active {
+                    combined_status_line.as_ref().map(|line| {
                         truncate_line_with_ellipsis_if_overflow(line.clone(), available_width)
                     })
                 } else {
                     None
                 };
-                let status_line_active = status_line_candidate && truncated_status_line.is_some();
                 let left_mode_indicator = if status_line_active {
                     None
                 } else {
@@ -4313,7 +4360,7 @@ impl ChatComposer {
                 if status_line_active
                     && let Some(max_left) = max_left_width_for_right(hint_rect, right_width)
                     && left_width > max_left
-                    && let Some(line) = status_line.as_ref().map(|line| {
+                    && let Some(line) = combined_status_line.as_ref().map(|line| {
                         truncate_line_with_ellipsis_if_overflow(line.clone(), max_left as usize)
                     })
                 {
@@ -4537,6 +4584,7 @@ impl Drop for ChatComposer {
 mod tests {
     use super::*;
     use crate::slop_fork::AUTO_COMMAND_MENTION_PATH;
+    use crate::slop_fork::PILOT_COMMAND_MENTION_PATH;
     use image::ImageBuffer;
     use image::Rgba;
     use pretty_assertions::assert_eq;
@@ -5337,6 +5385,44 @@ mod tests {
     }
 
     #[test]
+    fn set_connector_mentions_skips_disabled_connectors() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+        composer.set_connectors_enabled(true);
+        composer.set_text_content("$".to_string(), Vec::new(), Vec::new());
+        assert!(matches!(composer.active_popup, ActivePopup::None));
+
+        let connectors = vec![AppInfo {
+            id: "connector_1".to_string(),
+            name: "Notion".to_string(),
+            description: Some("Workspace docs".to_string()),
+            logo_url: None,
+            logo_url_dark: None,
+            distribution_channel: None,
+            branding: None,
+            app_metadata: None,
+            labels: None,
+            install_url: Some("https://example.test/notion".to_string()),
+            is_accessible: true,
+            is_enabled: false,
+            plugin_display_names: Vec::new(),
+        }];
+        composer.set_connector_mentions(Some(ConnectorsSnapshot { connectors }));
+
+        assert!(
+            matches!(composer.active_popup, ActivePopup::None),
+            "disabled connectors should not appear in the mention popup"
+        );
+    }
+
+    #[test]
     fn set_plugin_mentions_refreshes_open_mention_popup() {
         let (tx, _rx) = unbounded_channel::<AppEvent>();
         let sender = AppEventSender::new(tx);
@@ -5409,6 +5495,7 @@ mod tests {
                 dependencies: None,
                 policy: None,
                 permission_profile: None,
+                managed_network_override: None,
                 path_to_skills_md: PathBuf::from("/tmp/repo/google-calendar/SKILL.md"),
                 scope: codex_protocol::protocol::SkillScope::Repo,
             }]));
@@ -5458,6 +5545,7 @@ mod tests {
                     dependencies: None,
                     policy: None,
                     permission_profile: None,
+                    managed_network_override: None,
                     path_to_skills_md: PathBuf::from("/tmp/repo/auto/SKILL.md"),
                     scope: codex_protocol::protocol::SkillScope::Repo,
                 }]));
@@ -5497,10 +5585,7 @@ mod tests {
         }];
         composer.set_connector_mentions(Some(ConnectorsSnapshot { connectors }));
 
-        let ActivePopup::Skill(popup) = &composer.active_popup else {
-            panic!("expected mention popup to stay open for the command row");
-        };
-        assert!(popup.selected_mention().is_none());
+        assert!(matches!(composer.active_popup, ActivePopup::None));
     }
 
     #[test]
@@ -7735,6 +7820,36 @@ mod tests {
         assert_eq!(
             result,
             InputResult::CommandWithArgs(SlashCommand::Auto, "list".to_string(), Vec::new())
+        );
+    }
+
+    #[test]
+    fn bound_pilot_command_dispatches_pilot_dollar_command() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        composer.set_text_content_with_mention_bindings(
+            "$pilot status".to_string(),
+            Vec::new(),
+            Vec::new(),
+            vec![MentionBinding {
+                mention: "pilot".to_string(),
+                path: PILOT_COMMAND_MENTION_PATH.to_string(),
+            }],
+        );
+
+        let (result, _) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            result,
+            InputResult::CommandWithArgs(SlashCommand::Pilot, "status".to_string(), Vec::new())
         );
     }
 

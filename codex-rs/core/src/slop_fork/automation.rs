@@ -269,6 +269,7 @@ pub struct AutomationPolicyExecutionContext {
     pub network_sandbox_policy: NetworkSandboxPolicy,
     pub codex_linux_sandbox_exe: Option<PathBuf>,
     pub windows_sandbox_level: WindowsSandboxLevel,
+    pub windows_sandbox_private_desktop: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -357,6 +358,7 @@ pub async fn run_policy_command(
             network: None,
             sandbox_permissions: SandboxPermissions::UseDefault,
             windows_sandbox_level: execution.windows_sandbox_level,
+            windows_sandbox_private_desktop: execution.windows_sandbox_private_desktop,
             justification: Some("Run /auto policy command".to_string()),
             arg0: None,
         },

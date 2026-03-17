@@ -116,12 +116,10 @@ async fn code_mode_keeps_flat_tools_namespace_compat_for_namespaced_mcp_tools() 
 
     let server = responses::start_mock_server().await;
     let code = r#"
-import { tools } from "tools.js";
-
 const { structuredContent, isError } = await tools["mcp__rmcp__echo"]({
   message: "ping",
 });
-add_content(
+text(
   `echo=${structuredContent?.echo ?? "missing"}
 ` +
     `env=${structuredContent?.env ?? "missing"}

@@ -162,6 +162,10 @@ Example with notification opt-out:
 - `skills/remote/list` — list public remote skills (**under development; do not call from production clients yet**).
 - `skills/remote/export` — download a remote skill by `hazelnutId` into `skills` under `codex_home` (**under development; do not call from production clients yet**).
 - `app/list` — list available apps.
+- `pilot/read` — read the persisted state of the fork's Pilot autonomous run for a thread, even if that thread is not currently loaded (experimental).
+- `pilot/start` — start or replace the fork's persisted Pilot autonomous run for a thread; the listener queues assistant-only continuation turns once a loaded thread reaches idle (experimental).
+- `pilot/control` — send a control action (`pause`, `resume`, `wrapUp`, `stop`) to the fork's persisted Pilot autonomous run for a thread, even if that thread is not currently loaded (experimental).
+- `pilot/updated` — notification emitted when the fork's Pilot run changes state, queues a cycle, starts a cycle, completes, pauses, or stops (experimental).
 - `skills/config/write` — write user-level skill config by path.
 - `plugin/install` — install a plugin from a discovered marketplace entry and return any apps that still need auth (**under development; do not call from production clients yet**).
 - `plugin/uninstall` — uninstall a plugin by id by removing its cached files and clearing its user-level config entry (**under development; do not call from production clients yet**).

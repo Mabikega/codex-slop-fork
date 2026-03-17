@@ -4,6 +4,7 @@ pub mod auth_accounts;
 mod auth_sync;
 pub mod automation;
 mod config;
+pub mod pilot;
 
 pub const FORK_DISPLAY_NAME: &str = "Codex Slop Fork";
 

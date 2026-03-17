@@ -24,6 +24,7 @@ This section describes the actual structure of this fork, not generic upstream C
   - `auth_sync.rs`
   - `automation.rs`
   - `config.rs`
+  - `pilot.rs`
   - `mod.rs`
 - TUI fork logic lives under `codex-rs/tui/src/slop_fork/`.
 - Current TUI fork modules are:
@@ -31,20 +32,23 @@ This section describes the actual structure of this fork, not generic upstream C
   - `external_auth.rs`
   - `event.rs`
   - `login_settings_view.rs`
+  - `pilot_command.rs`
   - `rate_limit_poller.rs`
   - `schedule_parser.rs`
   - `status_line.rs`
   - `ui_automation.rs`
   - `ui_login.rs`
+  - `ui_pilot.rs`
   - `ui_rate_limits.rs`
   - `ui.rs`
-  - `ui_saved_account_events.rs`
   - `mod.rs`
 - `ui.rs` is the TUI fork controller seam. Login popup rendering, saved-account rate-limit logic,
-  saved-account event completion handling, and automation UI logic live in `ui_login.rs`,
-  `ui_rate_limits.rs`, `ui_saved_account_events.rs`, and `ui_automation.rs` as internal
+  automation UI logic, and Pilot UI logic live in `ui_login.rs`, `ui_rate_limits.rs`,
+  `ui_automation.rs`, and `ui_pilot.rs` as internal
   submodules so upstream-facing hooks stay thin.
-- App-server fork logic currently lives in `codex-rs/app-server/src/slop_fork_automation.rs`.
+- App-server fork logic currently lives in:
+  - `codex-rs/app-server/src/slop_fork_automation.rs`
+  - `codex-rs/app-server/src/slop_fork_pilot.rs`
 - Upstream-facing hotspots should stay thin and delegate into these fork-owned modules instead of accumulating fork policy locally.
 - Fork-specific persisted state currently lives in:
   - `~/.codex/.accounts/`
@@ -53,6 +57,7 @@ This section describes the actual structure of this fork, not generic upstream C
   - `~/.codex/codex-slop-fork-automations.toml`
   - `<repo>/.codex/codex-slop-fork-automations.toml`
   - `~/.codex/.codex-slop-fork-automation-state.json`
+  - `~/.codex/.codex-slop-fork-pilot-state.json`
 
 ## Primary Rule
 
@@ -138,6 +143,8 @@ When bringing new upstream changes into the fork:
 - Replay only the intended fork delta. Do not preserve unrelated branch baggage, stale merge resolutions, or carried-forward upstream-only files just because they existed in an older local branch.
 - If a file differs from the chosen upstream release for reasons unrelated to the fork feature, restore the release-tag version first and then reapply only the minimal fork seam that is actually required.
 - Prefer proving provenance file-by-file in high-churn hotspots: first check whether the file should be byte-for-byte upstream, and only keep a diff when there is a clear fork-owned reason.
+- During every upstream merge, explicitly review whether new upstream capabilities create a better seam or implementation path for an existing fork feature. Do not limit the merge to conflict resolution if upstream now offers a cleaner way to express the same fork behavior.
+- During every upstream merge, explicitly review whether any fork feature has become partially or fully redundant because upstream gained a very similar capability. If so, prefer deleting or shrinking the fork overlay instead of preserving older fork code out of habit.
 - After the replay, verify that fork logic still lives under `slop_fork/`, that upstream hotspots only contain thin delegation hooks, and that generated docs or schemas are regenerated only when the fork feature truly changes them.
 - When compile failures appear after a release rebase, first suspect mixed-version state before assuming the fork feature itself is wrong.
 

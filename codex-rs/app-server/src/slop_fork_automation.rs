@@ -109,6 +109,7 @@ impl SlopForkAutomationManager {
         default_timeout_ms: u64,
         codex_linux_sandbox_exe: Option<PathBuf>,
         windows_sandbox_level: WindowsSandboxLevel,
+        windows_sandbox_private_desktop: bool,
     ) -> Result<Vec<AutomationUpdatedNotification>, String> {
         let snapshot = thread.config_snapshot().await;
         let mut registry = self
@@ -136,6 +137,7 @@ impl SlopForkAutomationManager {
             network_sandbox_policy: NetworkSandboxPolicy::from(&sandbox_policy),
             codex_linux_sandbox_exe,
             windows_sandbox_level,
+            windows_sandbox_private_desktop,
         };
         let notifications = self
             .run_prepared_actions(
@@ -172,6 +174,7 @@ impl SlopForkAutomationManager {
         default_timeout_ms: u64,
         codex_linux_sandbox_exe: Option<PathBuf>,
         windows_sandbox_level: WindowsSandboxLevel,
+        windows_sandbox_private_desktop: bool,
     ) -> Result<Vec<AutomationUpdatedNotification>, String> {
         let snapshot = thread.config_snapshot().await;
         let mut registry = self
@@ -193,6 +196,7 @@ impl SlopForkAutomationManager {
             network_sandbox_policy: NetworkSandboxPolicy::from(&sandbox_policy),
             codex_linux_sandbox_exe,
             windows_sandbox_level,
+            windows_sandbox_private_desktop,
         };
         let notifications = self
             .run_prepared_actions(

@@ -1,0 +1,18 @@
+---
+source: tui/src/chatwidget/tests.rs
+expression: rendered
+---
+Pilot
+Start an assistant-controlled autonomous run without synthetic user follow-up messages.
+
+Usage:
+$pilot start [--for <duration>] <goal>
+$pilot status
+$pilot pause
+$pilot resume
+$pilot wrap-up
+$pilot stop
+
+Examples:
+$pilot start --for 4h Improve benchmark accuracy end-to-end
+$pilot wrap-up

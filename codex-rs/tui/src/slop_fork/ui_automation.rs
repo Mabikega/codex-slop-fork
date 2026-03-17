@@ -543,6 +543,7 @@ impl SlopForkUi {
         let network_sandbox_policy = ctx.network_sandbox_policy;
         let codex_linux_sandbox_exe = ctx.codex_linux_sandbox_exe.clone();
         let windows_sandbox_level = ctx.windows_sandbox_level;
+        let windows_sandbox_private_desktop = ctx.windows_sandbox_private_desktop;
         tokio::spawn(async move {
             let execution = AutomationPolicyExecutionContext {
                 session_cwd: cwd,
@@ -551,6 +552,7 @@ impl SlopForkUi {
                 network_sandbox_policy,
                 codex_linux_sandbox_exe,
                 windows_sandbox_level,
+                windows_sandbox_private_desktop,
             };
             match run_policy_command(
                 &prepared.command,

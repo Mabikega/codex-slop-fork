@@ -122,7 +122,7 @@ bun install -g https://github.com/Mabikega/codex-slop-fork/releases/latest/downl
 
 保守メモ:
 
-- フォークの TUI は `codex-rs/tui/src/slop_fork/ui.rs` をディスパッチ兼コントローラの継ぎ目として維持し、ログインポップアップ描画、保存済みアカウントのレート制限処理、オートメーション UI コードを専用の内部モジュールへ分割して、今後のフォーク変更を局所化しています
+- フォークの TUI は `codex-rs/tui/src/slop_fork/ui.rs` をディスパッチ兼コントローラの継ぎ目として維持し、ログインポップアップ描画、保存済みアカウントのレート制限処理、オートメーション UI コード、Pilot UI コードを専用の内部モジュールへ分割して、今後のフォーク変更を局所化しています
 
 ### オートメーションエンジン
 
@@ -170,6 +170,40 @@ bun install -g https://github.com/Mabikega/codex-slop-fork/releases/latest/downl
 - グローバル定義: `~/.codex/codex-slop-fork-automations.toml`
 - リポジトリ定義: `<repo>/.codex/codex-slop-fork-automations.toml`
 - 実行時状態: `~/.codex/.codex-slop-fork-automation-state.json`
+
+### Pilot 自律実行
+
+`$pilot` は、継続ごとに新しいユーザーメッセージを捏造せず、アシスタント主導の自律ループを実行します。
+同じ保存済み Pilot 実行は、experimental な app-server メソッド `pilot/read`、
+`pilot/start`、`pilot/control` と通知 `pilot/updated` からも参照、制御できます。
+
+例:
+
+- `$pilot start --for 4h ベンチマーク精度を end-to-end で改善する`
+- `$pilot status`
+- `$pilot pause`
+- `$pilot resume`
+- `$pilot wrap-up`
+- `$pilot stop`
+
+挙動:
+
+- Pilot は、モデル自身に「継続を覚えさせる」のではなく、コントローラ側で継続を管理します
+- 各 Pilot サイクルは合成ユーザーターンではなく developer 指示として注入されます
+- TUI クライアントと app-server クライアントは、ファイルロック付きの保存済み Pilot 状態を
+  共有して参照、制御します。スレッドが未ロードでも状態確認や制御は可能です
+- 次サイクルのスケジュール自体はロード済みスレッドの idle 境界でのみ行われるため、外側の
+  ループはプロンプト文ではなくコントローラ側が保持します
+- `--for` は新規作業のハードなスケジュール上限です。期限到達後は無限継続せず、最後の wrap-up サイクルを 1 回だけ実行します
+- `wrap-up` は広い探索を止め、きれいに締める最終レポートを求めます
+- `pause` は現在のサイクル完了までは許可しますが、その後の Pilot サイクルを止めます
+- `stop` は以後の Pilot サイクルを止めます。Pilot 制御中のターンがすでに走っている場合は、そのターンだけは完了することがあります
+- クライアント切断だけで新しい作業が勝手に増えることはありません。Pilot は、そのスレッドを
+  読み込んでいるクライアントやリスナーが idle 境界に到達したときだけ次サイクルを積みます
+
+永続化される Pilot ファイル:
+
+- 実行時状態: `~/.codex/.codex-slop-fork-pilot-state.json`
 
 ### 追加指示の注入
 

@@ -35,7 +35,8 @@ pub(crate) struct PendingThreadResumeRequest {
 pub(crate) enum ThreadListenerCommand {
     // SendThreadResumeResponse is used to resume an already running thread by sending the thread's history to the client and atomically subscribing for new updates.
     SendThreadResumeResponse(Box<PendingThreadResumeRequest>),
-    // WakeAutomationTimer nudges the listener loop to recompute its next automation sleep.
+    // WakeAutomationTimer nudges the listener loop to recompute fork-owned background work such
+    // as automation sleeps and Pilot idle scheduling.
     WakeAutomationTimer,
     // ResolveServerRequest is used to notify the client that the request has been resolved.
     // It is executed in the thread listener's context to ensure that the resolved notification is ordered with regard to the request itself.
@@ -173,14 +174,14 @@ impl ThreadStateManager {
         outgoing: Arc<OutgoingMessageSender>,
         thread_id: &ThreadId,
     ) -> Option<ThreadScopedOutgoingMessageSender> {
-        let connection_ids = self.subscribed_connection_ids(thread_id.clone()).await;
+        let connection_ids = self.subscribed_connection_ids(*thread_id).await;
         if connection_ids.is_empty() {
             return None;
         }
         Some(ThreadScopedOutgoingMessageSender::new(
             outgoing,
             connection_ids,
-            thread_id.clone(),
+            *thread_id,
         ))
     }
 
@@ -211,6 +212,29 @@ impl ThreadStateManager {
                 had_listener = thread_state.cancel_tx.is_some(),
                 had_active_turn = thread_state.active_turn_snapshot().is_some(),
                 "clearing thread listener during thread-state teardown"
+            );
+            thread_state.clear_listener();
+        }
+    }
+
+    pub(crate) async fn clear_all_listeners(&self) {
+        let thread_states = {
+            let state = self.state.lock().await;
+            state
+                .threads
+                .iter()
+                .map(|(thread_id, thread_entry)| (*thread_id, thread_entry.state.clone()))
+                .collect::<Vec<_>>()
+        };
+
+        for (thread_id, thread_state) in thread_states {
+            let mut thread_state = thread_state.lock().await;
+            tracing::debug!(
+                thread_id = %thread_id,
+                listener_generation = thread_state.listener_generation,
+                had_listener = thread_state.cancel_tx.is_some(),
+                had_active_turn = thread_state.active_turn_snapshot().is_some(),
+                "clearing thread listener during app-server shutdown"
             );
             thread_state.clear_listener();
         }

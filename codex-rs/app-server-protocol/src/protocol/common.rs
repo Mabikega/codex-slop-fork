@@ -44,15 +44,15 @@ pub enum AuthMode {
 
 macro_rules! experimental_reason_expr {
     // If a request variant is explicitly marked experimental, that reason wins.
-    (#[experimental($reason:expr)] $params:ident $(, $inspect_params:tt)?) => {
+    (variant $variant:ident, #[experimental($reason:expr)] $params:ident $(, $inspect_params:tt)?) => {
         Some($reason)
     };
     // `inspect_params: true` is used when a method is mostly stable but needs
     // field-level gating from its params type (for example, ThreadStart).
-    ($params:ident, true) => {
+    (variant $variant:ident, $params:ident, true) => {
         crate::experimental_api::ExperimentalApi::experimental_reason($params)
     };
-    ($params:ident $(, $inspect_params:tt)?) => {
+    (variant $variant:ident, $params:ident $(, $inspect_params:tt)?) => {
         None
     };
 }
@@ -136,6 +136,7 @@ macro_rules! client_request_definitions {
                     $(
                         Self::$variant { params: _params, .. } => {
                             experimental_reason_expr!(
+                                variant $variant,
                                 $(#[experimental($reason)])?
                                 _params
                                 $(, $inspect_params)?
@@ -295,6 +296,10 @@ client_request_definitions! {
         params: v2::PluginListParams,
         response: v2::PluginListResponse,
     },
+    PluginRead => "plugin/read" {
+        params: v2::PluginReadParams,
+        response: v2::PluginReadResponse,
+    },
     SkillsRemoteList => "skills/remote/list" {
         params: v2::SkillsRemoteReadParams,
         response: v2::SkillsRemoteReadResponse,
@@ -306,6 +311,34 @@ client_request_definitions! {
     AppsList => "app/list" {
         params: v2::AppsListParams,
         response: v2::AppsListResponse,
+    },
+    FsReadFile => "fs/readFile" {
+        params: v2::FsReadFileParams,
+        response: v2::FsReadFileResponse,
+    },
+    FsWriteFile => "fs/writeFile" {
+        params: v2::FsWriteFileParams,
+        response: v2::FsWriteFileResponse,
+    },
+    FsCreateDirectory => "fs/createDirectory" {
+        params: v2::FsCreateDirectoryParams,
+        response: v2::FsCreateDirectoryResponse,
+    },
+    FsGetMetadata => "fs/getMetadata" {
+        params: v2::FsGetMetadataParams,
+        response: v2::FsGetMetadataResponse,
+    },
+    FsReadDirectory => "fs/readDirectory" {
+        params: v2::FsReadDirectoryParams,
+        response: v2::FsReadDirectoryResponse,
+    },
+    FsRemove => "fs/remove" {
+        params: v2::FsRemoveParams,
+        response: v2::FsRemoveResponse,
+    },
+    FsCopy => "fs/copy" {
+        params: v2::FsCopyParams,
+        response: v2::FsCopyResponse,
     },
     AutomationList => "automation/list" {
         params: v2::AutomationListParams,
@@ -322,6 +355,21 @@ client_request_definitions! {
     AutomationSetEnabled => "automation/setEnabled" {
         params: v2::AutomationSetEnabledParams,
         response: v2::AutomationSetEnabledResponse,
+    },
+    #[experimental("pilot/read")]
+    PilotRead => "pilot/read" {
+        params: v2::PilotReadParams,
+        response: v2::PilotReadResponse,
+    },
+    #[experimental("pilot/start")]
+    PilotStart => "pilot/start" {
+        params: v2::PilotStartParams,
+        response: v2::PilotStartResponse,
+    },
+    #[experimental("pilot/control")]
+    PilotControl => "pilot/control" {
+        params: v2::PilotControlParams,
+        response: v2::PilotControlResponse,
     },
     SkillsConfigWrite => "skills/config/write" {
         params: v2::SkillsConfigWriteParams,
@@ -867,6 +915,8 @@ server_notification_definitions! {
     TurnDiffUpdated => "turn/diff/updated" (v2::TurnDiffUpdatedNotification),
     TurnPlanUpdated => "turn/plan/updated" (v2::TurnPlanUpdatedNotification),
     ItemStarted => "item/started" (v2::ItemStartedNotification),
+    ItemGuardianApprovalReviewStarted => "item/autoApprovalReview/started" (v2::ItemGuardianApprovalReviewStartedNotification),
+    ItemGuardianApprovalReviewCompleted => "item/autoApprovalReview/completed" (v2::ItemGuardianApprovalReviewCompletedNotification),
     ItemCompleted => "item/completed" (v2::ItemCompletedNotification),
     /// This event is internal-only. Used by Codex Cloud.
     RawResponseItemCompleted => "rawResponseItem/completed" (v2::RawResponseItemCompletedNotification),
@@ -885,6 +935,8 @@ server_notification_definitions! {
     AccountRateLimitsUpdated => "account/rateLimits/updated" (v2::AccountRateLimitsUpdatedNotification),
     AppListUpdated => "app/list/updated" (v2::AppListUpdatedNotification),
     AutomationUpdated => "automation/updated" (v2::AutomationUpdatedNotification),
+    #[experimental("pilot/updated")]
+    PilotUpdated => "pilot/updated" (v2::PilotUpdatedNotification),
     ReasoningSummaryTextDelta => "item/reasoning/summaryTextDelta" (v2::ReasoningSummaryTextDeltaNotification),
     ReasoningSummaryPartAdded => "item/reasoning/summaryPartAdded" (v2::ReasoningSummaryPartAddedNotification),
     ReasoningTextDelta => "item/reasoning/textDelta" (v2::ReasoningTextDeltaNotification),
@@ -933,8 +985,17 @@ mod tests {
     use serde_json::json;
     use std::path::PathBuf;
 
+    fn absolute_path_string(path: &str) -> String {
+        let trimmed = path.trim_start_matches('/');
+        if cfg!(windows) {
+            format!(r"C:\{}", trimmed.replace('/', "\\"))
+        } else {
+            format!("/{trimmed}")
+        }
+    }
+
     fn absolute_path(path: &str) -> AbsolutePathBuf {
-        AbsolutePathBuf::from_absolute_path(path).expect("absolute path")
+        AbsolutePathBuf::from_absolute_path(absolute_path_string(path)).expect("absolute path")
     }
 
     #[test]
@@ -971,7 +1032,7 @@ mod tests {
                 capabilities: Some(v1::InitializeCapabilities {
                     experimental_api: true,
                     opt_out_notification_methods: Some(vec![
-                        "codex/event/session_configured".to_string(),
+                        "thread/started".to_string(),
                         "item/agentMessage/delta".to_string(),
                     ]),
                 }),
@@ -991,7 +1052,7 @@ mod tests {
                     "capabilities": {
                         "experimentalApi": true,
                         "optOutNotificationMethods": [
-                            "codex/event/session_configured",
+                            "thread/started",
                             "item/agentMessage/delta"
                         ]
                     }
@@ -1016,7 +1077,7 @@ mod tests {
                 "capabilities": {
                     "experimentalApi": true,
                     "optOutNotificationMethods": [
-                        "codex/event/session_configured",
+                        "thread/started",
                         "item/agentMessage/delta"
                     ]
                 }
@@ -1036,7 +1097,7 @@ mod tests {
                     capabilities: Some(v1::InitializeCapabilities {
                         experimental_api: true,
                         opt_out_notification_methods: Some(vec![
-                            "codex/event/session_configured".to_string(),
+                            "thread/started".to_string(),
                             "item/agentMessage/delta".to_string(),
                         ]),
                     }),
@@ -1368,6 +1429,75 @@ mod tests {
     }
 
     #[test]
+    fn serialize_pilot_read() -> Result<()> {
+        let request = ClientRequest::PilotRead {
+            request_id: RequestId::Integer(8),
+            params: v2::PilotReadParams {
+                thread_id: "thr_123".to_string(),
+            },
+        };
+        assert_eq!(
+            json!({
+                "method": "pilot/read",
+                "id": 8,
+                "params": {
+                    "threadId": "thr_123"
+                }
+            }),
+            serde_json::to_value(&request)?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_pilot_start() -> Result<()> {
+        let request = ClientRequest::PilotStart {
+            request_id: RequestId::Integer(9),
+            params: v2::PilotStartParams {
+                thread_id: "thr_123".to_string(),
+                goal: "Improve benchmark accuracy".to_string(),
+                deadline_at: Some(20),
+            },
+        };
+        assert_eq!(
+            json!({
+                "method": "pilot/start",
+                "id": 9,
+                "params": {
+                    "threadId": "thr_123",
+                    "goal": "Improve benchmark accuracy",
+                    "deadlineAt": 20
+                }
+            }),
+            serde_json::to_value(&request)?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_pilot_control() -> Result<()> {
+        let request = ClientRequest::PilotControl {
+            request_id: RequestId::Integer(10),
+            params: v2::PilotControlParams {
+                thread_id: "thr_123".to_string(),
+                action: v2::PilotControlAction::WrapUp,
+            },
+        };
+        assert_eq!(
+            json!({
+                "method": "pilot/control",
+                "id": 10,
+                "params": {
+                    "threadId": "thr_123",
+                    "action": "wrapUp"
+                }
+            }),
+            serde_json::to_value(&request)?,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn account_serializes_fields_in_camel_case() -> Result<()> {
         let api_key = v2::Account::ApiKey {};
         assert_eq!(
@@ -1445,6 +1575,27 @@ mod tests {
                     "cursor": null,
                     "limit": null,
                     "threadId": null
+                }
+            }),
+            serde_json::to_value(&request)?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_fs_get_metadata() -> Result<()> {
+        let request = ClientRequest::FsGetMetadata {
+            request_id: RequestId::Integer(9),
+            params: v2::FsGetMetadataParams {
+                path: absolute_path("tmp/example"),
+            },
+        };
+        assert_eq!(
+            json!({
+                "method": "fs/getMetadata",
+                "id": 9,
+                "params": {
+                    "path": absolute_path_string("tmp/example")
                 }
             }),
             serde_json::to_value(&request)?,
@@ -1572,6 +1723,71 @@ mod tests {
     }
 
     #[test]
+    fn serialize_pilot_updated_notification() -> Result<()> {
+        let notification = ServerNotification::PilotUpdated(v2::PilotUpdatedNotification {
+            thread_id: "thr_123".to_string(),
+            update_type: v2::PilotUpdateType::Queued,
+            run: Some(v2::PilotRun {
+                goal: "Improve benchmark accuracy".to_string(),
+                status: v2::PilotStatus::Running,
+                started_at: 10,
+                deadline_at: Some(20),
+                updated_at: 11,
+                iteration_count: 2,
+                pending_cycle_kind: Some(v2::PilotCycleKind::Continue),
+                active_cycle_kind: None,
+                active_turn_id: None,
+                last_submitted_turn_id: Some("turn_123".to_string()),
+                wrap_up_requested: false,
+                wrap_up_requested_at: None,
+                stop_requested_at: None,
+                last_error: None,
+                status_message: Some("Pilot queued the next autonomous cycle.".to_string()),
+                last_progress_at: Some(9),
+                last_cycle_completed_at: Some(8),
+                last_cycle_summary: Some("Improved prompt structure.".to_string()),
+                last_cycle_kind: Some(v2::PilotCycleKind::Continue),
+                last_agent_message: Some("Implemented the pilot scheduler.".to_string()),
+            }),
+            message: Some("Pilot queued the next autonomous cycle.".to_string()),
+        });
+        assert_eq!(
+            json!({
+                "method": "pilot/updated",
+                "params": {
+                    "threadId": "thr_123",
+                    "updateType": "queued",
+                    "run": {
+                        "goal": "Improve benchmark accuracy",
+                        "status": "running",
+                        "startedAt": 10,
+                        "deadlineAt": 20,
+                        "updatedAt": 11,
+                        "iterationCount": 2,
+                        "pendingCycleKind": "continue",
+                        "activeCycleKind": null,
+                        "activeTurnId": null,
+                        "lastSubmittedTurnId": "turn_123",
+                        "wrapUpRequested": false,
+                        "wrapUpRequestedAt": null,
+                        "stopRequestedAt": null,
+                        "lastError": null,
+                        "statusMessage": "Pilot queued the next autonomous cycle.",
+                        "lastProgressAt": 9,
+                        "lastCycleCompletedAt": 8,
+                        "lastCycleSummary": "Improved prompt structure.",
+                        "lastCycleKind": "continue",
+                        "lastAgentMessage": "Implemented the pilot scheduler."
+                    },
+                    "message": "Pilot queued the next autonomous cycle."
+                }
+            }),
+            serde_json::to_value(&notification)?,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn mock_experimental_method_is_marked_experimental() {
         let request = ClientRequest::MockExperimentalMethod {
             request_id: RequestId::Integer(1),
@@ -1592,6 +1808,57 @@ mod tests {
         };
         let reason = crate::experimental_api::ExperimentalApi::experimental_reason(&request);
         assert_eq!(reason, Some("thread/realtime/start"));
+    }
+
+    #[test]
+    fn pilot_start_is_marked_experimental() {
+        let request = ClientRequest::PilotStart {
+            request_id: RequestId::Integer(1),
+            params: v2::PilotStartParams {
+                thread_id: "thr_123".to_string(),
+                goal: "Improve benchmark accuracy".to_string(),
+                deadline_at: Some(20),
+            },
+        };
+        let reason = crate::experimental_api::ExperimentalApi::experimental_reason(&request);
+        assert_eq!(reason, Some("pilot/start"));
+    }
+
+    #[test]
+    fn pilot_read_is_marked_experimental() {
+        let request = ClientRequest::PilotRead {
+            request_id: RequestId::Integer(1),
+            params: v2::PilotReadParams {
+                thread_id: "thr_123".to_string(),
+            },
+        };
+        let reason = crate::experimental_api::ExperimentalApi::experimental_reason(&request);
+        assert_eq!(reason, Some("pilot/read"));
+    }
+
+    #[test]
+    fn pilot_control_is_marked_experimental() {
+        let request = ClientRequest::PilotControl {
+            request_id: RequestId::Integer(1),
+            params: v2::PilotControlParams {
+                thread_id: "thr_123".to_string(),
+                action: v2::PilotControlAction::Stop,
+            },
+        };
+        let reason = crate::experimental_api::ExperimentalApi::experimental_reason(&request);
+        assert_eq!(reason, Some("pilot/control"));
+    }
+
+    #[test]
+    fn pilot_updated_notification_is_marked_experimental() {
+        let notification = ServerNotification::PilotUpdated(v2::PilotUpdatedNotification {
+            thread_id: "thr_123".to_string(),
+            update_type: v2::PilotUpdateType::Updated,
+            run: None,
+            message: None,
+        });
+        let reason = crate::experimental_api::ExperimentalApi::experimental_reason(&notification);
+        assert_eq!(reason, Some("pilot/updated"));
     }
     #[test]
     fn thread_realtime_started_notification_is_marked_experimental() {
