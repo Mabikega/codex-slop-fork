@@ -101,6 +101,16 @@ bun install -g https://github.com/Mabikega/codex-slop-fork/releases/latest/downl
 
 `show_account_numbers_instead_of_emails` を有効にすると、フォークのアカウント一覧や切り替え通知では、保存済み ChatGPT アカウントのメールアドレスを表示せず `Account N` を表示します。番号は、保存済み ChatGPT アカウントを利用可能なら UID 順に並べて決まります。
 
+### テレメトリの既定値
+
+このフォークでは、analytics は既定で無効です。
+
+有効化したい場合は、次を設定してください。
+
+- `[analytics] enabled = true`
+
+これは analytics の既定値だけを変えるものです。feedback は別設定のままです。
+
 ### 保存済みアカウント制限の一覧
 
 `/accounts -> Saved account limits` では、保存済みアカウントの最新の使用量とリセット時刻を表示します。

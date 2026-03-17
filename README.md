@@ -106,6 +106,16 @@ When `show_account_numbers_instead_of_emails` is enabled, fork account menus and
 notifications replace saved ChatGPT account emails with `Account N`. The numbering is assigned by
 sorting the saved ChatGPT accounts by UID when available.
 
+### Telemetry defaults
+
+Analytics are disabled by default in this fork.
+
+If you want to opt in, set:
+
+- `[analytics] enabled = true`
+
+This only changes the analytics default. Feedback remains a separate setting.
+
 ### Saved account limits overview
 
 `/accounts -> Saved account limits` shows the latest known usage and reset times for saved accounts.
