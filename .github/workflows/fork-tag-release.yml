@@ -1,0 +1,423 @@
+name: fork-tag-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release tag to create from the latest commit on the selected ref.
+        required: true
+        type: string
+      release_title:
+        description: Optional GitHub release title. Defaults to the tag name.
+        required: false
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      release_tag: ${{ steps.plan.outputs.release_tag }}
+      release_title: ${{ steps.plan.outputs.release_title }}
+      source_sha: ${{ steps.plan.outputs.source_sha }}
+      source_ref: ${{ steps.plan.outputs.source_ref }}
+      release_exists: ${{ steps.plan.outputs.release_exists }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - name: Determine release metadata
+        id: plan
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          INPUT_RELEASE_TITLE: ${{ inputs.release_title }}
+        run: |
+          set -euo pipefail
+
+          release_tag="${INPUT_RELEASE_TAG}"
+          if [[ -z "${release_tag// }" ]]; then
+            echo "::error::release_tag must not be empty."
+            exit 1
+          fi
+          if ! git check-ref-format "refs/tags/${release_tag}" >/dev/null 2>&1; then
+            echo "::error::release_tag is not a valid git tag name."
+            exit 1
+          fi
+
+          version="$(python3 - <<'PY'
+          import pathlib
+          import tomllib
+
+          cargo_toml = pathlib.Path("codex-rs/Cargo.toml").read_text(encoding="utf-8")
+          data = tomllib.loads(cargo_toml)
+          print(data["workspace"]["package"]["version"])
+          PY
+          )"
+          source_sha="$(git rev-parse HEAD)"
+          source_ref="${GITHUB_REF_NAME}"
+          release_title="${INPUT_RELEASE_TITLE}"
+          if [[ -z "${release_title// }" ]]; then
+            release_title="${release_tag}"
+          fi
+          release_exists=false
+
+          if gh release view "${release_tag}" --json name >/dev/null 2>&1; then
+            release_exists=true
+          fi
+
+          {
+            echo "version=${version}"
+            echo "release_tag=${release_tag}"
+            echo "release_title=${release_title}"
+            echo "source_sha=${source_sha}"
+            echo "source_ref=${source_ref}"
+            echo "release_exists=${release_exists}"
+          } >> "$GITHUB_OUTPUT"
+
+  build-unix:
+    needs: prepare
+    name: Build - ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            asset_name: codex-slop-fork-npm-linux-x64.tgz
+            npm_os: linux
+            npm_cpu: x64
+            binary_name: codex-slop-fork
+            cargo_jobs: 4
+            use_musl: true
+          - label: linux-arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            asset_name: codex-slop-fork-npm-linux-arm64.tgz
+            npm_os: linux
+            npm_cpu: arm64
+            binary_name: codex-slop-fork
+            cargo_jobs: 1
+            use_musl: true
+          - label: macos-x64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            asset_name: codex-slop-fork-npm-darwin-x64.tgz
+            npm_os: darwin
+            npm_cpu: x64
+            binary_name: codex-slop-fork
+            cargo_jobs: 4
+            use_musl: false
+          - label: macos-arm64
+            runner: macos-15
+            target: aarch64-apple-darwin
+            asset_name: codex-slop-fork-npm-darwin-arm64.tgz
+            npm_os: darwin
+            npm_cpu: arm64
+            binary_name: codex-slop-fork
+            cargo_jobs: 4
+            use_musl: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+
+      - name: Install Linux build dependencies
+        if: ${{ runner.os == 'Linux' }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev libubsan1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('codex-rs/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Setup Zig
+        if: ${{ matrix.use_musl }}
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.0
+
+      - name: Install musl build tools
+        if: ${{ matrix.use_musl }}
+        env:
+          TARGET: ${{ matrix.target }}
+        run: bash .github/scripts/install-musl-build-tools.sh
+
+      - name: Configure rustc UBSan wrapper
+        if: ${{ matrix.use_musl }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ubsan=""
+          if command -v ldconfig >/dev/null 2>&1; then
+            ubsan="$(ldconfig -p | grep -m1 'libubsan\.so\.1' | sed -E 's/.*=> (.*)$/\1/')"
+          fi
+          wrapper_root="${RUNNER_TEMP:-/tmp}"
+          wrapper="${wrapper_root}/rustc-ubsan-wrapper"
+          cat > "${wrapper}" <<EOF
+          #!/usr/bin/env bash
+          set -euo pipefail
+          if [[ -n "${ubsan}" ]]; then
+            export LD_PRELOAD="${ubsan}\${LD_PRELOAD:+:\${LD_PRELOAD}}"
+          fi
+          exec "\$1" "\${@:2}"
+          EOF
+          chmod +x "${wrapper}"
+          echo "RUSTC_WRAPPER=${wrapper}" >> "$GITHUB_ENV"
+          echo "RUSTC_WORKSPACE_WRAPPER=" >> "$GITHUB_ENV"
+
+      - name: Clear sanitizer flags
+        if: ${{ matrix.use_musl }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "AWS_LC_SYS_NO_JITTER_ENTROPY=1" >> "$GITHUB_ENV"
+          target_no_jitter="AWS_LC_SYS_NO_JITTER_ENTROPY_${{ matrix.target }}"
+          target_no_jitter="${target_no_jitter//-/_}"
+          echo "${target_no_jitter}=1" >> "$GITHUB_ENV"
+
+          echo "RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_ENCODED_RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "RUSTDOCFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_BUILD_RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=" >> "$GITHUB_ENV"
+
+          sanitize_flags() {
+            local input="$1"
+            input="${input//-fsanitize=undefined/}"
+            input="${input//-fno-sanitize-recover=undefined/}"
+            input="${input//-fno-sanitize-trap=undefined/}"
+            echo "$input"
+          }
+
+          cflags="$(sanitize_flags "${CFLAGS-}")"
+          cxxflags="$(sanitize_flags "${CXXFLAGS-}")"
+          echo "CFLAGS=${cflags}" >> "$GITHUB_ENV"
+          echo "CXXFLAGS=${cxxflags}" >> "$GITHUB_ENV"
+
+      - name: Build executable
+        working-directory: codex-rs
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.use_musl }}" == "true" ]]; then
+            unset CC CXX CFLAGS CXXFLAGS CMAKE_C_COMPILER CMAKE_CXX_COMPILER CMAKE_ARGS
+          fi
+          if [[ "${{ matrix.label }}" == "linux-arm64" ]]; then
+            export CARGO_PROFILE_RELEASE_LTO=thin
+            export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=4
+            export CARGO_PROFILE_RELEASE_DEBUG=0
+          elif [[ "${{ matrix.label }}" == "macos-arm64" ]]; then
+            export CARGO_PROFILE_RELEASE_LTO=thin
+            export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=4
+            export CARGO_PROFILE_RELEASE_DEBUG=0
+          fi
+          cargo build --release --target ${{ matrix.target }} --bin codex -j ${{ matrix.cargo_jobs }}
+
+      - name: Stage npm package
+        run: |
+          set -euo pipefail
+          python3 scripts/fork_release.py package-npm \
+            --version "${{ needs.prepare.outputs.version }}" \
+            --os "${{ matrix.npm_os }}" \
+            --cpu "${{ matrix.npm_cpu }}" \
+            --binary-path "codex-rs/target/${{ matrix.target }}/release/codex" \
+            --binary-name "${{ matrix.binary_name }}" \
+            --output-path "${RUNNER_TEMP}/${{ matrix.asset_name }}"
+
+      - name: Upload npm package
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ runner.temp }}/${{ matrix.asset_name }}
+
+  build-windows:
+    needs: prepare
+    name: Build - ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: windows-x64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            asset_name: codex-slop-fork-npm-win32-x64.tgz
+            npm_os: win32
+            npm_cpu: x64
+            binary_name: codex-slop-fork.exe
+          - label: windows-arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            asset_name: codex-slop-fork-npm-win32-arm64.tgz
+            npm_os: win32
+            npm_cpu: arm64
+            binary_name: codex-slop-fork.exe
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('codex-rs/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Build executable
+        working-directory: codex-rs
+        shell: bash
+        run: cargo build --release --target ${{ matrix.target }} --bin codex
+
+      - name: Stage npm package
+        shell: bash
+        run: |
+          python3 scripts/fork_release.py package-npm \
+            --version "${{ needs.prepare.outputs.version }}" \
+            --os "${{ matrix.npm_os }}" \
+            --cpu "${{ matrix.npm_cpu }}" \
+            --binary-path "codex-rs/target/${{ matrix.target }}/release/codex.exe" \
+            --binary-name "${{ matrix.binary_name }}" \
+            --output-path "${RUNNER_TEMP}/${{ matrix.asset_name }}"
+
+      - name: Upload npm package
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ runner.temp }}/${{ matrix.asset_name }}
+
+  release:
+    needs:
+      - prepare
+      - build-unix
+      - build-windows
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "codex-slop-fork-bot"
+          git config user.email "codex-slop-fork-bot@users.noreply.github.com"
+
+      - name: Create release notes
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          SOURCE_REF: ${{ needs.prepare.outputs.source_ref }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          notes_path="${RUNNER_TEMP}/release-notes.md"
+          {
+            echo "codex-slop-fork ${VERSION}"
+            echo
+            echo "Release tag: ${RELEASE_TAG}"
+            echo "Source ref: ${SOURCE_REF}"
+            echo "Source commit: ${SOURCE_SHA}"
+            echo
+            echo "This release was created manually from the latest code on the selected ref without merging upstream."
+          } > "${notes_path}"
+          echo "NOTES_PATH=${notes_path}" >> "$GITHUB_ENV"
+
+      - name: Update release tag
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          git tag -f "${RELEASE_TAG}" "${SOURCE_SHA}"
+          git push --force origin "refs/tags/${RELEASE_TAG}"
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          RELEASE_TITLE: ${{ needs.prepare.outputs.release_title }}
+          RELEASE_EXISTS: ${{ needs.prepare.outputs.release_exists }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          mapfile -t release_files < <(find dist -type f | sort)
+          if [[ ${#release_files[@]} -eq 0 ]]; then
+            echo "::error::No release artifacts were downloaded."
+            exit 1
+          fi
+          if [[ "${RELEASE_EXISTS}" == "true" ]]; then
+            gh release upload "${RELEASE_TAG}" "${release_files[@]}" --clobber --repo "${GH_REPO}"
+            gh release edit "${RELEASE_TAG}" \
+              --repo "${GH_REPO}" \
+              --title "${RELEASE_TITLE}" \
+              --notes-file "${NOTES_PATH}"
+          else
+            gh release create "${RELEASE_TAG}" "${release_files[@]}" \
+              --repo "${GH_REPO}" \
+              --title "${RELEASE_TITLE}" \
+              --notes-file "${NOTES_PATH}" \
+              --target "${SOURCE_SHA}"
+          fi
