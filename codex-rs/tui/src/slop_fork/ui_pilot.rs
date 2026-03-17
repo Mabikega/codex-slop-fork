@@ -174,19 +174,35 @@ impl SlopForkUi {
         goal: String,
         deadline_at: Option<i64>,
     ) -> Vec<SlopForkUiEffect> {
-        let runtime = match self.ensure_pilot_runtime(ctx) {
-            Ok(runtime) => runtime,
-            Err(err) => return vec![SlopForkUiEffect::AddErrorMessage(err)],
+        let (recovered, has_queued_or_running_cycle) = {
+            let runtime = match self.ensure_pilot_runtime(ctx) {
+                Ok(runtime) => runtime,
+                Err(err) => return vec![SlopForkUiEffect::AddErrorMessage(err)],
+            };
+            let recovered = match recover_idle_stale_pilot_state(ctx, runtime) {
+                Ok(recovered) => recovered,
+                Err(err) => return vec![SlopForkUiEffect::AddErrorMessage(err)],
+            };
+            let has_queued_or_running_cycle = runtime.state().is_some_and(|state| {
+                state.active_turn_id.is_some() || state.pending_cycle_kind.is_some()
+            });
+            (recovered, has_queued_or_running_cycle)
         };
-        if runtime.state().is_some_and(|state| {
-            state.active_turn_id.is_some() || state.pending_cycle_kind.is_some()
-        }) {
+        if recovered {
+            self.awaiting_pilot_turn_start = false;
+        }
+        if has_queued_or_running_cycle {
             return vec![SlopForkUiEffect::AddErrorMessage(
                 "Pilot already has a queued or running cycle. Stop it first if you want to replace the goal."
                     .to_string(),
             )];
         }
-        match runtime.start(goal, deadline_at, Local::now()) {
+        match self
+            .pilot_runtime
+            .as_mut()
+            .expect("pilot runtime should be loaded")
+            .start(goal, deadline_at, Local::now())
+        {
             Ok(false) => {
                 return vec![SlopForkUiEffect::AddErrorMessage(
                     "Pilot already has a queued or running cycle. Stop it first if you want to replace the goal."
@@ -290,15 +306,51 @@ impl SlopForkUi {
     }
 
     fn pilot_stop(&mut self, ctx: &SlopForkUiContext) -> Vec<SlopForkUiEffect> {
-        let runtime = match self.ensure_pilot_runtime(ctx) {
-            Ok(runtime) => runtime,
-            Err(err) => return vec![SlopForkUiEffect::AddErrorMessage(err)],
+        let recovered = {
+            let runtime = match self.ensure_pilot_runtime(ctx) {
+                Ok(runtime) => runtime,
+                Err(err) => return vec![SlopForkUiEffect::AddErrorMessage(err)],
+            };
+            match recover_idle_stale_pilot_state(ctx, runtime) {
+                Ok(recovered) => recovered,
+                Err(err) => return vec![SlopForkUiEffect::AddErrorMessage(err)],
+            }
         };
-        match runtime.stop() {
+        if recovered {
+            self.awaiting_pilot_turn_start = false;
+            return vec![SlopForkUiEffect::AddInfoMessage {
+                message: "Pilot cleared stale cycle state.".to_string(),
+                hint: Some("You can start a new Pilot goal now.".to_string()),
+            }];
+        }
+        match self
+            .pilot_runtime
+            .as_mut()
+            .expect("pilot runtime should be loaded")
+            .stop()
+        {
             Ok(true) => {
                 self.awaiting_pilot_turn_start = false;
+                let message = if !ctx.task_running {
+                    match self
+                        .pilot_runtime
+                        .as_mut()
+                        .expect("pilot runtime should be loaded")
+                        .clear_orphaned_cycle_if_idle(Local::now())
+                    {
+                        Ok(true) => "Pilot stopped and cleared stale cycle state.".to_string(),
+                        Ok(false) => "Pilot stopped.".to_string(),
+                        Err(err) => {
+                            return vec![SlopForkUiEffect::AddErrorMessage(format!(
+                                "Failed to recover stale Pilot state: {err}"
+                            ))];
+                        }
+                    }
+                } else {
+                    "Pilot stopped.".to_string()
+                };
                 vec![SlopForkUiEffect::AddInfoMessage {
-                    message: "Pilot stopped.".to_string(),
+                    message,
                     hint: Some(
                         "If a Pilot-controlled turn is already running, it may finish, but no further Pilot cycles will be scheduled."
                             .to_string(),
@@ -341,11 +393,21 @@ impl SlopForkUi {
     }
 
     fn pilot_status_output(&mut self, ctx: &SlopForkUiContext) -> Vec<SlopForkUiEffect> {
-        let runtime = match self.ensure_pilot_runtime(ctx) {
-            Ok(runtime) => runtime,
-            Err(err) => return vec![SlopForkUiEffect::AddErrorMessage(err)],
+        let (recovered, state) = {
+            let runtime = match self.ensure_pilot_runtime(ctx) {
+                Ok(runtime) => runtime,
+                Err(err) => return vec![SlopForkUiEffect::AddErrorMessage(err)],
+            };
+            let recovered = match recover_idle_stale_pilot_state(ctx, runtime) {
+                Ok(recovered) => recovered,
+                Err(err) => return vec![SlopForkUiEffect::AddErrorMessage(err)],
+            };
+            (recovered, runtime.state().cloned())
         };
-        let Some(state) = runtime.state() else {
+        if recovered {
+            self.awaiting_pilot_turn_start = false;
+        }
+        let Some(state) = state else {
             return vec![SlopForkUiEffect::AddInfoMessage {
                 message: "Pilot is idle.".to_string(),
                 hint: Some(
@@ -356,7 +418,7 @@ impl SlopForkUi {
 
         let mut lines = vec![
             "Pilot".bold().into(),
-            format!("Status: {}", pilot_status_label(state)).into(),
+            format!("Status: {}", pilot_status_label(&state)).into(),
             format!("Goal: {}", state.goal).into(),
             format!("Iterations: {}", state.iteration_count).into(),
             format!("Started: {}", timestamp_label(state.started_at)).into(),
@@ -450,4 +512,16 @@ fn timestamp_label(timestamp: i64) -> String {
         .single()
         .map(|ts| ts.to_rfc3339())
         .unwrap_or_else(|| timestamp.to_string())
+}
+
+fn recover_idle_stale_pilot_state(
+    ctx: &SlopForkUiContext,
+    runtime: &mut PilotRuntime,
+) -> Result<bool, String> {
+    if ctx.task_running {
+        return Ok(false);
+    }
+    runtime
+        .clear_orphaned_cycle_if_idle(Local::now())
+        .map_err(|err| format!("Failed to recover stale Pilot state: {err}"))
 }

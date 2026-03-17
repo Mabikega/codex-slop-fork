@@ -9816,6 +9816,46 @@ async fn pilot_wrap_up_before_turn_start_does_not_queue_duplicate_cycle() {
 }
 
 #[tokio::test]
+async fn pilot_start_recovers_from_stopped_stale_active_turn_state() {
+    let dir = tempdir().unwrap();
+    let thread_id = ThreadId::new();
+    let mut runtime =
+        codex_core::slop_fork::pilot::PilotRuntime::load(dir.path(), thread_id.to_string())
+            .unwrap();
+
+    assert!(
+        runtime
+            .start("old goal".to_string(), None, Local::now())
+            .unwrap()
+    );
+    let _ = runtime
+        .prepare_cycle_submission(Local::now())
+        .unwrap()
+        .expect("pilot cycle should be prepared");
+    assert!(runtime.note_turn_submitted("turn-pilot-1").unwrap());
+    assert!(
+        runtime
+            .activate_pending_cycle("turn-pilot-1".to_string())
+            .unwrap()
+    );
+    assert!(runtime.stop().unwrap());
+
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.thread_id = Some(thread_id);
+
+    chat.dispatch_command_with_args(
+        SlashCommand::Pilot,
+        "start new goal".to_string(),
+        Vec::new(),
+    );
+
+    drain_insert_history(&mut rx);
+    let prompt = next_pilot_op(&mut op_rx);
+    assert!(prompt.contains("new goal"));
+}
+
+#[tokio::test]
 async fn auto_now_respects_disabled_automation_execution() {
     let dir = tempdir().unwrap();
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
