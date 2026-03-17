@@ -60,6 +60,7 @@ pub struct PilotRunState {
     pub updated_at: i64,
     pub iteration_count: u32,
     pub pending_cycle_kind: Option<PilotCycleKind>,
+    pub submission_dispatched_at: Option<i64>,
     pub active_cycle_kind: Option<PilotCycleKind>,
     pub active_turn_id: Option<String>,
     pub last_submitted_turn_id: Option<String>,
@@ -85,6 +86,7 @@ impl Default for PilotRunState {
             updated_at: 0,
             iteration_count: 0,
             pending_cycle_kind: None,
+            submission_dispatched_at: None,
             active_cycle_kind: None,
             active_turn_id: None,
             last_submitted_turn_id: None,
@@ -152,6 +154,7 @@ impl PilotRuntime {
                 updated_at: now.timestamp(),
                 iteration_count: 0,
                 pending_cycle_kind: None,
+                submission_dispatched_at: None,
                 active_cycle_kind: None,
                 active_turn_id: None,
                 last_submitted_turn_id: None,
@@ -178,11 +181,13 @@ impl PilotRuntime {
             if matches!(state.status, PilotStatus::Stopped | PilotStatus::Completed) {
                 return Ok(false);
             }
-            let submitted_turn_awaiting_start =
-                state.pending_cycle_kind.is_some() && state.active_turn_id.is_none();
+            let submitted_turn_awaiting_start = state.pending_cycle_kind.is_some()
+                && state.active_turn_id.is_none()
+                && state.submission_dispatched_at.is_some();
             state.status = PilotStatus::Paused;
             if !submitted_turn_awaiting_start {
                 state.pending_cycle_kind = None;
+                state.submission_dispatched_at = None;
                 state.last_submitted_turn_id = None;
             }
             state.updated_at = Local::now().timestamp();
@@ -237,12 +242,14 @@ impl PilotRuntime {
             if matches!(state.status, PilotStatus::Stopped | PilotStatus::Completed) {
                 return Ok(false);
             }
-            let submitted_turn_awaiting_start =
-                state.pending_cycle_kind.is_some() && state.active_turn_id.is_none();
+            let submitted_turn_awaiting_start = state.pending_cycle_kind.is_some()
+                && state.active_turn_id.is_none()
+                && state.submission_dispatched_at.is_some();
             state.status = PilotStatus::Stopped;
             state.wrap_up_requested = false;
             if !submitted_turn_awaiting_start {
                 state.pending_cycle_kind = None;
+                state.submission_dispatched_at = None;
                 state.last_submitted_turn_id = None;
             }
             state.stop_requested_at = Some(Local::now().timestamp());
@@ -282,6 +289,7 @@ impl PilotRuntime {
             };
             let prompt = build_cycle_prompt(state, kind, now);
             state.pending_cycle_kind = Some(kind);
+            state.submission_dispatched_at = None;
             state.last_submitted_turn_id = None;
             state.last_cycle_kind = Some(kind);
             state.last_error = None;
@@ -298,6 +306,20 @@ impl PilotRuntime {
         })
     }
 
+    pub fn note_submission_dispatched(&mut self) -> std::io::Result<bool> {
+        self.update_state(|state| {
+            let Some(state) = state.as_mut() else {
+                return Ok(false);
+            };
+            if state.pending_cycle_kind.is_none() || state.active_turn_id.is_some() {
+                return Ok(false);
+            }
+            state.submission_dispatched_at = Some(Local::now().timestamp());
+            state.updated_at = Local::now().timestamp();
+            Ok(true)
+        })
+    }
+
     pub fn note_submission_failure(&mut self, message: &str) -> std::io::Result<bool> {
         self.update_state(|state| {
             let Some(state) = state.as_mut() else {
@@ -308,6 +330,7 @@ impl PilotRuntime {
             }
             state.last_submitted_turn_id = None;
             state.pending_cycle_kind = None;
+            state.submission_dispatched_at = None;
             if state.status == PilotStatus::Running {
                 state.status = PilotStatus::Paused;
             }
@@ -326,6 +349,7 @@ impl PilotRuntime {
             if state.pending_cycle_kind.is_none() {
                 return Ok(false);
             }
+            state.submission_dispatched_at = Some(Local::now().timestamp());
             state.last_submitted_turn_id = Some(turn_id.to_string());
             state.updated_at = Local::now().timestamp();
             state.status_message =
@@ -351,9 +375,11 @@ impl PilotRuntime {
             };
             if state.status == PilotStatus::Completed {
                 state.pending_cycle_kind = None;
+                state.submission_dispatched_at = None;
                 state.last_submitted_turn_id = None;
                 return Ok(false);
             }
+            state.submission_dispatched_at = None;
             state.active_cycle_kind = Some(kind);
             state.active_turn_id = Some(turn_id);
             state.last_submitted_turn_id = state.active_turn_id.clone();
@@ -402,6 +428,7 @@ impl PilotRuntime {
             }
             state.active_turn_id = None;
             state.active_cycle_kind = None;
+            state.submission_dispatched_at = None;
             state.last_submitted_turn_id = None;
             if state.status == PilotStatus::Running {
                 state.status = PilotStatus::Paused;
@@ -430,6 +457,7 @@ impl PilotRuntime {
             let completed_cycle = state.active_cycle_kind;
             state.active_turn_id = None;
             state.active_cycle_kind = None;
+            state.submission_dispatched_at = None;
             state.last_submitted_turn_id = None;
             state.iteration_count = state.iteration_count.saturating_add(1);
             state.updated_at = now.timestamp();
@@ -772,6 +800,7 @@ mod tests {
             started_at: 1,
             iteration_count: 1,
             pending_cycle_kind: Some(PilotCycleKind::Continue),
+            submission_dispatched_at: Some(1),
             active_cycle_kind: Some(PilotCycleKind::Continue),
             active_turn_id: Some("turn-1".to_string()),
             ..PilotRunState::default()
@@ -792,6 +821,7 @@ mod tests {
             started_at: 1,
             updated_at: 1,
             pending_cycle_kind: Some(PilotCycleKind::Continue),
+            submission_dispatched_at: Some(1),
             ..PilotRunState::default()
         };
         save_thread_state(dir.path(), thread_id, Some(&persisted)).unwrap();
@@ -881,13 +911,14 @@ mod tests {
         let state = PilotRunState {
             status: PilotStatus::Running,
             pending_cycle_kind: Some(PilotCycleKind::Continue),
+            submission_dispatched_at: Some(1),
+            last_submitted_turn_id: Some("turn-pilot".to_string()),
             ..PilotRunState::default()
         };
         save_thread_state(dir.path(), thread_id, Some(&state)).unwrap();
         let mut runtime = PilotRuntime::load(dir.path(), thread_id).unwrap();
 
         assert!(runtime.pause().unwrap());
-        assert!(runtime.note_turn_submitted("turn-pilot").unwrap());
         assert!(
             runtime
                 .activate_pending_cycle("turn-pilot".to_string())
@@ -917,13 +948,14 @@ mod tests {
         let state = PilotRunState {
             status: PilotStatus::Running,
             pending_cycle_kind: Some(PilotCycleKind::Continue),
+            submission_dispatched_at: Some(1),
+            last_submitted_turn_id: Some("turn-pilot".to_string()),
             ..PilotRunState::default()
         };
         save_thread_state(dir.path(), thread_id, Some(&state)).unwrap();
         let mut runtime = PilotRuntime::load(dir.path(), thread_id).unwrap();
 
         assert!(runtime.stop().unwrap());
-        assert!(runtime.note_turn_submitted("turn-pilot").unwrap());
         assert!(
             runtime
                 .activate_pending_cycle("turn-pilot".to_string())
@@ -943,6 +975,30 @@ mod tests {
                 .state()
                 .and_then(|state| state.active_turn_id.clone()),
             None
+        );
+    }
+
+    #[test]
+    fn pause_clears_pre_start_pending_cycle_without_submitted_turn_id() {
+        let dir = tempdir().unwrap();
+        let thread_id = "thread-1";
+        let state = PilotRunState {
+            status: PilotStatus::Running,
+            pending_cycle_kind: Some(PilotCycleKind::Continue),
+            ..PilotRunState::default()
+        };
+        save_thread_state(dir.path(), thread_id, Some(&state)).unwrap();
+        let mut runtime = PilotRuntime::load(dir.path(), thread_id).unwrap();
+
+        assert!(runtime.pause().unwrap());
+        let paused_state = runtime.state().expect("pilot state");
+        assert_eq!(paused_state.status, PilotStatus::Paused);
+        assert_eq!(paused_state.pending_cycle_kind, None);
+        assert_eq!(paused_state.submission_dispatched_at, None);
+        assert_eq!(paused_state.last_submitted_turn_id, None);
+        assert_eq!(
+            paused_state.status_message.as_deref(),
+            Some("Pilot paused.")
         );
     }
 
@@ -976,6 +1032,7 @@ mod tests {
         let state = PilotRunState {
             status: PilotStatus::Running,
             pending_cycle_kind: Some(PilotCycleKind::Continue),
+            submission_dispatched_at: Some(1),
             last_submitted_turn_id: Some("turn-pilot".to_string()),
             ..PilotRunState::default()
         };
@@ -987,5 +1044,26 @@ mod tests {
             .unwrap();
         assert!(!activated);
         assert_eq!(runtime.state(), Some(&state));
+    }
+
+    #[test]
+    fn note_submission_dispatched_marks_pending_cycle_in_flight() {
+        let dir = tempdir().unwrap();
+        let thread_id = "thread-1";
+        let state = PilotRunState {
+            status: PilotStatus::Running,
+            pending_cycle_kind: Some(PilotCycleKind::Continue),
+            ..PilotRunState::default()
+        };
+        save_thread_state(dir.path(), thread_id, Some(&state)).unwrap();
+        let mut runtime = PilotRuntime::load(dir.path(), thread_id).unwrap();
+
+        assert!(runtime.note_submission_dispatched().unwrap());
+        assert!(
+            runtime
+                .state()
+                .and_then(|state| state.submission_dispatched_at)
+                .is_some()
+        );
     }
 }

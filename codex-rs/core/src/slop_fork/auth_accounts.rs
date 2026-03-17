@@ -4,6 +4,7 @@ use codex_app_server_protocol::AuthMode;
 use sha2::Digest;
 use sha2::Sha256;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -123,8 +124,15 @@ impl AccountDisplayLabels {
         ordered_accounts.sort_by(|lhs, rhs| lhs.sort_key.cmp(&rhs.sort_key));
 
         let mut chatgpt_labels_by_lookup_key = HashMap::new();
-        for (index, keys) in ordered_accounts.into_iter().enumerate() {
-            chatgpt_labels_by_lookup_key.insert(keys.lookup_key, format!("Account {}", index + 1));
+        let mut seen_lookup_keys = HashSet::new();
+        let mut next_account_number = 1;
+        for keys in ordered_accounts {
+            if !seen_lookup_keys.insert(keys.lookup_key.clone()) {
+                continue;
+            }
+            chatgpt_labels_by_lookup_key
+                .insert(keys.lookup_key, format!("Account {next_account_number}"));
+            next_account_number += 1;
         }
 
         Self {
@@ -196,10 +204,11 @@ fn chatgpt_account_label_keys(account: &StoredAccount) -> ChatgptAccountLabelKey
 fn chatgpt_account_lookup_key(auth: &AuthDotJson) -> Option<String> {
     let tokens = auth.tokens.as_ref()?;
     tokens
-        .account_id
+        .id_token
+        .chatgpt_user_id
         .clone()
+        .or_else(|| tokens.account_id.clone())
         .or_else(|| tokens.id_token.chatgpt_account_id.clone())
-        .or_else(|| tokens.id_token.chatgpt_user_id.clone())
 }
 
 pub fn list_accounts(codex_home: &Path) -> std::io::Result<Vec<StoredAccount>> {
@@ -273,6 +282,11 @@ pub fn rate_limit_snapshot_lookup_ids(account: &StoredAccount) -> Vec<String> {
     }) && legacy_id != account.id
     {
         ids.push(legacy_id);
+    }
+    if let Some(legacy_saved_id) = legacy_chatgpt_saved_account_id(&account.auth)
+        && !ids.contains(&legacy_saved_id)
+    {
+        ids.push(legacy_saved_id);
     }
     ids
 }
@@ -525,23 +539,39 @@ fn account_identity(auth: &AuthDotJson) -> Option<String> {
             .openai_api_key
             .as_ref()
             .map(|api_key| format!("api-key:{api_key}")),
-        AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => {
-            let tokens = auth.tokens.as_ref()?;
-            let account_id = tokens
-                .account_id
-                .as_deref()
-                .or(tokens.id_token.chatgpt_account_id.as_deref())
-                .unwrap_or("");
-            let email = tokens
-                .id_token
-                .email
-                .as_deref()
-                .unwrap_or("")
-                .trim()
-                .to_ascii_lowercase();
-            Some(format!("chatgpt:{account_id}:{email}"))
-        }
+        AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => chatgpt_account_lookup_key(auth)
+            .or_else(|| {
+                auth.tokens
+                    .as_ref()
+                    .and_then(|tokens| tokens.id_token.email.as_deref())
+                    .map(str::trim)
+                    .filter(|email| !email.is_empty())
+                    .map(str::to_ascii_lowercase)
+            })
+            .map(|identity| format!("chatgpt:{identity}")),
     }
+}
+
+fn legacy_chatgpt_saved_account_id(auth: &AuthDotJson) -> Option<String> {
+    if !auth.is_chatgpt_mode() {
+        return None;
+    }
+    let tokens = auth.tokens.as_ref()?;
+    let account_id = tokens
+        .account_id
+        .as_deref()
+        .or(tokens.id_token.chatgpt_account_id.as_deref())
+        .unwrap_or("");
+    let email = tokens
+        .id_token
+        .email
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let digest = Sha256::digest(format!("chatgpt:{account_id}:{email}").as_bytes());
+    let hex = format!("{digest:x}");
+    Some(format!("chatgpt-{}", &hex[..16]))
 }
 
 fn merge_existing_auth(existing: AuthDotJson, incoming: AuthDotJson) -> AuthDotJson {
@@ -781,6 +811,102 @@ mod tests {
         assert_eq!(
             labels.label_for_auth(&current_auth),
             "Account 1 (Pro)".to_string()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn numbered_display_labels_use_contiguous_numbers_for_duplicate_lookup_keys()
+    -> anyhow::Result<()> {
+        let config = SlopForkConfig {
+            show_account_numbers_instead_of_emails: true,
+            ..SlopForkConfig::default()
+        };
+        let auth_duplicate_a = chatgpt_auth("acct-a", "alpha@example.com");
+        let auth_duplicate_b = chatgpt_auth("acct-a", "renamed@example.com");
+        let auth_unique = chatgpt_auth("acct-b", "beta@example.com");
+        let duplicate_account_a = StoredAccount {
+            id: "legacy-alpha".to_string(),
+            path: PathBuf::from("legacy-alpha.json"),
+            auth: auth_duplicate_a.clone(),
+            modified_at: None,
+        };
+        let duplicate_account_b = StoredAccount {
+            id: "legacy-renamed".to_string(),
+            path: PathBuf::from("legacy-renamed.json"),
+            auth: auth_duplicate_b.clone(),
+            modified_at: None,
+        };
+        let unique_account = StoredAccount {
+            id: "acct-b".to_string(),
+            path: PathBuf::from("acct-b.json"),
+            auth: auth_unique.clone(),
+            modified_at: None,
+        };
+
+        let labels = AccountDisplayLabels::from_config(
+            &config,
+            &[duplicate_account_a, duplicate_account_b, unique_account],
+        );
+
+        assert_eq!(
+            labels.label_for_auth(&auth_duplicate_a),
+            "Account 1 (Pro)".to_string()
+        );
+        assert_eq!(
+            labels.label_for_auth(&auth_duplicate_b),
+            "Account 1 (Pro)".to_string()
+        );
+        assert_eq!(
+            labels.label_for_auth(&auth_unique),
+            "Account 2 (Pro)".to_string()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn upsert_account_keeps_same_saved_id_when_chatgpt_email_changes() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let original = chatgpt_auth("acct-1", "person@example.com");
+        let renamed = chatgpt_auth("acct-1", "renamed@example.com");
+
+        let first_id = upsert_account(dir.path(), &original)?.expect("saved account id");
+        let second_id = upsert_account(dir.path(), &renamed)?.expect("saved account id");
+        let accounts = list_accounts(dir.path())?;
+
+        assert_eq!(second_id, first_id);
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].id, first_id);
+        assert_eq!(
+            accounts[0]
+                .auth
+                .tokens
+                .as_ref()
+                .and_then(|tokens| tokens.id_token.email.as_deref()),
+            Some("renamed@example.com")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rate_limit_snapshot_lookup_ids_include_legacy_email_derived_saved_id() -> anyhow::Result<()>
+    {
+        let auth = chatgpt_auth("acct-1", "person@example.com");
+        let account = StoredAccount {
+            id: stored_account_id(&auth).expect("saved account id"),
+            path: PathBuf::from("acct-1.json"),
+            auth: auth.clone(),
+            modified_at: None,
+        };
+
+        let lookup_ids = rate_limit_snapshot_lookup_ids(&account);
+
+        assert!(lookup_ids.contains(&account.id));
+        assert!(lookup_ids.contains(&"acct-1".to_string()));
+        assert!(
+            lookup_ids.contains(
+                &legacy_chatgpt_saved_account_id(&auth).expect("legacy saved account id")
+            )
         );
         Ok(())
     }

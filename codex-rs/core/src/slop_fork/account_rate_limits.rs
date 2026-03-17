@@ -679,6 +679,7 @@ fn legacy_rate_limits_dir(codex_home: &Path) -> PathBuf {
 mod tests {
     use chrono::TimeZone;
     use pretty_assertions::assert_eq;
+    use sha2::Digest;
     use tempfile::tempdir;
 
     use super::*;
@@ -931,6 +932,39 @@ mod tests {
         let snapshot = snapshots
             .get(&saved_account_id)
             .expect("legacy snapshot should resolve to saved account id");
+
+        assert_eq!(snapshot.account_id, saved_account_id);
+        assert_eq!(snapshot.plan.as_deref(), Some("pro"));
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_map_for_accounts_uses_legacy_email_derived_saved_ids() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let now = fixed_now();
+        let auth = chatgpt_auth("acct-legacy", "legacy@example.com");
+        let saved_account_id = upsert_account(dir.path(), &auth)?.expect("saved account id");
+        let account = auth_accounts::StoredAccount {
+            id: saved_account_id.clone(),
+            path: auth_accounts::accounts_dir(dir.path()).join(format!("{saved_account_id}.json")),
+            auth,
+            modified_at: None,
+        };
+        let legacy_digest = sha2::Sha256::digest(b"chatgpt:acct-legacy:legacy@example.com");
+        let legacy_saved_id = format!("chatgpt-{}", &format!("{legacy_digest:x}")[..16]);
+
+        record_rate_limit_snapshot(
+            dir.path(),
+            &legacy_saved_id,
+            Some("pro"),
+            &sample_snapshot(now, 25.0),
+            now,
+        )?;
+
+        let snapshots = snapshot_map_for_accounts(dir.path(), &[account])?;
+        let snapshot = snapshots
+            .get(&saved_account_id)
+            .expect("legacy saved-account snapshot should resolve to current saved account id");
 
         assert_eq!(snapshot.account_id, saved_account_id);
         assert_eq!(snapshot.plan.as_deref(), Some("pro"));

@@ -5087,8 +5087,11 @@ impl ChatWidget {
                         self.bottom_pane.set_task_running(true);
                     }
                     if self.submit_op(Op::SlopForkPilotTurn { prompt }) {
-                        self.slop_fork_ui
-                            .on_pilot_turn_submission_started(cycle_kind);
+                        let effects = self.slop_fork_ui.on_pilot_turn_submission_started(
+                            &self.slop_fork_context(),
+                            cycle_kind,
+                        );
+                        self.apply_slop_fork_effects(effects);
                     } else {
                         if !was_task_running {
                             self.bottom_pane.set_task_running(false);

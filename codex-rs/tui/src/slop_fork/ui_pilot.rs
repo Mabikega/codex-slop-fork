@@ -33,9 +33,21 @@ impl SlopForkUi {
         }
     }
 
-    pub(crate) fn on_pilot_turn_submission_started(&mut self, cycle_kind: PilotCycleKind) {
+    pub(crate) fn on_pilot_turn_submission_started(
+        &mut self,
+        ctx: &SlopForkUiContext,
+        cycle_kind: PilotCycleKind,
+    ) -> Vec<SlopForkUiEffect> {
         let _ = cycle_kind;
         self.awaiting_pilot_turn_start = true;
+        match self.ensure_pilot_runtime(ctx).and_then(|runtime| {
+            runtime
+                .note_submission_dispatched()
+                .map_err(|err| format!("Failed to record pilot submission dispatch: {err}"))
+        }) {
+            Ok(_) => Vec::new(),
+            Err(err) => vec![SlopForkUiEffect::AddErrorMessage(err)],
+        }
     }
 
     pub(crate) fn on_pilot_turn_submission_failed(

@@ -8721,6 +8721,50 @@ async fn login_account_limits_popup_refreshing_account_row_shows_busy_feedback()
 }
 
 #[tokio::test]
+async fn login_account_limits_popup_deduplicates_same_logical_account() {
+    let dir = tempdir().unwrap();
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.config.cli_auth_credentials_store_mode = codex_core::auth::AuthCredentialsStoreMode::File;
+
+    let accounts_dir = chat.config.codex_home.join(".accounts");
+    std::fs::create_dir_all(&accounts_dir).unwrap();
+    let auth_duplicate_a = chatgpt_auth_dot_json("acct-duplicate", "alpha@example.com");
+    let auth_duplicate_b = chatgpt_auth_dot_json("acct-duplicate", "renamed@example.com");
+    let auth_unique = chatgpt_auth_dot_json("acct-unique", "beta@example.com");
+    std::fs::write(
+        accounts_dir.join("legacy-alpha.json"),
+        serde_json::to_string_pretty(&auth_duplicate_a).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        accounts_dir.join("legacy-renamed.json"),
+        serde_json::to_string_pretty(&auth_duplicate_b).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        accounts_dir.join("legacy-beta.json"),
+        serde_json::to_string_pretty(&auth_unique).unwrap(),
+    )
+    .unwrap();
+    codex_core::slop_fork::update_slop_fork_config(&chat.config.codex_home, |config| {
+        config.show_account_numbers_instead_of_emails = true;
+    })
+    .unwrap();
+
+    chat.open_login_popup(LoginPopupKind::AccountLimits);
+
+    let popup = render_bottom_popup(&chat, 120);
+    assert_eq!(popup.matches("Account 1 (Pro)").count(), 1);
+    assert_eq!(popup.matches("Account 2 (Pro)").count(), 1);
+    assert!(!popup.contains("Account 3 (Pro)"));
+    assert_snapshot!(
+        "login_account_limits_popup_deduplicates_same_logical_account",
+        popup
+    );
+}
+
+#[tokio::test]
 async fn login_account_limits_popup_highlights_limit_window_labels() {
     let dir = tempdir().unwrap();
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
@@ -9701,18 +9745,18 @@ async fn pilot_resume_waits_for_unrelated_turn_to_finish() {
     chat.config.codex_home = dir.path().to_path_buf();
     chat.thread_id = Some(ThreadId::new());
 
+    chat.on_task_started();
     chat.dispatch_command_with_args(
         SlashCommand::Pilot,
         "start improve benchmark accuracy".to_string(),
         Vec::new(),
     );
     drain_insert_history(&mut rx);
-    let _ = next_pilot_op(&mut op_rx);
+    assert_no_pilot_op(&mut op_rx);
 
     chat.dispatch_command_with_args(SlashCommand::Pilot, "pause".to_string(), Vec::new());
     drain_insert_history(&mut rx);
 
-    chat.on_task_started();
     chat.dispatch_command_with_args(SlashCommand::Pilot, "resume".to_string(), Vec::new());
     drain_insert_history(&mut rx);
     assert_no_pilot_op(&mut op_rx);

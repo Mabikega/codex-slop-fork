@@ -100,6 +100,9 @@ impl SlopForkPilotManager {
         else {
             return Ok(None);
         };
+        runtime
+            .note_submission_dispatched()
+            .map_err(|err| format!("Failed to record Pilot submission dispatch: {err}"))?;
 
         let turn_id = match thread
             .submit(Op::SlopForkPilotTurn {
