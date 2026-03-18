@@ -3,7 +3,7 @@ source: tui/src/chatwidget/tests.rs
 expression: rendered
 ---
 Pilot
-Start an assistant-controlled autonomous run without synthetic user follow-up messages.
+Run an assistant-controlled autonomous work loop.
 
 Usage:
 $pilot start [--for <duration>] <goal>
@@ -12,6 +12,9 @@ $pilot pause
 $pilot resume
 $pilot wrap-up
 $pilot stop
+
+Options:
+--for <duration>
 
 Examples:
 $pilot start --for 4h Improve benchmark accuracy end-to-end

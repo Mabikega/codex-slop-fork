@@ -143,7 +143,7 @@ fn parse_duration(raw: &str) -> Result<Duration, String> {
 
 pub(crate) fn pilot_usage() -> &'static str {
     "Pilot\n\
-Start an assistant-controlled autonomous run without synthetic user follow-up messages.\n\n\
+Run an assistant-controlled autonomous work loop.\n\n\
 Usage:\n\
   $pilot start [--for <duration>] <goal>\n\
   $pilot status\n\
@@ -151,6 +151,8 @@ Usage:\n\
   $pilot resume\n\
   $pilot wrap-up\n\
   $pilot stop\n\n\
+Options:\n\
+  --for <duration>\n\n\
 Examples:\n\
   $pilot start --for 4h Improve benchmark accuracy end-to-end\n\
   $pilot wrap-up"
@@ -159,7 +161,7 @@ Examples:\n\
 pub(crate) fn pilot_command_mention_item() -> MentionItem {
     MentionItem {
         display_name: PILOT_COMMAND_NAME.to_string(),
-        description: Some("pilot command, not a skill".to_string()),
+        description: Some("pilot command".to_string()),
         insert_text: format!("${PILOT_COMMAND_NAME}"),
         search_terms: vec![
             PILOT_COMMAND_NAME.to_string(),
@@ -202,6 +204,15 @@ pub(crate) fn should_dispatch_pilot_command(first_token: &str, bound_path: Optio
         && (bound_path.is_none() || bound_path == Some(PILOT_COMMAND_MENTION_PATH))
 }
 
+/// Returns whether this `$pilot` subcommand is the kind of reusable command a
+/// user is likely to want back from composer history.
+pub(crate) fn should_record_pilot_command_in_history(args: &str) -> bool {
+    matches!(
+        parse_pilot_command(args, Local::now()),
+        Ok(PilotCommand::Start { .. })
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,5 +234,17 @@ mod tests {
         let err = parse_pilot_command("start --for 10 improve benchmarks", Local::now())
             .expect_err("expected parse error");
         assert!(err.contains("unit"));
+    }
+
+    #[test]
+    fn history_includes_model_driving_pilot_commands_only() {
+        assert!(should_record_pilot_command_in_history(
+            "start improve benchmarks"
+        ));
+        assert!(!should_record_pilot_command_in_history("status"));
+        assert!(!should_record_pilot_command_in_history("pause"));
+        assert!(!should_record_pilot_command_in_history("resume"));
+        assert!(!should_record_pilot_command_in_history("stop"));
+        assert!(!should_record_pilot_command_in_history("wrap-up"));
     }
 }

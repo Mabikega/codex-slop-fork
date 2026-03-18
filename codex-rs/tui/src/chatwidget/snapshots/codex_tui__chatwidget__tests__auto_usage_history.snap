@@ -1,0 +1,28 @@
+---
+source: tui/src/chatwidget/tests.rs
+expression: rendered
+---
+Auto
+Schedule follow-up prompts after Codex completes work or on a timer.
+
+Usage:
+$auto on-complete [options] (<message> | --last-user-message|-l)
+$auto on-complete --round-robin "msg 1" "msg 2" ...
+$auto every [options] (<interval|cron> <prompt> | --last-user-message|-l <interval|cron>)
+$auto list
+$auto show <runtime-id>
+$auto pause <runtime-id>
+$auto resume <runtime-id>
+$auto rm <runtime-id>
+
+Options:
+--scope <session|repo|global>
+--times <count>
+--until <HH:MM>
+--now
+--policy '<command>'
+
+Examples:
+$auto on-complete continue working on this
+$auto every 30m run tests
+$auto pause session:auto-1

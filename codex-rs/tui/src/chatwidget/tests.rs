@@ -9594,7 +9594,7 @@ async fn auto_every_interval_snapshot() {
     chat.thread_id = Some(ThreadId::new());
 
     chat.dispatch_command_with_args(
-        SlashCommand::Auto,
+        InlineCommand::Auto,
         "every 30s check deploy".to_string(),
         Vec::new(),
     );
@@ -9612,7 +9612,7 @@ async fn auto_every_cron_snapshot() {
     chat.thread_id = Some(ThreadId::new());
 
     chat.dispatch_command_with_args(
-        SlashCommand::Auto,
+        InlineCommand::Auto,
         "every */15 * * * * check deploy".to_string(),
         Vec::new(),
     );
@@ -9630,24 +9630,43 @@ async fn auto_list_snapshot() {
     chat.thread_id = Some(ThreadId::new());
 
     chat.dispatch_command_with_args(
-        SlashCommand::Auto,
+        InlineCommand::Auto,
         "on-complete --times 2 continue working on this".to_string(),
         Vec::new(),
     );
     drain_insert_history(&mut rx);
 
     chat.dispatch_command_with_args(
-        SlashCommand::Auto,
+        InlineCommand::Auto,
         "every 10m run tests".to_string(),
         Vec::new(),
     );
     drain_insert_history(&mut rx);
 
-    chat.dispatch_command_with_args(SlashCommand::Auto, "list".to_string(), Vec::new());
+    chat.dispatch_command_with_args(InlineCommand::Auto, "list".to_string(), Vec::new());
 
     let cells = drain_insert_history(&mut rx);
     let blob = lines_to_single_string(cells.last().unwrap());
     assert_snapshot!(blob);
+}
+
+#[tokio::test]
+async fn auto_control_command_runs_while_task_is_in_progress() {
+    let dir = tempdir().unwrap();
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.thread_id = Some(ThreadId::new());
+    chat.on_task_started();
+
+    chat.dispatch_command_with_args(InlineCommand::Auto, "list".to_string(), Vec::new());
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = lines_to_single_string(cells.last().expect("auto list output"));
+    assert!(
+        !rendered.contains("disabled while a task is in progress"),
+        "auto control commands should remain available while a task is running"
+    );
+    assert_eq!(op_rx.try_recv(), Err(TryRecvError::Empty));
 }
 
 #[tokio::test]
@@ -9658,7 +9677,7 @@ async fn auto_now_submits_prompt_immediately() {
     chat.thread_id = Some(ThreadId::new());
 
     chat.dispatch_command_with_args(
-        SlashCommand::Auto,
+        InlineCommand::Auto,
         "every --now 10m check deploy".to_string(),
         Vec::new(),
     );
@@ -9691,7 +9710,7 @@ async fn pilot_start_submits_assistant_only_turn() {
     chat.thread_id = Some(ThreadId::new());
 
     chat.dispatch_command_with_args(
-        SlashCommand::Pilot,
+        InlineCommand::Pilot,
         "start --for 4h improve benchmark accuracy".to_string(),
         Vec::new(),
     );
@@ -9706,11 +9725,22 @@ async fn pilot_start_submits_assistant_only_turn() {
 async fn pilot_bare_command_shows_usage_snapshot() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
 
-    chat.dispatch_command(SlashCommand::Pilot);
+    chat.dispatch_command_with_args(InlineCommand::Pilot, String::new(), Vec::new());
 
     let cells = drain_insert_history(&mut rx);
     let rendered = lines_to_single_string(cells.last().expect("pilot usage"));
     assert_snapshot!("pilot_usage_history", rendered);
+}
+
+#[tokio::test]
+async fn auto_bare_command_shows_usage_snapshot() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.dispatch_command_with_args(InlineCommand::Auto, String::new(), Vec::new());
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = lines_to_single_string(cells.last().expect("auto usage"));
+    assert_snapshot!("auto_usage_history", rendered);
 }
 
 #[tokio::test]
@@ -9721,7 +9751,7 @@ async fn pilot_turn_completion_queues_follow_up_cycle() {
     chat.thread_id = Some(ThreadId::new());
 
     chat.dispatch_command_with_args(
-        SlashCommand::Pilot,
+        InlineCommand::Pilot,
         "start improve benchmark accuracy".to_string(),
         Vec::new(),
     );
@@ -9747,17 +9777,17 @@ async fn pilot_resume_waits_for_unrelated_turn_to_finish() {
 
     chat.on_task_started();
     chat.dispatch_command_with_args(
-        SlashCommand::Pilot,
+        InlineCommand::Pilot,
         "start improve benchmark accuracy".to_string(),
         Vec::new(),
     );
     drain_insert_history(&mut rx);
     assert_no_pilot_op(&mut op_rx);
 
-    chat.dispatch_command_with_args(SlashCommand::Pilot, "pause".to_string(), Vec::new());
+    chat.dispatch_command_with_args(InlineCommand::Pilot, "pause".to_string(), Vec::new());
     drain_insert_history(&mut rx);
 
-    chat.dispatch_command_with_args(SlashCommand::Pilot, "resume".to_string(), Vec::new());
+    chat.dispatch_command_with_args(InlineCommand::Pilot, "resume".to_string(), Vec::new());
     drain_insert_history(&mut rx);
     assert_no_pilot_op(&mut op_rx);
 
@@ -9775,7 +9805,7 @@ async fn pilot_wrap_up_from_active_turn_submits_final_cycle() {
     chat.thread_id = Some(ThreadId::new());
 
     chat.dispatch_command_with_args(
-        SlashCommand::Pilot,
+        InlineCommand::Pilot,
         "start improve benchmark accuracy".to_string(),
         Vec::new(),
     );
@@ -9786,7 +9816,7 @@ async fn pilot_wrap_up_from_active_turn_submits_final_cycle() {
             .on_turn_started(&chat.slop_fork_context(), "turn-pilot-1", false);
     chat.apply_slop_fork_effects(start_effects);
 
-    chat.dispatch_command_with_args(SlashCommand::Pilot, "wrap-up".to_string(), Vec::new());
+    chat.dispatch_command_with_args(InlineCommand::Pilot, "wrap-up".to_string(), Vec::new());
     drain_insert_history(&mut rx);
     chat.on_task_complete_for_turn(Some("turn-pilot-1"), Some("checkpoint".to_string()), false);
 
@@ -9802,14 +9832,14 @@ async fn pilot_wrap_up_before_turn_start_does_not_queue_duplicate_cycle() {
     chat.thread_id = Some(ThreadId::new());
 
     chat.dispatch_command_with_args(
-        SlashCommand::Pilot,
+        InlineCommand::Pilot,
         "start improve benchmark accuracy".to_string(),
         Vec::new(),
     );
     drain_insert_history(&mut rx);
     let _ = next_pilot_op(&mut op_rx);
 
-    chat.dispatch_command_with_args(SlashCommand::Pilot, "wrap-up".to_string(), Vec::new());
+    chat.dispatch_command_with_args(InlineCommand::Pilot, "wrap-up".to_string(), Vec::new());
     drain_insert_history(&mut rx);
 
     assert_no_pilot_op(&mut op_rx);
@@ -9845,7 +9875,7 @@ async fn pilot_start_recovers_from_stopped_stale_active_turn_state() {
     chat.thread_id = Some(thread_id);
 
     chat.dispatch_command_with_args(
-        SlashCommand::Pilot,
+        InlineCommand::Pilot,
         "start new goal".to_string(),
         Vec::new(),
     );
@@ -9867,7 +9897,7 @@ async fn auto_now_respects_disabled_automation_execution() {
     .expect("disable automation execution");
 
     chat.dispatch_command_with_args(
-        SlashCommand::Auto,
+        InlineCommand::Auto,
         "every --now 10m check deploy".to_string(),
         Vec::new(),
     );
@@ -9884,7 +9914,7 @@ async fn on_complete_automation_submits_prompt_when_task_finishes() {
     chat.thread_id = Some(ThreadId::new());
 
     chat.dispatch_command_with_args(
-        SlashCommand::Auto,
+        InlineCommand::Auto,
         "on-complete continue working on this".to_string(),
         Vec::new(),
     );
@@ -9926,7 +9956,7 @@ async fn run_automation_notification_suppression_case(
     .expect("enable automation notification suppression");
 
     chat.dispatch_command_with_args(
-        SlashCommand::Auto,
+        InlineCommand::Auto,
         "on-complete continue working on this".to_string(),
         Vec::new(),
     );
@@ -9970,7 +10000,7 @@ async fn auto_last_user_message_is_snapshotted_at_creation_time() {
     chat.slop_fork_ui.note_manual_user_message("hi");
 
     chat.dispatch_command_with_args(
-        SlashCommand::Auto,
+        InlineCommand::Auto,
         "on-complete --last-user-message".to_string(),
         Vec::new(),
     );
@@ -10010,7 +10040,7 @@ async fn automation_prompt_does_not_replace_last_manual_user_message_snapshot_so
     chat.slop_fork_ui.note_manual_user_message("hi");
 
     chat.dispatch_command_with_args(
-        SlashCommand::Auto,
+        InlineCommand::Auto,
         "on-complete --times 1 hello".to_string(),
         Vec::new(),
     );
@@ -10019,7 +10049,7 @@ async fn automation_prompt_does_not_replace_last_manual_user_message_snapshot_so
     let _ = next_submit_op(&mut op_rx);
 
     chat.dispatch_command_with_args(
-        SlashCommand::Auto,
+        InlineCommand::Auto,
         "on-complete --last-user-message".to_string(),
         Vec::new(),
     );
@@ -10062,7 +10092,7 @@ async fn last_user_message_snapshot_cache_clears_on_session_reconfigure() {
     chat.apply_slop_fork_effects(effects);
 
     chat.dispatch_command_with_args(
-        SlashCommand::Auto,
+        InlineCommand::Auto,
         "on-complete --last-user-message".to_string(),
         Vec::new(),
     );
@@ -10101,7 +10131,7 @@ async fn due_auto_timer_submits_prompt_when_session_is_idle() {
     chat.thread_id = Some(thread_id);
 
     chat.dispatch_command_with_args(
-        SlashCommand::Auto,
+        InlineCommand::Auto,
         "every --scope global 10m check deploy".to_string(),
         Vec::new(),
     );
@@ -10154,7 +10184,7 @@ async fn due_auto_timer_does_not_submit_while_composer_has_draft() {
     chat.thread_id = Some(thread_id);
 
     chat.dispatch_command_with_args(
-        SlashCommand::Auto,
+        InlineCommand::Auto,
         "every --scope global 10m check deploy".to_string(),
         Vec::new(),
     );
@@ -10193,7 +10223,7 @@ async fn due_auto_timer_does_not_submit_while_accounts_popup_is_open() {
     chat.thread_id = Some(thread_id);
 
     chat.dispatch_command_with_args(
-        SlashCommand::Auto,
+        InlineCommand::Auto,
         "every --scope global 10m check deploy".to_string(),
         Vec::new(),
     );
@@ -10232,7 +10262,7 @@ async fn on_complete_automation_preserves_manual_queue_order() {
     chat.thread_id = Some(ThreadId::new());
 
     chat.dispatch_command_with_args(
-        SlashCommand::Auto,
+        InlineCommand::Auto,
         "on-complete continue working on this".to_string(),
         Vec::new(),
     );

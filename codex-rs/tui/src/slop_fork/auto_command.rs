@@ -401,7 +401,27 @@ fn parse_every_command(
 }
 
 pub(crate) fn auto_usage() -> &'static str {
-    "Usage: $auto on-complete [--scope session|repo|global] [--times N] [--until HH:MM] [--now] [--policy 'cmd'] (<message> | --last-user-message|-l)\n       $auto on-complete --round-robin \"msg 1\" \"msg 2\" ...\n       $auto every [--scope session|repo|global] [--times N] [--until HH:MM] [--now] [--policy 'cmd'] (<interval|cron> <prompt> | --last-user-message|-l <interval|cron>)\n       $auto list | $auto show <runtime-id> | $auto pause <runtime-id> | $auto resume <runtime-id> | $auto rm <runtime-id>"
+    "Auto\n\
+Schedule follow-up prompts after Codex completes work or on a timer.\n\n\
+Usage:\n\
+  $auto on-complete [options] (<message> | --last-user-message|-l)\n\
+  $auto on-complete --round-robin \"msg 1\" \"msg 2\" ...\n\
+  $auto every [options] (<interval|cron> <prompt> | --last-user-message|-l <interval|cron>)\n\
+  $auto list\n\
+  $auto show <runtime-id>\n\
+  $auto pause <runtime-id>\n\
+  $auto resume <runtime-id>\n\
+  $auto rm <runtime-id>\n\n\
+Options:\n\
+  --scope <session|repo|global>\n\
+  --times <count>\n\
+  --until <HH:MM>\n\
+  --now\n\
+  --policy '<command>'\n\n\
+Examples:\n\
+  $auto on-complete continue working on this\n\
+  $auto every 30m run tests\n\
+  $auto pause session:auto-1"
 }
 
 fn split_shell_tokens(input: &str) -> Result<Vec<ShellToken>, String> {
@@ -523,7 +543,7 @@ fn parse_schedule_only_request(
 pub(crate) fn auto_command_mention_item() -> MentionItem {
     MentionItem {
         display_name: AUTO_COMMAND_NAME.to_string(),
-        description: Some("automation command, not a skill".to_string()),
+        description: Some("automation command".to_string()),
         insert_text: format!("${AUTO_COMMAND_NAME}"),
         search_terms: vec![
             AUTO_COMMAND_NAME.to_string(),
@@ -566,6 +586,52 @@ pub(crate) fn should_dispatch_auto_command(first_token: &str, bound_path: Option
         && (bound_path.is_none() || bound_path == Some(AUTO_COMMAND_MENTION_PATH))
 }
 
+/// Returns whether this `$auto` subcommand defines a prompt that Codex will
+/// eventually send to the model, either immediately (`--now`) or via the
+/// automation registry later.
+pub(crate) fn should_record_auto_command_in_history(args: &str) -> bool {
+    let trimmed = args.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let Ok(tokens) = split_shell_tokens(trimmed) else {
+        return false;
+    };
+    if tokens
+        .iter()
+        .any(|token| matches!(token.value.as_str(), "--last-user-message" | "-l"))
+    {
+        return false;
+    }
+
+    const PLACEHOLDER_LAST_USER_MESSAGE: &str = "__codex_slop_fork_history_probe__";
+    matches!(
+        parse_auto_command(
+            trimmed,
+            AutomationScope::Session,
+            Local::now(),
+            Some(PLACEHOLDER_LAST_USER_MESSAGE),
+        ),
+        Ok(AutoCommand::Create { .. })
+    )
+}
+
+pub(crate) fn auto_command_requires_idle_session(args: &str) -> bool {
+    let trimmed = args.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let Ok(tokens) = split_shell_tokens(trimmed) else {
+        return false;
+    };
+    matches!(
+        tokens.first().map(|token| token.value.as_str()),
+        Some("every" | "on-complete")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::Local;
@@ -574,7 +640,9 @@ mod tests {
     use super::AutoCommand;
     use super::AutomationMessageSource;
     use super::AutomationScope;
+    use super::auto_command_requires_idle_session;
     use super::parse_auto_command;
+    use super::should_record_auto_command_in_history;
 
     #[test]
     fn parses_on_complete_now_with_last_user_message_snapshot() {
@@ -697,5 +765,35 @@ mod tests {
                 message: "first line\nsecond line".to_string()
             }
         );
+    }
+
+    #[test]
+    fn history_includes_prompt_driving_auto_commands_only() {
+        assert!(should_record_auto_command_in_history(
+            "on-complete continue"
+        ));
+        assert!(should_record_auto_command_in_history("every 10m continue"));
+        assert!(!should_record_auto_command_in_history(
+            "on-complete --last-user-message"
+        ));
+        assert!(!should_record_auto_command_in_history("every -l 10m"));
+        assert!(!should_record_auto_command_in_history("on-complete"));
+        assert!(!should_record_auto_command_in_history(
+            "every --bogus 10m continue"
+        ));
+        assert!(!should_record_auto_command_in_history("list"));
+        assert!(!should_record_auto_command_in_history(
+            "pause session:auto-1"
+        ));
+    }
+
+    #[test]
+    fn idle_requirement_only_applies_to_auto_create_commands() {
+        assert!(auto_command_requires_idle_session("on-complete keep going"));
+        assert!(auto_command_requires_idle_session("every 10m run tests"));
+        assert!(!auto_command_requires_idle_session("list"));
+        assert!(!auto_command_requires_idle_session("pause session:auto-1"));
+        assert!(!auto_command_requires_idle_session(""));
+        assert!(!auto_command_requires_idle_session("unknown"));
     }
 }

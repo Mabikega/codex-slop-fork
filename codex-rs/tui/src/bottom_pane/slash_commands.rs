@@ -36,7 +36,6 @@ fn command_is_enabled(cmd: SlashCommand, flags: BuiltinCommandFlags) -> bool {
 pub(crate) fn builtins_for_input(flags: BuiltinCommandFlags) -> Vec<(&'static str, SlashCommand)> {
     built_in_slash_commands()
         .into_iter()
-        .filter(|(_, cmd)| *cmd != SlashCommand::Auto && *cmd != SlashCommand::Pilot)
         .filter(|(_, cmd)| command_is_enabled(*cmd, flags))
         .collect()
 }

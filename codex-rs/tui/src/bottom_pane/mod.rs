@@ -146,6 +146,7 @@ pub(crate) enum CancellationEvent {
 use crate::bottom_pane::prompt_args::parse_slash_name;
 pub(crate) use chat_composer::ChatComposer;
 pub(crate) use chat_composer::ChatComposerConfig;
+pub(crate) use chat_composer::InlineCommand;
 pub(crate) use chat_composer::InputResult;
 use codex_protocol::custom_prompts::CustomPrompt;
 
@@ -1242,6 +1243,8 @@ mod tests {
     use crate::status_indicator_widget::StatusDetailsCapitalization;
     use codex_protocol::protocol::Op;
     use codex_protocol::protocol::SkillScope;
+    use crossterm::event::KeyCode;
+    use crossterm::event::KeyEvent;
     use crossterm::event::KeyEventKind;
     use crossterm::event::KeyModifiers;
     use insta::assert_snapshot;

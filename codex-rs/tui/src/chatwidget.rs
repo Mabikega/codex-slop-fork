@@ -241,6 +241,7 @@ use crate::bottom_pane::DOUBLE_PRESS_QUIT_SHORTCUT_ENABLED;
 use crate::bottom_pane::ExperimentalFeatureItem;
 use crate::bottom_pane::ExperimentalFeaturesView;
 use crate::bottom_pane::FeedbackAudience;
+use crate::bottom_pane::InlineCommand;
 use crate::bottom_pane::InputResult;
 use crate::bottom_pane::LocalImageAttachment;
 use crate::bottom_pane::McpServerElicitationFormRequest;
@@ -4676,14 +4677,6 @@ impl ChatWidget {
             SlashCommand::Accounts => {
                 self.open_login_popup(LoginPopupKind::Root);
             }
-            SlashCommand::Auto => {
-                let effects = self.slop_fork_ui.show_auto_usage();
-                self.apply_slop_fork_effects(effects);
-            }
-            SlashCommand::Pilot => {
-                let effects = self.slop_fork_ui.show_pilot_usage();
-                self.apply_slop_fork_effects(effects);
-            }
             SlashCommand::Rollout => {
                 if let Some(path) = self.rollout_path() {
                     self.add_info_message(
@@ -4737,29 +4730,31 @@ impl ChatWidget {
 
     fn dispatch_command_with_args(
         &mut self,
-        cmd: SlashCommand,
+        cmd: InlineCommand,
         args: String,
         _text_elements: Vec<TextElement>,
     ) {
-        if !cmd.supports_inline_args() {
-            self.dispatch_command(cmd);
-            return;
-        }
-        if !cmd.available_during_task() && self.bottom_pane.is_task_running() {
-            let message = format!(
-                "'/{}' is disabled while a task is in progress.",
-                cmd.command()
-            );
-            self.add_to_history(history_cell::new_error_event(message));
-            self.request_redraw();
-            return;
+        if let InlineCommand::Slash(cmd) = cmd {
+            if !cmd.supports_inline_args() {
+                self.dispatch_command(cmd);
+                return;
+            }
+            if !cmd.available_during_task() && self.bottom_pane.is_task_running() {
+                let message = format!(
+                    "'/{}' is disabled while a task is in progress.",
+                    cmd.command()
+                );
+                self.add_to_history(history_cell::new_error_event(message));
+                self.request_redraw();
+                return;
+            }
         }
 
         let trimmed = args.trim();
         match cmd {
-            SlashCommand::Fast => {
+            InlineCommand::Slash(SlashCommand::Fast) => {
                 if trimmed.is_empty() {
-                    self.dispatch_command(cmd);
+                    self.dispatch_command(SlashCommand::Fast);
                     return;
                 }
                 match trimmed.to_ascii_lowercase().as_str() {
@@ -4779,7 +4774,7 @@ impl ChatWidget {
                     }
                 }
             }
-            SlashCommand::Rename if !trimmed.is_empty() => {
+            InlineCommand::Slash(SlashCommand::Rename) if !trimmed.is_empty() => {
                 self.session_telemetry
                     .counter("codex.thread.rename", 1, &[]);
                 let Some((prepared_args, _prepared_elements)) =
@@ -4798,8 +4793,8 @@ impl ChatWidget {
                     .send(AppEvent::CodexOp(Op::SetThreadName { name }));
                 self.bottom_pane.drain_pending_submission_state();
             }
-            SlashCommand::Plan if !trimmed.is_empty() => {
-                self.dispatch_command(cmd);
+            InlineCommand::Slash(SlashCommand::Plan) if !trimmed.is_empty() => {
+                self.dispatch_command(SlashCommand::Plan);
                 if self.active_mode_kind() != ModeKind::Plan {
                     return;
                 }
@@ -4830,7 +4825,7 @@ impl ChatWidget {
                     self.queue_user_message(user_message);
                 }
             }
-            SlashCommand::Review if !trimmed.is_empty() => {
+            InlineCommand::Slash(SlashCommand::Review) if !trimmed.is_empty() => {
                 let Some((prepared_args, _prepared_elements)) =
                     self.bottom_pane.prepare_inline_args_submission(false)
                 else {
@@ -4846,7 +4841,7 @@ impl ChatWidget {
                 });
                 self.bottom_pane.drain_pending_submission_state();
             }
-            SlashCommand::SandboxReadRoot if !trimmed.is_empty() => {
+            InlineCommand::Slash(SlashCommand::SandboxReadRoot) if !trimmed.is_empty() => {
                 let Some((prepared_args, _prepared_elements)) =
                     self.bottom_pane.prepare_inline_args_submission(false)
                 else {
@@ -4858,37 +4853,27 @@ impl ChatWidget {
                     });
                 self.bottom_pane.drain_pending_submission_state();
             }
-            SlashCommand::Auto => {
-                let prepared_args = self
-                    .bottom_pane
-                    .prepare_inline_args_submission(false)
-                    .map(|(prepared_args, _prepared_elements)| prepared_args)
-                    .unwrap_or(args);
+            InlineCommand::Auto => {
                 let last_user_message = self
                     .slop_fork_ui
                     .last_manual_user_message()
                     .map(str::to_string);
                 let effects = self.slop_fork_ui.handle_auto_command(
                     &self.slop_fork_context(),
-                    prepared_args.trim(),
+                    trimmed,
                     last_user_message.as_deref(),
                 );
                 self.apply_slop_fork_effects(effects);
                 self.bottom_pane.drain_pending_submission_state();
             }
-            SlashCommand::Pilot => {
-                let prepared_args = self
-                    .bottom_pane
-                    .prepare_inline_args_submission(false)
-                    .map(|(prepared_args, _prepared_elements)| prepared_args)
-                    .unwrap_or(args);
+            InlineCommand::Pilot => {
                 let effects = self
                     .slop_fork_ui
-                    .handle_pilot_command(&self.slop_fork_context(), prepared_args.trim());
+                    .handle_pilot_command(&self.slop_fork_context(), trimmed);
                 self.apply_slop_fork_effects(effects);
                 self.bottom_pane.drain_pending_submission_state();
             }
-            _ => self.dispatch_command(cmd),
+            InlineCommand::Slash(cmd) => self.dispatch_command(cmd),
         }
     }
 

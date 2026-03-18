@@ -42,8 +42,6 @@ pub enum SlashCommand {
     Theme,
     Mcp,
     Apps,
-    Auto,
-    Pilot,
     Accounts,
     Logout,
     Quit,
@@ -111,8 +109,6 @@ impl SlashCommand {
             SlashCommand::Experimental => "toggle experimental features",
             SlashCommand::Mcp => "list configured MCP tools",
             SlashCommand::Apps => "manage apps",
-            SlashCommand::Auto => "automate follow-up prompts after Codex completes work",
-            SlashCommand::Pilot => "run an assistant-controlled autonomous work loop",
             SlashCommand::Accounts => "manage saved accounts and auth flows",
             SlashCommand::Logout => "log out of Codex",
             SlashCommand::Rollout => "print the rollout file path",
@@ -137,8 +133,6 @@ impl SlashCommand {
                 | SlashCommand::Rename
                 | SlashCommand::Plan
                 | SlashCommand::Fast
-                | SlashCommand::Auto
-                | SlashCommand::Pilot
                 | SlashCommand::SandboxReadRoot
         )
     }
@@ -163,7 +157,6 @@ impl SlashCommand {
             | SlashCommand::Review
             | SlashCommand::Plan
             | SlashCommand::Clear
-            | SlashCommand::Auto
             | SlashCommand::Accounts
             | SlashCommand::Logout
             | SlashCommand::MemoryDrop
@@ -179,7 +172,6 @@ impl SlashCommand {
             | SlashCommand::Stop
             | SlashCommand::Mcp
             | SlashCommand::Apps
-            | SlashCommand::Pilot
             | SlashCommand::Feedback
             | SlashCommand::Quit
             | SlashCommand::Exit => true,

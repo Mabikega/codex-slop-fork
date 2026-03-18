@@ -11,9 +11,11 @@ mod ui;
 #[cfg(test)]
 pub(crate) use auto_command::AUTO_COMMAND_MENTION_PATH;
 pub(crate) use auto_command::auto_command_mention_item;
+pub(crate) use auto_command::auto_command_requires_idle_session;
 pub(crate) use auto_command::first_token as auto_command_first_token;
 pub(crate) use auto_command::parse_auto_command_args;
 pub(crate) use auto_command::should_dispatch_auto_command;
+pub(crate) use auto_command::should_record_auto_command_in_history;
 #[cfg(test)]
 pub(crate) use event::LoginFlowKind;
 pub(crate) use event::LoginPopupKind;
@@ -26,6 +28,7 @@ pub(crate) use pilot_command::first_token as pilot_command_first_token;
 pub(crate) use pilot_command::parse_pilot_command_args;
 pub(crate) use pilot_command::pilot_command_mention_item;
 pub(crate) use pilot_command::should_dispatch_pilot_command;
+pub(crate) use pilot_command::should_record_pilot_command_in_history;
 pub(crate) use rate_limit_poller::should_spawn_rate_limit_poller;
 pub(crate) use rate_limit_poller::spawn_rate_limit_poller;
 pub(crate) use status_line::SavedAccountLimitKind;
