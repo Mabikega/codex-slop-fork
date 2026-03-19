@@ -1,0 +1,22 @@
+---
+source: tui/src/chatwidget/tests.rs
+expression: normalized
+---
+Autoresearch
+Status: running
+Goal: optimize OCR latency
+Session: (not initialized)
+Metric: (unknown)
+Iterations: 0
+Runs in current segment: 0
+Discovery passes: 0
+Baseline: n/a
+Best: n/a
+Kept: 0
+Discarded: 0
+Crashes: 0
+Checks failed: 0
+Workdir: /tmp/workdir
+Max runs: 8
+Queued discovery: architecture search (radical OCR architectures)
+Status message: Autoresearch queued a bounded discovery pass.

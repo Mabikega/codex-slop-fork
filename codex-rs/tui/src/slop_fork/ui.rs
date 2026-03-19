@@ -28,6 +28,8 @@ use codex_core::slop_fork::automation::AutomationRegistry;
 use codex_core::slop_fork::automation::AutomationScope;
 use codex_core::slop_fork::automation::AutomationSpec;
 use codex_core::slop_fork::automation::run_policy_command;
+use codex_core::slop_fork::autoresearch::AutoresearchCycleKind;
+use codex_core::slop_fork::autoresearch::AutoresearchRuntime;
 use codex_core::slop_fork::load_slop_fork_config;
 use codex_core::slop_fork::pilot::PilotCycleKind;
 use codex_core::slop_fork::pilot::PilotRuntime;
@@ -40,6 +42,7 @@ use codex_login::run_login_server;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
+use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SkillMetadata as ProtocolSkillMetadata;
@@ -87,6 +90,8 @@ use super::schedule_parser::compact_duration_label;
 
 #[path = "ui_automation.rs"]
 mod ui_automation;
+#[path = "ui_autoresearch.rs"]
+mod ui_autoresearch;
 #[path = "ui_login.rs"]
 mod ui_login;
 #[path = "ui_pilot.rs"]
@@ -165,13 +170,24 @@ pub(crate) enum SlopForkUiEffect {
         cycle_kind: PilotCycleKind,
         notify_on_completion: bool,
     },
+    SubmitAutoresearchTurn {
+        prompt: String,
+        cycle_kind: AutoresearchCycleKind,
+        notify_on_completion: bool,
+    },
+    SubmitAutoresearchSetupTurn {
+        prompt: String,
+    },
     ScheduleFrameIn(Duration),
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct SlopForkUi {
     automation_registry: Option<AutomationRegistry>,
+    autoresearch_runtime: Option<AutoresearchRuntime>,
     pilot_runtime: Option<PilotRuntime>,
+    awaiting_autoresearch_turn_start: bool,
+    recovered_autoresearch_turn_start: bool,
     awaiting_pilot_turn_start: bool,
     last_manual_user_message: Option<String>,
     pending_chatgpt_login: Option<PendingChatgptLogin>,
@@ -185,6 +201,8 @@ impl SlopForkUi {
     pub(crate) fn note_manual_user_message(&mut self, message: &str) {
         let trimmed = message.trim();
         if !trimmed.is_empty() {
+            self.awaiting_autoresearch_turn_start = false;
+            self.recovered_autoresearch_turn_start = false;
             self.last_manual_user_message = Some(trimmed.to_string());
         }
     }
@@ -193,19 +211,46 @@ impl SlopForkUi {
         self.last_manual_user_message.as_deref()
     }
 
+    pub(crate) fn note_successful_outbound_op(&mut self, op: &Op) {
+        if matches!(
+            op,
+            Op::UserInput { .. }
+                | Op::UserTurn { .. }
+                | Op::Review { .. }
+                | Op::RunUserShellCommand { .. }
+                | Op::SlopForkPilotTurn { .. }
+        ) {
+            self.awaiting_autoresearch_turn_start = false;
+            self.recovered_autoresearch_turn_start = false;
+        }
+    }
+
     pub(crate) fn on_session_configured(
         &mut self,
         ctx: &SlopForkUiContext,
     ) -> Vec<SlopForkUiEffect> {
         self.last_manual_user_message = None;
         self.pending_automation_policies.clear();
+        let preserve_awaiting_autoresearch_turn_start = self.awaiting_autoresearch_turn_start;
+        self.recovered_autoresearch_turn_start = false;
         self.awaiting_pilot_turn_start = false;
         let Some(thread_id) = ctx.thread_id.as_deref() else {
+            self.awaiting_autoresearch_turn_start = false;
+            self.recovered_autoresearch_turn_start = false;
             self.automation_registry = None;
+            self.autoresearch_runtime = None;
             self.pilot_runtime = None;
             return Vec::new();
         };
+        let preserve_awaiting_autoresearch_turn_start = preserve_awaiting_autoresearch_turn_start
+            && ctx.task_running
+            && self
+                .autoresearch_runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.thread_id() == thread_id);
+        let mut recover_autoresearch_turn_start = false;
         let mut effects = Vec::new();
+        self.awaiting_autoresearch_turn_start = false;
         match AutomationRegistry::load(&ctx.codex_home, &ctx.cwd, thread_id) {
             Ok(registry) => {
                 self.automation_registry = Some(registry);
@@ -217,6 +262,21 @@ impl SlopForkUi {
                 )));
             }
         }
+        match AutoresearchRuntime::load(&ctx.codex_home, thread_id) {
+            Ok(runtime) => {
+                recover_autoresearch_turn_start =
+                    !preserve_awaiting_autoresearch_turn_start && runtime.has_pending_turn_start();
+                self.autoresearch_runtime = Some(runtime);
+            }
+            Err(err) => {
+                self.autoresearch_runtime = None;
+                effects.push(SlopForkUiEffect::AddErrorMessage(format!(
+                    "Failed to load autoresearch state: {err}"
+                )));
+            }
+        }
+        self.awaiting_autoresearch_turn_start = preserve_awaiting_autoresearch_turn_start;
+        self.recovered_autoresearch_turn_start = recover_autoresearch_turn_start;
         match PilotRuntime::load(&ctx.codex_home, thread_id) {
             Ok(runtime) => {
                 self.pilot_runtime = Some(runtime);

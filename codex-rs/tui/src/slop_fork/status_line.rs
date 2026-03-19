@@ -112,26 +112,51 @@ fn saved_account_limit_averages_for_status_line(
             return None;
         }
     };
+    let now = chrono::Utc::now();
+    let remaining_for_window = |snapshot: &account_rate_limits::StoredRateLimitSnapshot,
+                                kind: account_rate_limits::QuotaWindowKind,
+                                used_percent: Option<f64>| {
+        match account_rate_limits::quota_window_state(snapshot, kind, now) {
+            account_rate_limits::QuotaWindowState::ResetPassed => Some(100.0),
+            account_rate_limits::QuotaWindowState::Unknown
+            | account_rate_limits::QuotaWindowState::Untouched
+            | account_rate_limits::QuotaWindowState::Started => {
+                used_percent.and_then(remaining_percent)
+            }
+        }
+    };
     let averages = SavedAccountLimitAverages {
         five_hour_remaining_percent: include_five_hour
             .then(|| {
                 average_remaining_percent(accounts.iter().filter_map(|account| {
-                    snapshots
-                        .get(&account.id)
-                        .and_then(|snapshot| snapshot.snapshot.as_ref())
-                        .and_then(|snapshot| snapshot.primary.as_ref())
-                        .and_then(|window| remaining_percent(window.used_percent))
+                    snapshots.get(&account.id).and_then(|snapshot| {
+                        remaining_for_window(
+                            snapshot,
+                            account_rate_limits::QuotaWindowKind::FiveHour,
+                            snapshot
+                                .snapshot
+                                .as_ref()
+                                .and_then(|snapshot| snapshot.primary.as_ref())
+                                .map(|window| window.used_percent),
+                        )
+                    })
                 }))
             })
             .flatten(),
         weekly_remaining_percent: include_weekly
             .then(|| {
                 average_remaining_percent(accounts.iter().filter_map(|account| {
-                    snapshots
-                        .get(&account.id)
-                        .and_then(|snapshot| snapshot.snapshot.as_ref())
-                        .and_then(|snapshot| snapshot.secondary.as_ref())
-                        .and_then(|window| remaining_percent(window.used_percent))
+                    snapshots.get(&account.id).and_then(|snapshot| {
+                        remaining_for_window(
+                            snapshot,
+                            account_rate_limits::QuotaWindowKind::Weekly,
+                            snapshot
+                                .snapshot
+                                .as_ref()
+                                .and_then(|snapshot| snapshot.secondary.as_ref())
+                                .map(|window| window.used_percent),
+                        )
+                    })
                 }))
             })
             .flatten(),
@@ -359,6 +384,71 @@ mod tests {
             Utc::now(),
         )
         .expect("record second rate limits");
+
+        assert_eq!(
+            saved_account_limit_averages_for_status_line(dir.path(), true, false),
+            Some(SavedAccountLimitAverages {
+                five_hour_remaining_percent: Some(90),
+                weekly_remaining_percent: None,
+            })
+        );
+    }
+
+    #[test]
+    fn reset_passed_windows_count_as_fully_remaining_in_average() {
+        let dir = tempdir().expect("temp dir");
+        let first = chatgpt_auth_dot_json("acct-1", "one@example.com");
+        let second = chatgpt_auth_dot_json("acct-2", "two@example.com");
+        codex_core::slop_fork::auth_accounts::upsert_account(dir.path(), &first)
+            .expect("save first account");
+        codex_core::slop_fork::auth_accounts::upsert_account(dir.path(), &second)
+            .expect("save second account");
+        codex_core::slop_fork::update_slop_fork_config(dir.path(), |config| {
+            config.show_average_account_limits_in_status_line = true;
+        })
+        .expect("enable status line averages");
+
+        let now = Utc::now();
+        let expired_observed_at = now - chrono::Duration::hours(6);
+        let expired_reset_at = now - chrono::Duration::hours(1);
+        account_rate_limits::record_rate_limit_snapshot(
+            dir.path(),
+            "acct-1",
+            Some("pro"),
+            &RateLimitSnapshot {
+                limit_id: Some("codex".to_string()),
+                limit_name: Some("codex".to_string()),
+                primary: Some(RateLimitWindow {
+                    used_percent: 100.0,
+                    window_minutes: Some(300),
+                    resets_at: Some(expired_reset_at.timestamp()),
+                }),
+                secondary: None,
+                credits: None,
+                plan_type: None,
+            },
+            expired_observed_at,
+        )
+        .expect("record expired rate limits");
+        account_rate_limits::record_rate_limit_snapshot(
+            dir.path(),
+            "acct-2",
+            Some("pro"),
+            &RateLimitSnapshot {
+                limit_id: Some("codex".to_string()),
+                limit_name: Some("codex".to_string()),
+                primary: Some(RateLimitWindow {
+                    used_percent: 20.0,
+                    window_minutes: Some(300),
+                    resets_at: Some((now + chrono::Duration::hours(5)).timestamp()),
+                }),
+                secondary: None,
+                credits: None,
+                plan_type: None,
+            },
+            now,
+        )
+        .expect("record active rate limits");
 
         assert_eq!(
             saved_account_limit_averages_for_status_line(dir.path(), true, false),

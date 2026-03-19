@@ -49,6 +49,14 @@ use codex_core::features::Feature;
 use codex_core::models_manager::collaboration_mode_presets::CollaborationModesConfig;
 use codex_core::models_manager::manager::ModelsManager;
 use codex_core::skills::model::SkillMetadata;
+use codex_core::slop_fork::autoresearch::AutoresearchDiscoveryReason;
+use codex_core::slop_fork::autoresearch::AutoresearchExperimentEntry;
+use codex_core::slop_fork::autoresearch::AutoresearchExperimentStatus;
+use codex_core::slop_fork::autoresearch::AutoresearchJournal;
+use codex_core::slop_fork::autoresearch::AutoresearchRuntime;
+use codex_core::slop_fork::autoresearch::AutoresearchStatus;
+use codex_core::slop_fork::autoresearch::AutoresearchWorkspace;
+use codex_core::slop_fork::autoresearch::MetricDirection;
 use codex_core::terminal::TerminalName;
 use codex_core::token_data::IdTokenInfo;
 use codex_core::token_data::TokenData;
@@ -2026,6 +2034,28 @@ fn next_pilot_op(op_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Op>) -> String
             Err(TryRecvError::Empty) => panic!("expected pilot op but queue was empty"),
             Err(TryRecvError::Disconnected) => panic!("expected pilot op but channel closed"),
         }
+    }
+}
+
+fn next_autoresearch_op(op_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Op>) -> String {
+    loop {
+        match op_rx.try_recv() {
+            Ok(Op::SlopForkAutoresearchTurn { prompt }) => return prompt,
+            Ok(_) => continue,
+            Err(TryRecvError::Empty) => panic!("expected autoresearch op but queue was empty"),
+            Err(TryRecvError::Disconnected) => {
+                panic!("expected autoresearch op but channel closed")
+            }
+        }
+    }
+}
+
+fn assert_no_autoresearch_op(op_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Op>) {
+    while let Ok(op) = op_rx.try_recv() {
+        assert!(
+            !matches!(op, Op::SlopForkAutoresearchTurn { .. }),
+            "unexpected autoresearch op: {op:?}"
+        );
     }
 }
 
@@ -8553,7 +8583,7 @@ async fn login_account_limits_popup_snapshot() {
     ));
 
     let observed_at = Utc
-        .with_ymd_and_hms(2100, 1, 1, 10, 0, 0)
+        .with_ymd_and_hms(2030, 1, 1, 10, 0, 0)
         .single()
         .expect("valid timestamp");
     let mut rate_limit_snapshot = snapshot(42.0);
@@ -8602,7 +8632,7 @@ async fn login_account_limits_popup_hides_untouched_marker_after_confirmed_auto_
     .unwrap();
 
     let observed_at = Utc
-        .with_ymd_and_hms(2100, 1, 1, 10, 0, 0)
+        .with_ymd_and_hms(2030, 1, 1, 10, 0, 0)
         .single()
         .expect("valid timestamp");
     let rate_limit_snapshot = RateLimitSnapshot {
@@ -9733,6 +9763,17 @@ async fn pilot_bare_command_shows_usage_snapshot() {
 }
 
 #[tokio::test]
+async fn autoresearch_bare_command_shows_usage_snapshot() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.dispatch_command_with_args(InlineCommand::Autoresearch, String::new(), Vec::new());
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = lines_to_single_string(cells.last().expect("autoresearch usage"));
+    assert_snapshot!("autoresearch_usage_history", rendered);
+}
+
+#[tokio::test]
 async fn auto_bare_command_shows_usage_snapshot() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
 
@@ -9760,7 +9801,7 @@ async fn pilot_turn_completion_queues_follow_up_cycle() {
 
     let start_effects =
         chat.slop_fork_ui
-            .on_turn_started(&chat.slop_fork_context(), "turn-pilot-1", false);
+            .on_pilot_turn_started(&chat.slop_fork_context(), "turn-pilot-1", false);
     chat.apply_slop_fork_effects(start_effects);
     chat.on_task_complete_for_turn(Some("turn-pilot-1"), Some("checkpoint".to_string()), false);
 
@@ -9813,7 +9854,7 @@ async fn pilot_wrap_up_from_active_turn_submits_final_cycle() {
     let _ = next_pilot_op(&mut op_rx);
     let start_effects =
         chat.slop_fork_ui
-            .on_turn_started(&chat.slop_fork_context(), "turn-pilot-1", false);
+            .on_pilot_turn_started(&chat.slop_fork_context(), "turn-pilot-1", false);
     chat.apply_slop_fork_effects(start_effects);
 
     chat.dispatch_command_with_args(InlineCommand::Pilot, "wrap-up".to_string(), Vec::new());
@@ -9822,6 +9863,749 @@ async fn pilot_wrap_up_from_active_turn_submits_final_cycle() {
 
     let wrap_up_prompt = next_pilot_op(&mut op_rx);
     assert!(wrap_up_prompt.contains("wrap up now"));
+}
+
+#[tokio::test]
+async fn autoresearch_start_submits_assistant_only_turn() {
+    let codex_home = tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = codex_home.path().to_path_buf();
+    chat.config.cwd = workdir.path().to_path_buf();
+    chat.thread_id = Some(ThreadId::new());
+
+    chat.dispatch_command_with_args(
+        InlineCommand::Autoresearch,
+        "start --max-runs 4 improve benchmark accuracy".to_string(),
+        Vec::new(),
+    );
+
+    drain_insert_history(&mut rx);
+    let prompt = next_autoresearch_op(&mut op_rx);
+    assert!(prompt.contains("improve benchmark accuracy"));
+    assert!(prompt.contains("Autoresearch directive"));
+}
+
+#[tokio::test]
+async fn autoresearch_init_submits_setup_turn() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.thread_id = Some(ThreadId::new());
+
+    chat.dispatch_command_with_args(
+        InlineCommand::Autoresearch,
+        "init create an OCR project with CER < 5%".to_string(),
+        Vec::new(),
+    );
+
+    drain_insert_history(&mut rx);
+    let prompt = next_autoresearch_op(&mut op_rx);
+    assert!(prompt.contains("Autoresearch init directive"));
+    assert!(prompt.contains("Primary Metric"));
+    assert!(prompt.contains("Staged Targets"));
+    assert!(prompt.contains("Exploration Policy"));
+    assert!(prompt.contains("Do not start the autonomous benchmark loop"));
+}
+
+#[tokio::test]
+async fn autoresearch_status_shows_staged_targets_snapshot() {
+    let codex_home = tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    std::fs::write(
+        workdir.path().join("autoresearch.md"),
+        "# Goal\nOptimize latency.\n\n## Staged Targets\n- latency_ms <= 500 ms\n- latency_ms <= 400 ms\n",
+    )
+    .expect("write doc");
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = codex_home.path().to_path_buf();
+    chat.config.cwd = workdir.path().to_path_buf();
+    let thread_id = ThreadId::new();
+    let thread_id_string = thread_id.to_string();
+    chat.thread_id = Some(thread_id);
+
+    let prepared_workspace = AutoresearchWorkspace::prepare(
+        codex_home.path(),
+        thread_id_string.as_str(),
+        workdir.path(),
+    )
+    .expect("prepare workspace");
+    let mut runtime =
+        AutoresearchRuntime::load(codex_home.path(), thread_id_string).expect("load runtime");
+    assert!(
+        runtime
+            .start(
+                "optimize latency".to_string(),
+                workdir.path().to_path_buf(),
+                prepared_workspace.workspace,
+                Some(8),
+                Local::now(),
+            )
+            .expect("start runtime")
+    );
+    let mut journal = AutoresearchJournal::load(workdir.path()).expect("load journal");
+    journal
+        .append_config(
+            "latency".to_string(),
+            "latency_ms".to_string(),
+            "ms".to_string(),
+            MetricDirection::Lower,
+        )
+        .expect("config");
+    journal
+        .append_experiment(AutoresearchExperimentEntry {
+            run: 1,
+            commit: "abc1234".to_string(),
+            metric: Some(480.0),
+            metrics: BTreeMap::new(),
+            status: AutoresearchExperimentStatus::Keep,
+            description: "stage one".to_string(),
+            timestamp: 1,
+            segment: 0,
+        })
+        .expect("experiment");
+
+    chat.dispatch_command_with_args(
+        InlineCommand::Autoresearch,
+        "status".to_string(),
+        Vec::new(),
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = lines_to_single_string(cells.last().expect("autoresearch status"));
+    let normalized = rendered.replace(workdir.path().to_str().expect("workdir"), "/tmp/workdir");
+    assert_snapshot!("autoresearch_status_staged_targets", normalized);
+}
+
+#[tokio::test]
+async fn autoresearch_status_shows_invalid_staged_targets_snapshot() {
+    let codex_home = tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    std::fs::write(
+        workdir.path().join("autoresearch.md"),
+        "# Goal\nOptimize latency.\n\n## Staged Targets\n- latency_ms <= 400 ms\n- latency_ms <= 500 ms\n",
+    )
+    .expect("write doc");
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = codex_home.path().to_path_buf();
+    chat.config.cwd = workdir.path().to_path_buf();
+    let thread_id = ThreadId::new();
+    let thread_id_string = thread_id.to_string();
+    chat.thread_id = Some(thread_id);
+
+    let prepared_workspace = AutoresearchWorkspace::prepare(
+        codex_home.path(),
+        thread_id_string.as_str(),
+        workdir.path(),
+    )
+    .expect("prepare workspace");
+    let mut runtime =
+        AutoresearchRuntime::load(codex_home.path(), thread_id_string).expect("load runtime");
+    assert!(
+        runtime
+            .start(
+                "optimize latency".to_string(),
+                workdir.path().to_path_buf(),
+                prepared_workspace.workspace,
+                Some(8),
+                Local::now(),
+            )
+            .expect("start runtime")
+    );
+    let mut journal = AutoresearchJournal::load(workdir.path()).expect("load journal");
+    journal
+        .append_config(
+            "latency".to_string(),
+            "latency_ms".to_string(),
+            "ms".to_string(),
+            MetricDirection::Lower,
+        )
+        .expect("config");
+    journal
+        .append_experiment(AutoresearchExperimentEntry {
+            run: 1,
+            commit: "abc1234".to_string(),
+            metric: Some(450.0),
+            metrics: BTreeMap::new(),
+            status: AutoresearchExperimentStatus::Keep,
+            description: "bad stage order".to_string(),
+            timestamp: 1,
+            segment: 0,
+        })
+        .expect("experiment");
+
+    chat.dispatch_command_with_args(
+        InlineCommand::Autoresearch,
+        "status".to_string(),
+        Vec::new(),
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = lines_to_single_string(cells.last().expect("autoresearch status"));
+    let normalized = rendered.replace(workdir.path().to_str().expect("workdir"), "/tmp/workdir");
+    assert_snapshot!("autoresearch_status_invalid_staged_targets", normalized);
+}
+
+#[tokio::test]
+async fn autoresearch_status_shows_queued_discovery_snapshot() {
+    let codex_home = tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = codex_home.path().to_path_buf();
+    chat.config.cwd = workdir.path().to_path_buf();
+    let thread_id = ThreadId::new();
+    let thread_id_string = thread_id.to_string();
+    chat.thread_id = Some(thread_id);
+
+    let prepared_workspace = AutoresearchWorkspace::prepare(
+        codex_home.path(),
+        thread_id_string.as_str(),
+        workdir.path(),
+    )
+    .expect("prepare workspace");
+    let mut runtime =
+        AutoresearchRuntime::load(codex_home.path(), thread_id_string).expect("load runtime");
+    assert!(
+        runtime
+            .start(
+                "optimize OCR latency".to_string(),
+                workdir.path().to_path_buf(),
+                prepared_workspace.workspace,
+                Some(8),
+                Local::now(),
+            )
+            .expect("start runtime")
+    );
+    runtime
+        .request_discovery(
+            AutoresearchDiscoveryReason::ArchitectureSearch,
+            Some("radical OCR architectures".to_string()),
+            Local::now(),
+        )
+        .expect("request discovery");
+
+    chat.dispatch_command_with_args(
+        InlineCommand::Autoresearch,
+        "status".to_string(),
+        Vec::new(),
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = lines_to_single_string(cells.last().expect("autoresearch status"));
+    let normalized = rendered.replace(workdir.path().to_str().expect("workdir"), "/tmp/workdir");
+    assert_snapshot!("autoresearch_status_queued_discovery", normalized);
+}
+
+#[tokio::test]
+async fn autoresearch_status_shows_invalid_staged_targets_while_idle() {
+    let codex_home = tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    std::fs::write(
+        workdir.path().join("autoresearch.md"),
+        "# Goal\nOptimize latency.\n\n## Primary Metric\n- Name: latency_ms\n- Unit: ms\n- Direction: lower\n\n## Staged Targets\n- latency_ms <= 400 ms\n- latency_ms <= 500 ms\n",
+    )
+    .expect("write doc");
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = codex_home.path().to_path_buf();
+    chat.config.cwd = workdir.path().to_path_buf();
+    chat.thread_id = Some(ThreadId::new());
+
+    chat.dispatch_command_with_args(
+        InlineCommand::Autoresearch,
+        "status".to_string(),
+        Vec::new(),
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = lines_to_single_string(cells.last().expect("autoresearch status"));
+    assert!(rendered.contains("Status: idle"));
+    assert!(rendered.contains("Staged targets: invalid"));
+    assert!(rendered.contains("ordered from easier to harder on `latency_ms`"));
+}
+
+#[tokio::test]
+async fn autoresearch_init_rejects_running_session() {
+    let codex_home = tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = codex_home.path().to_path_buf();
+    chat.config.cwd = workdir.path().to_path_buf();
+    let thread_id = ThreadId::new();
+    let thread_id_string = thread_id.to_string();
+    chat.thread_id = Some(thread_id);
+
+    let prepared_workspace = AutoresearchWorkspace::prepare(
+        codex_home.path(),
+        thread_id_string.as_str(),
+        workdir.path(),
+    )
+    .expect("prepare workspace");
+    let mut runtime =
+        AutoresearchRuntime::load(codex_home.path(), thread_id_string).expect("load runtime");
+    assert!(
+        runtime
+            .start(
+                "improve benchmark accuracy".to_string(),
+                workdir.path().to_path_buf(),
+                prepared_workspace.workspace,
+                Some(4),
+                Local::now(),
+            )
+            .expect("start runtime")
+    );
+
+    chat.dispatch_command_with_args(
+        InlineCommand::Autoresearch,
+        "init create an OCR project with CER < 5%".to_string(),
+        Vec::new(),
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = lines_to_single_string(cells.last().expect("autoresearch init rejection"));
+    assert!(rendered.contains(
+        "Pause, stop, or finish the current autoresearch session before running $autoresearch init."
+    ));
+    assert_eq!(op_rx.try_recv(), Err(TryRecvError::Empty));
+}
+
+#[tokio::test]
+async fn autoresearch_turn_completion_queues_follow_up_cycle() {
+    let codex_home = tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = codex_home.path().to_path_buf();
+    chat.config.cwd = workdir.path().to_path_buf();
+    chat.thread_id = Some(ThreadId::new());
+
+    chat.dispatch_command_with_args(
+        InlineCommand::Autoresearch,
+        "start --max-runs 4 improve benchmark accuracy".to_string(),
+        Vec::new(),
+    );
+    drain_insert_history(&mut rx);
+    let _ = next_autoresearch_op(&mut op_rx);
+
+    let start_effects = chat.slop_fork_ui.on_autoresearch_turn_started(
+        &chat.slop_fork_context(),
+        "turn-autoresearch-1",
+        false,
+    );
+    chat.apply_slop_fork_effects(start_effects);
+    chat.on_task_complete_for_turn(
+        Some("turn-autoresearch-1"),
+        Some("checkpoint".to_string()),
+        false,
+    );
+
+    let follow_up_prompt = next_autoresearch_op(&mut op_rx);
+    assert!(follow_up_prompt.contains("improve benchmark accuracy"));
+}
+
+#[tokio::test]
+async fn autoresearch_pause_during_active_turn_does_not_queue_follow_up_cycle() {
+    let codex_home = tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = codex_home.path().to_path_buf();
+    chat.config.cwd = workdir.path().to_path_buf();
+    chat.thread_id = Some(ThreadId::new());
+
+    chat.dispatch_command_with_args(
+        InlineCommand::Autoresearch,
+        "start --max-runs 4 improve benchmark accuracy".to_string(),
+        Vec::new(),
+    );
+    drain_insert_history(&mut rx);
+    let _ = next_autoresearch_op(&mut op_rx);
+
+    let start_effects = chat.slop_fork_ui.on_autoresearch_turn_started(
+        &chat.slop_fork_context(),
+        "turn-autoresearch-1",
+        false,
+    );
+    chat.apply_slop_fork_effects(start_effects);
+
+    chat.dispatch_command_with_args(InlineCommand::Autoresearch, "pause".to_string(), Vec::new());
+    drain_insert_history(&mut rx);
+    chat.on_task_complete_for_turn(
+        Some("turn-autoresearch-1"),
+        Some("checkpoint".to_string()),
+        false,
+    );
+
+    assert_no_autoresearch_op(&mut op_rx);
+}
+
+async fn assert_autoresearch_prestart_control_preserves_turn_start(
+    control: &str,
+    expected_status: AutoresearchStatus,
+) {
+    let codex_home = tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let thread_id = ThreadId::new();
+    let thread_id_string = thread_id.to_string();
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = codex_home.path().to_path_buf();
+    chat.config.cwd = workdir.path().to_path_buf();
+    chat.thread_id = Some(thread_id);
+
+    chat.dispatch_command_with_args(
+        InlineCommand::Autoresearch,
+        "start --max-runs 4 improve benchmark accuracy".to_string(),
+        Vec::new(),
+    );
+    drain_insert_history(&mut rx);
+    let _ = next_autoresearch_op(&mut op_rx);
+
+    chat.dispatch_command_with_args(InlineCommand::Autoresearch, control.to_string(), Vec::new());
+    drain_insert_history(&mut rx);
+    assert!(
+        AutoresearchRuntime::load(codex_home.path(), thread_id_string.as_str())
+            .unwrap()
+            .has_pending_turn_start()
+    );
+
+    let start_effects = chat.slop_fork_ui.on_autoresearch_turn_started(
+        &chat.slop_fork_context(),
+        "turn-autoresearch-1",
+        false,
+    );
+    chat.apply_slop_fork_effects(start_effects);
+    let active_state = AutoresearchRuntime::load(codex_home.path(), thread_id_string.as_str())
+        .unwrap()
+        .state()
+        .cloned()
+        .expect("runtime state after pre-start control turn start");
+    assert_eq!(
+        active_state.active_turn_id.as_deref(),
+        Some("turn-autoresearch-1")
+    );
+
+    chat.on_task_complete_for_turn(
+        Some("turn-autoresearch-1"),
+        Some("checkpoint".to_string()),
+        false,
+    );
+    let completed_state = AutoresearchRuntime::load(codex_home.path(), thread_id_string.as_str())
+        .unwrap()
+        .state()
+        .cloned()
+        .expect("runtime state after pre-start control turn completion");
+    assert_eq!(completed_state.status, expected_status);
+    assert_eq!(
+        completed_state.last_cycle_summary.as_deref(),
+        Some("checkpoint")
+    );
+    assert_no_autoresearch_op(&mut op_rx);
+}
+
+#[tokio::test]
+async fn autoresearch_pause_before_turn_start_preserves_turn_ownership() {
+    assert_autoresearch_prestart_control_preserves_turn_start("pause", AutoresearchStatus::Paused)
+        .await;
+}
+
+#[tokio::test]
+async fn autoresearch_stop_before_turn_start_preserves_turn_ownership() {
+    assert_autoresearch_prestart_control_preserves_turn_start(
+        "stop",
+        AutoresearchStatus::Completed,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn autoresearch_wrap_up_from_active_turn_submits_final_cycle() {
+    let codex_home = tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = codex_home.path().to_path_buf();
+    chat.config.cwd = workdir.path().to_path_buf();
+    chat.thread_id = Some(ThreadId::new());
+
+    chat.dispatch_command_with_args(
+        InlineCommand::Autoresearch,
+        "start --max-runs 4 improve benchmark accuracy".to_string(),
+        Vec::new(),
+    );
+    drain_insert_history(&mut rx);
+    let _ = next_autoresearch_op(&mut op_rx);
+
+    let start_effects = chat.slop_fork_ui.on_autoresearch_turn_started(
+        &chat.slop_fork_context(),
+        "turn-autoresearch-1",
+        false,
+    );
+    chat.apply_slop_fork_effects(start_effects);
+
+    chat.dispatch_command_with_args(
+        InlineCommand::Autoresearch,
+        "wrap-up".to_string(),
+        Vec::new(),
+    );
+    drain_insert_history(&mut rx);
+    chat.on_task_complete_for_turn(
+        Some("turn-autoresearch-1"),
+        Some("checkpoint".to_string()),
+        false,
+    );
+
+    let wrap_up_prompt = next_autoresearch_op(&mut op_rx);
+    assert!(wrap_up_prompt.contains("wrap up now"));
+}
+
+#[tokio::test]
+async fn autoresearch_max_runs_completion_submits_wrap_up_cycle() {
+    let codex_home = tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = codex_home.path().to_path_buf();
+    chat.config.cwd = workdir.path().to_path_buf();
+    chat.thread_id = Some(ThreadId::new());
+
+    chat.dispatch_command_with_args(
+        InlineCommand::Autoresearch,
+        "start --max-runs 1 improve benchmark accuracy".to_string(),
+        Vec::new(),
+    );
+    drain_insert_history(&mut rx);
+    let _ = next_autoresearch_op(&mut op_rx);
+
+    let start_effects = chat.slop_fork_ui.on_autoresearch_turn_started(
+        &chat.slop_fork_context(),
+        "turn-autoresearch-1",
+        false,
+    );
+    chat.apply_slop_fork_effects(start_effects);
+    chat.on_task_complete_for_turn(
+        Some("turn-autoresearch-1"),
+        Some("checkpoint".to_string()),
+        false,
+    );
+
+    let wrap_up_prompt = next_autoresearch_op(&mut op_rx);
+    assert!(wrap_up_prompt.contains("wrap up now"));
+}
+
+#[tokio::test]
+async fn unrelated_turn_start_does_not_emit_autoresearch_error_without_session() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.handle_codex_event(Event {
+        id: "turn-1".into(),
+        msg: EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "turn-1".to_string(),
+            model_context_window: None,
+            collaboration_mode_kind: ModeKind::Default,
+        }),
+    });
+
+    assert_matches!(rx.try_recv(), Err(TryRecvError::Empty));
+}
+
+#[tokio::test]
+async fn autoresearch_turn_started_recovers_after_session_reconfigure() {
+    let codex_home = tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = codex_home.path().to_path_buf();
+    chat.config.cwd = workdir.path().to_path_buf();
+    chat.thread_id = Some(ThreadId::new());
+
+    chat.dispatch_command_with_args(
+        InlineCommand::Autoresearch,
+        "start --max-runs 4 improve benchmark accuracy".to_string(),
+        Vec::new(),
+    );
+    drain_insert_history(&mut rx);
+    let _ = next_autoresearch_op(&mut op_rx);
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+
+    let start_effects = chat.slop_fork_ui.on_autoresearch_turn_started(
+        &chat.slop_fork_context(),
+        "turn-autoresearch-1",
+        false,
+    );
+    chat.apply_slop_fork_effects(start_effects);
+    chat.on_task_complete_for_turn(
+        Some("turn-autoresearch-1"),
+        Some("checkpoint".to_string()),
+        false,
+    );
+
+    let follow_up_prompt = next_autoresearch_op(&mut op_rx);
+    assert!(follow_up_prompt.contains("improve benchmark accuracy"));
+}
+
+#[tokio::test]
+async fn autoresearch_turn_started_recovers_after_fresh_client_reconnect() {
+    let codex_home = tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let thread_id = ThreadId::new();
+
+    let (mut first_chat, mut first_rx, mut first_op_rx) = make_chatwidget_manual(None).await;
+    first_chat.config.codex_home = codex_home.path().to_path_buf();
+    first_chat.config.cwd = workdir.path().to_path_buf();
+    first_chat.thread_id = Some(thread_id);
+
+    first_chat.dispatch_command_with_args(
+        InlineCommand::Autoresearch,
+        "start --max-runs 4 improve benchmark accuracy".to_string(),
+        Vec::new(),
+    );
+    drain_insert_history(&mut first_rx);
+    let _ = next_autoresearch_op(&mut first_op_rx);
+
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = codex_home.path().to_path_buf();
+    chat.config.cwd = workdir.path().to_path_buf();
+    chat.thread_id = Some(thread_id);
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+
+    let start_effects = chat.slop_fork_ui.on_autoresearch_turn_started(
+        &chat.slop_fork_context(),
+        "turn-autoresearch-1",
+        false,
+    );
+    chat.apply_slop_fork_effects(start_effects);
+    chat.on_task_complete_for_turn(
+        Some("turn-autoresearch-1"),
+        Some("checkpoint".to_string()),
+        false,
+    );
+
+    let follow_up_prompt = next_autoresearch_op(&mut op_rx);
+    assert!(follow_up_prompt.contains("improve benchmark accuracy"));
+    assert_matches!(rx.try_recv(), Err(TryRecvError::Empty));
+}
+
+#[tokio::test]
+async fn autoresearch_session_reconfigure_does_not_claim_pending_turn_after_other_controller_turn()
+{
+    let codex_home = tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let thread_id = ThreadId::new();
+
+    let (mut first_chat, mut first_rx, mut first_op_rx) = make_chatwidget_manual(None).await;
+    first_chat.config.codex_home = codex_home.path().to_path_buf();
+    first_chat.config.cwd = workdir.path().to_path_buf();
+    first_chat.thread_id = Some(thread_id);
+
+    first_chat.dispatch_command_with_args(
+        InlineCommand::Autoresearch,
+        "start --max-runs 4 improve benchmark accuracy".to_string(),
+        Vec::new(),
+    );
+    drain_insert_history(&mut first_rx);
+    let _ = next_autoresearch_op(&mut first_op_rx);
+
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = codex_home.path().to_path_buf();
+    chat.config.cwd = workdir.path().to_path_buf();
+    chat.thread_id = Some(thread_id);
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+    chat.dispatch_command_with_args(
+        InlineCommand::Pilot,
+        "start review benchmark regressions".to_string(),
+        Vec::new(),
+    );
+    let _ = next_pilot_op(&mut op_rx);
+
+    let start_effects = chat.slop_fork_ui.on_autoresearch_turn_started(
+        &chat.slop_fork_context(),
+        "turn-pilot-1",
+        false,
+    );
+    chat.apply_slop_fork_effects(start_effects);
+    chat.on_task_complete_for_turn(Some("turn-pilot-1"), Some("pilot".to_string()), false);
+
+    assert_no_autoresearch_op(&mut op_rx);
+}
+
+async fn assert_recovered_autoresearch_control_does_not_claim_other_controller_turn(control: &str) {
+    let codex_home = tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let thread_id = ThreadId::new();
+    let thread_id_string = thread_id.to_string();
+
+    let (mut first_chat, mut first_rx, mut first_op_rx) = make_chatwidget_manual(None).await;
+    first_chat.config.codex_home = codex_home.path().to_path_buf();
+    first_chat.config.cwd = workdir.path().to_path_buf();
+    first_chat.thread_id = Some(thread_id);
+
+    first_chat.dispatch_command_with_args(
+        InlineCommand::Autoresearch,
+        "start --max-runs 4 improve benchmark accuracy".to_string(),
+        Vec::new(),
+    );
+    drain_insert_history(&mut first_rx);
+    let _ = next_autoresearch_op(&mut first_op_rx);
+
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = codex_home.path().to_path_buf();
+    chat.config.cwd = workdir.path().to_path_buf();
+    chat.thread_id = Some(thread_id);
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+
+    chat.dispatch_command_with_args(InlineCommand::Autoresearch, control.to_string(), Vec::new());
+    drain_insert_history(&mut rx);
+    assert!(
+        AutoresearchRuntime::load(codex_home.path(), thread_id_string.as_str())
+            .unwrap()
+            .has_pending_turn_start()
+    );
+
+    chat.dispatch_command_with_args(
+        InlineCommand::Pilot,
+        "start review benchmark regressions".to_string(),
+        Vec::new(),
+    );
+    drain_insert_history(&mut rx);
+    let _ = next_pilot_op(&mut op_rx);
+
+    let start_effects = chat.slop_fork_ui.on_autoresearch_turn_started(
+        &chat.slop_fork_context(),
+        "turn-pilot-1",
+        false,
+    );
+    chat.apply_slop_fork_effects(start_effects);
+    let state_after_turn_start =
+        AutoresearchRuntime::load(codex_home.path(), thread_id_string.as_str())
+            .unwrap()
+            .state()
+            .cloned()
+            .expect("runtime state after unrelated turn start");
+    assert_ne!(
+        state_after_turn_start.active_turn_id.as_deref(),
+        Some("turn-pilot-1")
+    );
+    chat.on_task_complete_for_turn(Some("turn-pilot-1"), Some("pilot".to_string()), false);
+
+    assert_no_autoresearch_op(&mut op_rx);
+}
+
+#[tokio::test]
+async fn autoresearch_pause_after_reconnect_does_not_claim_other_controller_turn() {
+    assert_recovered_autoresearch_control_does_not_claim_other_controller_turn("pause").await;
+}
+
+#[tokio::test]
+async fn autoresearch_stop_after_reconnect_does_not_claim_other_controller_turn() {
+    assert_recovered_autoresearch_control_does_not_claim_other_controller_turn("stop").await;
 }
 
 #[tokio::test]
@@ -9882,6 +10666,137 @@ async fn pilot_start_recovers_from_stopped_stale_active_turn_state() {
 
     drain_insert_history(&mut rx);
     let prompt = next_pilot_op(&mut op_rx);
+    assert!(prompt.contains("new goal"));
+}
+
+#[tokio::test]
+async fn autoresearch_start_recovers_from_stopped_stale_active_turn_state() {
+    let codex_home = tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let thread_id = ThreadId::new();
+    let thread_id_string = thread_id.to_string();
+    let prepared_workspace = AutoresearchWorkspace::prepare(
+        codex_home.path(),
+        thread_id_string.as_str(),
+        workdir.path(),
+    )
+    .expect("prepare workspace");
+    let mut runtime =
+        AutoresearchRuntime::load(codex_home.path(), thread_id_string).expect("load runtime");
+
+    assert!(
+        runtime
+            .start(
+                "old goal".to_string(),
+                workdir.path().to_path_buf(),
+                prepared_workspace.workspace,
+                Some(4),
+                Local::now(),
+            )
+            .unwrap()
+    );
+    let _ = runtime
+        .prepare_cycle_submission(Local::now())
+        .unwrap()
+        .expect("autoresearch cycle should be prepared");
+    assert!(runtime.note_turn_submitted("turn-autoresearch-1").unwrap());
+    assert!(
+        runtime
+            .activate_pending_cycle("turn-autoresearch-1".to_string())
+            .unwrap()
+    );
+    assert!(runtime.stop().unwrap());
+
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = codex_home.path().to_path_buf();
+    chat.config.cwd = workdir.path().to_path_buf();
+    chat.thread_id = Some(thread_id);
+
+    chat.dispatch_command_with_args(
+        InlineCommand::Autoresearch,
+        "start new goal".to_string(),
+        Vec::new(),
+    );
+
+    drain_insert_history(&mut rx);
+    let prompt = next_autoresearch_op(&mut op_rx);
+    assert!(prompt.contains("new goal"));
+}
+
+#[tokio::test]
+async fn autoresearch_status_recovers_stopped_submitted_turn_after_reconnect() {
+    let codex_home = tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let thread_id = ThreadId::new();
+    let thread_id_string = thread_id.to_string();
+    let prepared_workspace = AutoresearchWorkspace::prepare(
+        codex_home.path(),
+        thread_id_string.as_str(),
+        workdir.path(),
+    )
+    .expect("prepare workspace");
+    let mut runtime =
+        AutoresearchRuntime::load(codex_home.path(), thread_id_string.as_str()).unwrap();
+
+    assert!(
+        runtime
+            .start(
+                "old goal".to_string(),
+                workdir.path().to_path_buf(),
+                prepared_workspace.workspace,
+                Some(4),
+                Local::now(),
+            )
+            .unwrap()
+    );
+    let _ = runtime
+        .prepare_cycle_submission(Local::now())
+        .unwrap()
+        .expect("autoresearch cycle should be prepared");
+    assert!(runtime.note_submission_dispatched().unwrap());
+    assert!(runtime.stop().unwrap());
+    assert!(runtime.has_pending_turn_start());
+
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = codex_home.path().to_path_buf();
+    chat.config.cwd = workdir.path().to_path_buf();
+    chat.thread_id = Some(thread_id);
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+
+    chat.dispatch_command_with_args(
+        InlineCommand::Autoresearch,
+        "status".to_string(),
+        Vec::new(),
+    );
+    let status_cells = drain_insert_history(&mut rx);
+    let status_rendered = lines_to_single_string(status_cells.last().expect("status output"));
+    assert!(status_rendered.contains("Status: stopped"));
+    let recovered_state = AutoresearchRuntime::load(codex_home.path(), thread_id_string.as_str())
+        .unwrap()
+        .state()
+        .cloned()
+        .expect("runtime state after stale recovery");
+    assert_eq!(recovered_state.pending_cycle_kind, None);
+    assert_eq!(recovered_state.submission_dispatched_at, None);
+    assert_eq!(recovered_state.active_cycle_kind, None);
+    assert_eq!(recovered_state.active_turn_id, None);
+    assert_eq!(recovered_state.last_submitted_turn_id, None);
+    assert_eq!(
+        recovered_state.status_message.as_deref(),
+        Some("Autoresearch cleared stale cycle state after the thread became idle.")
+    );
+
+    chat.dispatch_command_with_args(
+        InlineCommand::Autoresearch,
+        "start new goal".to_string(),
+        Vec::new(),
+    );
+    drain_insert_history(&mut rx);
+    let prompt = next_autoresearch_op(&mut op_rx);
     assert!(prompt.contains("new goal"));
 }
 

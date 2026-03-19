@@ -4,6 +4,11 @@ use crate::models_manager::manager::ModelsManager;
 use crate::models_manager::model_info::with_config_overrides;
 use crate::shell::Shell;
 use crate::shell::ShellType;
+use crate::slop_fork::autoresearch::tools::AUTORESEARCH_INIT_TOOL;
+use crate::slop_fork::autoresearch::tools::AUTORESEARCH_LOG_DISCOVERY_TOOL;
+use crate::slop_fork::autoresearch::tools::AUTORESEARCH_LOG_TOOL;
+use crate::slop_fork::autoresearch::tools::AUTORESEARCH_REQUEST_DISCOVERY_TOOL;
+use crate::slop_fork::autoresearch::tools::AUTORESEARCH_RUN_TOOL;
 use crate::tools::ToolRouter;
 use crate::tools::registry::ConfiguredToolSpec;
 use crate::tools::router::ToolRouterParams;
@@ -428,7 +433,8 @@ fn test_full_toolset_specs_for_gpt5_codex_unified_exec_web_search() {
         session_source: SessionSource::Cli,
         sandbox_policy: &SandboxPolicy::DangerFullAccess,
         windows_sandbox_level: WindowsSandboxLevel::Disabled,
-    });
+    })
+    .with_slop_fork_autoresearch_tools(true);
     let (tools, _) = build_specs(&config, None, None, &[]).build();
 
     // Build actual map name -> spec
@@ -463,6 +469,11 @@ fn test_full_toolset_specs_for_gpt5_codex_unified_exec_web_search() {
             search_content_types: None,
         },
         create_view_image_tool(config.can_request_original_image_detail),
+        AUTORESEARCH_INIT_TOOL.clone(),
+        AUTORESEARCH_RUN_TOOL.clone(),
+        AUTORESEARCH_LOG_TOOL.clone(),
+        AUTORESEARCH_REQUEST_DISCOVERY_TOOL.clone(),
+        AUTORESEARCH_LOG_DISCOVERY_TOOL.clone(),
         create_spawn_agent_tool(&config),
         create_send_input_tool(),
         create_resume_agent_tool(),
@@ -1388,6 +1399,54 @@ fn test_gpt_5_1_codex_max_unified_exec_web_search() {
             "wait_agent",
             "close_agent",
         ],
+    );
+}
+
+#[test]
+fn test_build_specs_hide_autoresearch_tools_by_default() {
+    let config = test_config();
+    let model_info = ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);
+    let features = Features::with_defaults();
+    let available_models = Vec::new();
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::Cli,
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    });
+
+    let (tools, _) = build_specs(&tools_config, None, None, &[]).build();
+
+    assert_lacks_tool_name(&tools, "autoresearch_init");
+    assert_lacks_tool_name(&tools, "autoresearch_run");
+    assert_lacks_tool_name(&tools, "autoresearch_log");
+}
+
+#[test]
+fn test_build_specs_can_enable_autoresearch_tools() {
+    let config = test_config();
+    let model_info = ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);
+    let features = Features::with_defaults();
+    let available_models = Vec::new();
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::Cli,
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    })
+    .with_slop_fork_autoresearch_tools(true);
+
+    let (tools, _) = build_specs(&tools_config, None, None, &[]).build();
+
+    assert_contains_tool_names(
+        &tools,
+        &["autoresearch_init", "autoresearch_run", "autoresearch_log"],
     );
 }
 

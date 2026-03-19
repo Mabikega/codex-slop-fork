@@ -195,13 +195,18 @@ use crate::slash_command::SlashCommand;
 use crate::slop_fork::auto_command_first_token;
 use crate::slop_fork::auto_command_mention_item;
 use crate::slop_fork::auto_command_requires_idle_session;
+use crate::slop_fork::autoresearch_command_first_token;
+use crate::slop_fork::autoresearch_command_mention_item;
 use crate::slop_fork::parse_auto_command_args;
+use crate::slop_fork::parse_autoresearch_command_args;
 use crate::slop_fork::parse_pilot_command_args;
 use crate::slop_fork::pilot_command_first_token;
 use crate::slop_fork::pilot_command_mention_item;
 use crate::slop_fork::should_dispatch_auto_command;
+use crate::slop_fork::should_dispatch_autoresearch_command;
 use crate::slop_fork::should_dispatch_pilot_command;
 use crate::slop_fork::should_record_auto_command_in_history;
+use crate::slop_fork::should_record_autoresearch_command_in_history;
 use crate::slop_fork::should_record_pilot_command_in_history;
 use crate::style::user_message_style;
 use codex_protocol::custom_prompts::CustomPrompt;
@@ -261,6 +266,7 @@ fn user_input_too_large_message(actual_chars: usize) -> String {
 pub enum InlineCommand {
     Slash(SlashCommand),
     Auto,
+    Autoresearch,
     Pilot,
 }
 
@@ -2267,6 +2273,16 @@ impl ChatComposer {
         should_dispatch_pilot_command(first_token, self.mention_binding_path_for_range(range))
     }
 
+    fn should_dispatch_autoresearch_dollar_command(&self, text: &str) -> bool {
+        let Some((first_token, range)) = autoresearch_command_first_token(text) else {
+            return false;
+        };
+        should_dispatch_autoresearch_command(
+            first_token,
+            self.mention_binding_path_for_range(range),
+        )
+    }
+
     fn snapshot_mention_bindings(&self) -> Vec<MentionBinding> {
         let mut ordered = Vec::new();
         for (id, mention) in self.current_mention_elements() {
@@ -2572,6 +2588,31 @@ impl ChatComposer {
                     .to_string();
                 return (
                     InputResult::CommandWithArgs(InlineCommand::Pilot, args, Vec::new()),
+                    true,
+                );
+            }
+
+            self.set_text_content_with_mention_bindings(
+                original_input,
+                original_text_elements,
+                original_local_image_paths,
+                original_mention_bindings,
+            );
+            self.pending_pastes = original_pending_pastes;
+            return (InputResult::None, true);
+        }
+
+        if self.should_dispatch_autoresearch_dollar_command(&original_input) {
+            let record_history = parse_autoresearch_command_args(&original_input)
+                .is_some_and(should_record_autoresearch_command_in_history);
+            if let Some((prepared_text, _prepared_elements)) =
+                self.prepare_submission_text(record_history)
+            {
+                let args = parse_autoresearch_command_args(&prepared_text)
+                    .unwrap_or_default()
+                    .to_string();
+                return (
+                    InputResult::CommandWithArgs(InlineCommand::Autoresearch, args, Vec::new()),
                     true,
                 );
             }
@@ -3675,6 +3716,7 @@ impl ChatComposer {
         let mut mentions = Vec::new();
 
         mentions.push(auto_command_mention_item());
+        mentions.push(autoresearch_command_mention_item());
         mentions.push(pilot_command_mention_item());
 
         if let Some(skills) = self.skills.as_ref() {
@@ -4603,6 +4645,7 @@ impl Drop for ChatComposer {
 mod tests {
     use super::*;
     use crate::slop_fork::AUTO_COMMAND_MENTION_PATH;
+    use crate::slop_fork::AUTORESEARCH_COMMAND_MENTION_PATH;
     use crate::slop_fork::PILOT_COMMAND_MENTION_PATH;
     use image::ImageBuffer;
     use image::Rgba;
@@ -7944,6 +7987,40 @@ mod tests {
     }
 
     #[test]
+    fn bound_autoresearch_command_dispatches_autoresearch_dollar_command() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        composer.set_text_content_with_mention_bindings(
+            "$autoresearch status".to_string(),
+            Vec::new(),
+            Vec::new(),
+            vec![MentionBinding {
+                mention: "autoresearch".to_string(),
+                path: AUTORESEARCH_COMMAND_MENTION_PATH.to_string(),
+            }],
+        );
+
+        let (result, _) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            result,
+            InputResult::CommandWithArgs(
+                InlineCommand::Autoresearch,
+                "status".to_string(),
+                Vec::new(),
+            )
+        );
+    }
+
+    #[test]
     fn model_driving_auto_dollar_command_is_recalled_by_history_navigation() {
         let (tx, _rx) = unbounded_channel::<AppEvent>();
         let sender = AppEventSender::new(tx);
@@ -8062,6 +8139,99 @@ mod tests {
 
         let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         assert_eq!(composer.current_text(), command);
+    }
+
+    #[test]
+    fn model_driving_autoresearch_dollar_command_is_recalled_by_history_navigation() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        let command = "$autoresearch start --max-runs 5 improve benchmark accuracy".to_string();
+        composer.set_text_content(command.clone(), Vec::new(), Vec::new());
+
+        let (result, _) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            result,
+            InputResult::CommandWithArgs(
+                InlineCommand::Autoresearch,
+                "start --max-runs 5 improve benchmark accuracy".to_string(),
+                Vec::new(),
+            )
+        );
+        assert!(composer.current_text().is_empty());
+
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(composer.current_text(), command);
+    }
+
+    #[test]
+    fn autoresearch_init_dollar_command_is_recalled_by_history_navigation() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        let command = "$autoresearch init create an OCR project".to_string();
+        composer.set_text_content(command.clone(), Vec::new(), Vec::new());
+
+        let (result, _) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            result,
+            InputResult::CommandWithArgs(
+                InlineCommand::Autoresearch,
+                "init create an OCR project".to_string(),
+                Vec::new(),
+            )
+        );
+        assert!(composer.current_text().is_empty());
+
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(composer.current_text(), command);
+    }
+
+    #[test]
+    fn non_model_driving_autoresearch_dollar_command_is_not_recalled_by_history_navigation() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        composer.set_text_content("$autoresearch status".to_string(), Vec::new(), Vec::new());
+
+        let (result, _) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            result,
+            InputResult::CommandWithArgs(
+                InlineCommand::Autoresearch,
+                "status".to_string(),
+                Vec::new(),
+            )
+        );
+        assert!(composer.current_text().is_empty());
+
+        let (result, _) = composer.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(result, InputResult::None);
+        assert!(composer.current_text().is_empty());
     }
 
     #[test]

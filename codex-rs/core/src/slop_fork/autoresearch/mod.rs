@@ -1,0 +1,37 @@
+mod discovery;
+mod journal;
+mod runtime;
+mod stages;
+pub mod tools;
+mod workspace;
+
+pub use discovery::AutoresearchDiscoveryReason;
+pub use discovery::AutoresearchDiscoveryRequest;
+pub use discovery::build_discovery_prompt;
+pub use journal::AutoresearchConfigEntry;
+pub use journal::AutoresearchDiscoveryEntry;
+pub use journal::AutoresearchExperimentEntry;
+pub use journal::AutoresearchExperimentStatus;
+pub use journal::AutoresearchJournal;
+pub use journal::AutoresearchJournalSummary;
+pub use journal::MetricDirection;
+pub use runtime::AutoresearchCycleKind;
+pub use runtime::AutoresearchCyclePlan;
+pub use runtime::AutoresearchRunState;
+pub use runtime::AutoresearchRuntime;
+pub use runtime::AutoresearchStatus;
+pub use runtime::PendingRunResult;
+pub use runtime::build_init_prompt;
+pub use runtime::clear_thread_state;
+pub use stages::AutoresearchStageProgress;
+pub use stages::AutoresearchStageTarget;
+pub use stages::load_stage_progress;
+pub use workspace::AutoresearchWorkspace;
+pub use workspace::AutoresearchWorkspaceMode;
+pub use workspace::PreparedAutoresearchWorkspace;
+
+pub const AUTORESEARCH_JOURNAL_FILE: &str = "autoresearch.jsonl";
+pub const AUTORESEARCH_DOC_FILE: &str = "autoresearch.md";
+pub const AUTORESEARCH_SCRIPT_FILE: &str = "autoresearch.sh";
+pub const AUTORESEARCH_CHECKS_FILE: &str = "autoresearch.checks.sh";
+pub const AUTORESEARCH_IDEAS_FILE: &str = "autoresearch.ideas.md";

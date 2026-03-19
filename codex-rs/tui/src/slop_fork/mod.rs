@@ -1,4 +1,5 @@
 mod auto_command;
+mod autoresearch_command;
 mod event;
 mod external_auth;
 mod login_settings_view;
@@ -16,6 +17,13 @@ pub(crate) use auto_command::first_token as auto_command_first_token;
 pub(crate) use auto_command::parse_auto_command_args;
 pub(crate) use auto_command::should_dispatch_auto_command;
 pub(crate) use auto_command::should_record_auto_command_in_history;
+#[cfg(test)]
+pub(crate) use autoresearch_command::AUTORESEARCH_COMMAND_MENTION_PATH;
+pub(crate) use autoresearch_command::autoresearch_command_mention_item;
+pub(crate) use autoresearch_command::first_token as autoresearch_command_first_token;
+pub(crate) use autoresearch_command::parse_autoresearch_command_args;
+pub(crate) use autoresearch_command::should_dispatch_autoresearch_command;
+pub(crate) use autoresearch_command::should_record_autoresearch_command_in_history;
 #[cfg(test)]
 pub(crate) use event::LoginFlowKind;
 pub(crate) use event::LoginPopupKind;

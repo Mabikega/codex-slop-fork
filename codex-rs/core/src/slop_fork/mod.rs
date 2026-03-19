@@ -3,6 +3,7 @@ mod account_switching;
 pub mod auth_accounts;
 mod auth_sync;
 pub mod automation;
+pub mod autoresearch;
 mod config;
 pub mod pilot;
 mod saved_account_auth;

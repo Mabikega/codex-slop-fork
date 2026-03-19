@@ -1288,58 +1288,90 @@ impl SlopForkUi {
                 );
                 let format_reset = |kind: account_rate_limits::QuotaWindowKind,
                                     seconds: Option<i64>| {
-                    let untouched_reset_at =
-                        account_rate_limits::quota_window_reset_at_if_untouched(
-                            snapshot, kind, now,
-                        );
-                    let is_untouched = untouched_reset_at.is_some();
-                    untouched_reset_at
-                        .or_else(|| {
-                            seconds.and_then(|seconds| DateTime::<Utc>::from_timestamp(seconds, 0))
-                        })
-                        .map(|reset_at| {
-                            let reset_at = reset_at.with_timezone(&Local);
-                            let marker = if is_untouched { '~' } else { ' ' };
-                            format!(
-                                "{} on {}{marker}",
-                                reset_at.format("%H:%M"),
-                                reset_at.format("%-d %b")
+                    let state = account_rate_limits::quota_window_state(snapshot, kind, now);
+                    let (reset_at, marker) = match state {
+                        account_rate_limits::QuotaWindowState::ResetPassed => (
+                            account_rate_limits::quota_window(snapshot, kind)
+                                .limit_window_seconds
+                                .filter(|seconds| *seconds > 0)
+                                .map(|seconds| now + chrono::Duration::seconds(seconds)),
+                            '~',
+                        ),
+                        _ => {
+                            let untouched_reset_at =
+                                account_rate_limits::quota_window_reset_at_if_untouched(
+                                    snapshot, kind, now,
+                                );
+                            let is_untouched = untouched_reset_at.is_some();
+                            (
+                                untouched_reset_at.or_else(|| {
+                                    seconds.and_then(|seconds| {
+                                        DateTime::<Utc>::from_timestamp(seconds, 0)
+                                    })
+                                }),
+                                if is_untouched { '~' } else { ' ' },
                             )
-                        })
+                        }
+                    };
+                    reset_at.map(|reset_at| {
+                        let reset_at = reset_at.with_timezone(&Local);
+                        format!(
+                            "{} on {}{marker}",
+                            reset_at.format("%H:%M"),
+                            reset_at.format("%-d %b")
+                        )
+                    })
                 };
+                let mut format_window =
+                    |kind: account_rate_limits::QuotaWindowKind,
+                     label: String,
+                     used_percent: f64,
+                     resets_at: Option<i64>| {
+                        let used_percent =
+                            match account_rate_limits::quota_window_state(snapshot, kind, now) {
+                                account_rate_limits::QuotaWindowState::ResetPassed => 0.0,
+                                account_rate_limits::QuotaWindowState::Unknown
+                                | account_rate_limits::QuotaWindowState::Untouched
+                                | account_rate_limits::QuotaWindowState::Started => used_percent,
+                            };
+                        let reset = format_reset(kind, resets_at)
+                            .map(|reset| format!(" until {reset}"))
+                            .unwrap_or_default();
+                        parts.push(format!("{label} {used_percent:>3.0}%{reset}"));
+                    };
                 if let Some(primary) = display.primary {
                     let label = primary
                         .window_minutes
                         .map(crate::chatwidget::get_limits_duration)
                         .unwrap_or_else(|| "5h".to_string());
-                    let reset = format_reset(
+                    format_window(
                         account_rate_limits::QuotaWindowKind::FiveHour,
+                        label,
+                        primary.used_percent,
                         rate_limit
                             .primary
                             .as_ref()
                             .and_then(|window| window.resets_at),
-                    )
-                    .map(|reset| format!(" until {reset}"))
-                    .unwrap_or_default();
-                    parts.push(format!("{label} {:>3.0}%{reset}", primary.used_percent));
+                    );
                 }
                 if let Some(secondary) = display.secondary {
                     let label = secondary
                         .window_minutes
                         .map(crate::chatwidget::get_limits_duration)
                         .unwrap_or_else(|| "weekly".to_string());
-                    let reset = format_reset(
+                    format_window(
                         account_rate_limits::QuotaWindowKind::Weekly,
+                        label,
+                        secondary.used_percent,
                         rate_limit
                             .secondary
                             .as_ref()
                             .and_then(|window| window.resets_at),
-                    )
-                    .map(|reset| format!(" until {reset}"))
-                    .unwrap_or_default();
-                    parts.push(format!("{label} {:>3.0}%{reset}", secondary.used_percent));
+                    );
                 }
-            } else if let Some(reset_at) = account_rate_limits::snapshot_reset_at(snapshot) {
+            } else if let Some(reset_at) = account_rate_limits::snapshot_reset_at(snapshot)
+                && reset_at > now
+            {
                 parts.push(format!(
                     "limited until {}",
                     reset_at.with_timezone(&Local).format("%H:%M on %-d %b")
@@ -1745,5 +1777,144 @@ mod tests {
 
         assert!(summary.contains(&format!("until {expected_reset}")));
         assert!(!summary.contains("until 04:34 on 2 Jan "));
+    }
+
+    #[test]
+    fn reset_passed_summary_projects_fresh_window_and_zero_usage() {
+        let ui = SlopForkUi::default();
+        let observed_at = Utc
+            .with_ymd_and_hms(2026, 3, 18, 13, 0, 0)
+            .single()
+            .expect("valid timestamp");
+        let now = Utc
+            .with_ymd_and_hms(2026, 3, 19, 9, 0, 0)
+            .single()
+            .expect("valid timestamp");
+        let mut id_token = IdTokenInfo::default();
+        id_token.email = Some("expired@example.com".to_string());
+        let account = StoredAccount {
+            id: "acct-expired".to_string(),
+            path: PathBuf::from("acct-expired.json"),
+            auth: AuthDotJson {
+                auth_mode: Some(AuthMode::Chatgpt),
+                openai_api_key: None,
+                tokens: Some(TokenData {
+                    id_token,
+                    access_token: "access".to_string(),
+                    refresh_token: "refresh".to_string(),
+                    account_id: Some("acct-expired".to_string()),
+                }),
+                last_refresh: None,
+            },
+            modified_at: None,
+        };
+        let expired_reset_at = observed_at + chrono::Duration::hours(5);
+        let snapshot = StoredRateLimitSnapshot {
+            account_id: "acct-expired".to_string(),
+            plan: Some("team".to_string()),
+            snapshot: Some(RateLimitSnapshot {
+                limit_id: None,
+                limit_name: None,
+                primary: Some(RateLimitWindow {
+                    used_percent: 100.0,
+                    window_minutes: Some(300),
+                    resets_at: Some(expired_reset_at.timestamp()),
+                }),
+                secondary: None,
+                credits: None,
+                plan_type: None,
+            }),
+            five_hour_window: StoredQuotaWindow {
+                used_percent: Some(100),
+                limit_window_seconds: Some(5 * 60 * 60),
+                reset_after_seconds: Some(0),
+                reset_at: Some(expired_reset_at),
+                last_touch_attempt_at: None,
+                last_touch_confirmed_at: None,
+                last_touch_reset_at: None,
+            },
+            weekly_window: StoredQuotaWindow::default(),
+            observed_at: Some(observed_at),
+            primary_next_reset_at: None,
+            secondary_next_reset_at: None,
+            last_refresh_attempt_at: None,
+            last_usage_limit_hit_at: Some(observed_at),
+        };
+
+        let summary = ui.login_account_rate_limit_summary(&account, Some(&snapshot), now);
+        let expected_reset = format!(
+            "{} on {}~",
+            (now + chrono::Duration::hours(5))
+                .with_timezone(&Local)
+                .format("%H:%M"),
+            (now + chrono::Duration::hours(5))
+                .with_timezone(&Local)
+                .format("%-d %b")
+        );
+        let stale_reset = format!(
+            "{} on {} ",
+            expired_reset_at.with_timezone(&Local).format("%H:%M"),
+            expired_reset_at.with_timezone(&Local).format("%-d %b")
+        );
+
+        assert!(summary.contains("5h   0%"));
+        assert!(summary.contains(&format!("until {expected_reset}")));
+        assert!(!summary.contains("100%"));
+        assert!(!summary.contains(&format!("until {stale_reset}")));
+    }
+
+    #[test]
+    fn stale_limit_hint_does_not_render_limited_until_past_reset() {
+        let ui = SlopForkUi::default();
+        let observed_at = Utc
+            .with_ymd_and_hms(2026, 3, 18, 13, 0, 0)
+            .single()
+            .expect("valid timestamp");
+        let now = Utc
+            .with_ymd_and_hms(2026, 3, 19, 9, 0, 0)
+            .single()
+            .expect("valid timestamp");
+        let mut id_token = IdTokenInfo::default();
+        id_token.email = Some("hint@example.com".to_string());
+        let account = StoredAccount {
+            id: "acct-hint".to_string(),
+            path: PathBuf::from("acct-hint.json"),
+            auth: AuthDotJson {
+                auth_mode: Some(AuthMode::Chatgpt),
+                openai_api_key: None,
+                tokens: Some(TokenData {
+                    id_token,
+                    access_token: "access".to_string(),
+                    refresh_token: "refresh".to_string(),
+                    account_id: Some("acct-hint".to_string()),
+                }),
+                last_refresh: None,
+            },
+            modified_at: None,
+        };
+        let snapshot = StoredRateLimitSnapshot {
+            account_id: "acct-hint".to_string(),
+            plan: Some("team".to_string()),
+            snapshot: None,
+            five_hour_window: StoredQuotaWindow {
+                used_percent: None,
+                limit_window_seconds: None,
+                reset_after_seconds: None,
+                reset_at: Some(observed_at + chrono::Duration::hours(5)),
+                last_touch_attempt_at: None,
+                last_touch_confirmed_at: None,
+                last_touch_reset_at: None,
+            },
+            weekly_window: StoredQuotaWindow::default(),
+            observed_at: Some(observed_at),
+            primary_next_reset_at: None,
+            secondary_next_reset_at: None,
+            last_refresh_attempt_at: None,
+            last_usage_limit_hit_at: Some(observed_at),
+        };
+
+        let summary = ui.login_account_rate_limit_summary(&account, Some(&snapshot), now);
+
+        assert_eq!(summary, "No snapshot yet · stale 1200m old");
     }
 }

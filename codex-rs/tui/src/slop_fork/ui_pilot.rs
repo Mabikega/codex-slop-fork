@@ -67,7 +67,7 @@ impl SlopForkUi {
         }
     }
 
-    pub(crate) fn on_turn_started(
+    pub(crate) fn on_pilot_turn_started(
         &mut self,
         ctx: &SlopForkUiContext,
         turn_id: &str,
@@ -122,7 +122,7 @@ impl SlopForkUi {
         self.pilot_follow_up_effects(ctx)
     }
 
-    pub(crate) fn on_idle(
+    pub(crate) fn on_pilot_idle(
         &mut self,
         ctx: &SlopForkUiContext,
         from_replay: bool,
@@ -133,7 +133,7 @@ impl SlopForkUi {
         self.pilot_follow_up_effects(ctx)
     }
 
-    pub(crate) fn on_turn_aborted(
+    pub(crate) fn on_pilot_turn_aborted(
         &mut self,
         ctx: &SlopForkUiContext,
         turn_id: Option<&str>,

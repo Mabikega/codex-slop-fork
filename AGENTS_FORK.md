@@ -23,11 +23,13 @@ This section describes the actual structure of this fork, not generic upstream C
   - `auth_accounts.rs`
   - `auth_sync.rs`
   - `automation.rs`
+  - `autoresearch/`
   - `config.rs`
   - `pilot.rs`
   - `mod.rs`
 - TUI fork logic lives under `codex-rs/tui/src/slop_fork/`.
 - Current TUI fork modules are:
+  - `autoresearch_command.rs`
   - `auto_command.rs`
   - `external_auth.rs`
   - `event.rs`
@@ -37,14 +39,15 @@ This section describes the actual structure of this fork, not generic upstream C
   - `schedule_parser.rs`
   - `status_line.rs`
   - `ui_automation.rs`
+  - `ui_autoresearch.rs`
   - `ui_login.rs`
   - `ui_pilot.rs`
   - `ui_rate_limits.rs`
   - `ui.rs`
   - `mod.rs`
 - `ui.rs` is the TUI fork controller seam. Login popup rendering, saved-account rate-limit logic,
-  automation UI logic, and Pilot UI logic live in `ui_login.rs`, `ui_rate_limits.rs`,
-  `ui_automation.rs`, and `ui_pilot.rs` as internal
+  automation UI logic, Autoresearch UI logic, and Pilot UI logic live in `ui_login.rs`,
+  `ui_rate_limits.rs`, `ui_automation.rs`, `ui_autoresearch.rs`, and `ui_pilot.rs` as internal
   submodules so upstream-facing hooks stay thin.
 - App-server fork logic currently lives in:
   - `codex-rs/app-server/src/slop_fork_automation.rs`
@@ -57,7 +60,15 @@ This section describes the actual structure of this fork, not generic upstream C
   - `~/.codex/codex-slop-fork-automations.toml`
   - `<repo>/.codex/codex-slop-fork-automations.toml`
   - `~/.codex/.codex-slop-fork-automation-state.json`
+  - `~/.codex/.codex-slop-fork-autoresearch-state.json`
+  - `~/.codex/.autoresearch-snapshots/`
   - `~/.codex/.codex-slop-fork-pilot-state.json`
+- Autoresearch sessions are project-local and currently center on `autoresearch.md`,
+  `autoresearch.sh`, optional checks/ideas files, and `autoresearch.jsonl`; `autoresearch.md`
+  can carry the primary metric, hard constraints, ordered staged targets, additional metrics,
+  optional composite-score policy, exploration policy, discovery policy, and hidden
+  constraints/unknowns for the native loop. `autoresearch.jsonl` can now also carry bounded
+  discovery findings alongside benchmark runs.
 
 ## Primary Rule
 

@@ -1826,6 +1826,10 @@ impl ChatWidget {
             self.slop_fork_ui
                 .pilot_has_active_turn(&slop_fork_context, turn_id)
         });
+        let was_autoresearch_turn = turn_id.is_some_and(|turn_id| {
+            self.slop_fork_ui
+                .autoresearch_has_active_turn(&slop_fork_context, turn_id)
+        });
         let pilot_effects = turn_id
             .filter(|_| was_pilot_turn)
             .map(|turn_id| {
@@ -1838,7 +1842,19 @@ impl ChatWidget {
             })
             .unwrap_or_default();
         self.apply_slop_fork_effects(pilot_effects);
-        if !was_pilot_turn {
+        let autoresearch_effects = turn_id
+            .filter(|_| was_autoresearch_turn)
+            .map(|turn_id| {
+                self.slop_fork_ui.on_autoresearch_turn_completed(
+                    &slop_fork_context,
+                    turn_id,
+                    last_agent_message.as_deref().unwrap_or_default(),
+                    from_replay,
+                )
+            })
+            .unwrap_or_default();
+        self.apply_slop_fork_effects(autoresearch_effects);
+        if !was_pilot_turn && !was_autoresearch_turn {
             let auto_effects = self.slop_fork_ui.on_turn_completed(
                 &slop_fork_context,
                 last_agent_message.as_deref().unwrap_or_default(),
@@ -1846,8 +1862,14 @@ impl ChatWidget {
             );
             self.apply_slop_fork_effects(auto_effects);
             if self.queued_user_messages.is_empty() && !had_pending_steers {
-                let pilot_idle_effects = self.slop_fork_ui.on_idle(&slop_fork_context, from_replay);
+                let pilot_idle_effects = self
+                    .slop_fork_ui
+                    .on_pilot_idle(&slop_fork_context, from_replay);
                 self.apply_slop_fork_effects(pilot_idle_effects);
+                let autoresearch_idle_effects = self
+                    .slop_fork_ui
+                    .on_autoresearch_idle(&slop_fork_context, from_replay);
+                self.apply_slop_fork_effects(autoresearch_idle_effects);
             }
         }
         // If there is a queued user message, send exactly one now to begin the next turn.
@@ -4866,6 +4888,13 @@ impl ChatWidget {
                 self.apply_slop_fork_effects(effects);
                 self.bottom_pane.drain_pending_submission_state();
             }
+            InlineCommand::Autoresearch => {
+                let effects = self
+                    .slop_fork_ui
+                    .handle_autoresearch_command(&self.slop_fork_context(), trimmed);
+                self.apply_slop_fork_effects(effects);
+                self.bottom_pane.drain_pending_submission_state();
+            }
             InlineCommand::Pilot => {
                 let effects = self
                     .slop_fork_ui
@@ -5085,6 +5114,50 @@ impl ChatWidget {
                             .slop_fork_ui
                             .on_pilot_turn_submission_failed(&self.slop_fork_context());
                         self.apply_slop_fork_effects(effects);
+                    }
+                }
+                SlopForkUiEffect::SubmitAutoresearchTurn {
+                    prompt,
+                    cycle_kind,
+                    notify_on_completion,
+                } => {
+                    if !notify_on_completion {
+                        self.current_turn_user_message_metadata
+                            .suppress_terminal_notification = true;
+                    }
+                    let was_task_running = self.bottom_pane.is_task_running();
+                    if !was_task_running {
+                        self.bottom_pane.set_task_running(true);
+                    }
+                    if self.submit_op(Op::SlopForkAutoresearchTurn { prompt }) {
+                        let effects = self.slop_fork_ui.on_autoresearch_turn_submission_started(
+                            &self.slop_fork_context(),
+                            cycle_kind,
+                        );
+                        self.apply_slop_fork_effects(effects);
+                    } else {
+                        if !was_task_running {
+                            self.bottom_pane.set_task_running(false);
+                        }
+                        let effects = self
+                            .slop_fork_ui
+                            .on_autoresearch_turn_submission_failed(&self.slop_fork_context());
+                        self.apply_slop_fork_effects(effects);
+                    }
+                }
+                SlopForkUiEffect::SubmitAutoresearchSetupTurn { prompt } => {
+                    let was_task_running = self.bottom_pane.is_task_running();
+                    if !was_task_running {
+                        self.bottom_pane.set_task_running(true);
+                    }
+                    if !self.submit_op(Op::SlopForkAutoresearchTurn { prompt }) {
+                        if !was_task_running {
+                            self.bottom_pane.set_task_running(false);
+                        }
+                        self.apply_slop_fork_effects(vec![SlopForkUiEffect::AddErrorMessage(
+                            "Autoresearch setup submission failed before the turn could start."
+                                .to_string(),
+                        )]);
                     }
                 }
                 SlopForkUiEffect::ScheduleFrameIn(delay) => {
@@ -5566,7 +5639,13 @@ impl ChatWidget {
             EventMsg::TurnStarted(event) => {
                 if !is_resume_initial_replay {
                     self.apply_turn_started_context_window(event.model_context_window);
-                    let effects = self.slop_fork_ui.on_turn_started(
+                    let effects = self.slop_fork_ui.on_pilot_turn_started(
+                        &self.slop_fork_context(),
+                        &event.turn_id,
+                        from_replay,
+                    );
+                    self.apply_slop_fork_effects(effects);
+                    let effects = self.slop_fork_ui.on_autoresearch_turn_started(
                         &self.slop_fork_context(),
                         &event.turn_id,
                         from_replay,
@@ -5610,10 +5689,17 @@ impl ChatWidget {
             EventMsg::TurnAborted(ev) => match ev.reason {
                 TurnAbortReason::Interrupted => {
                     self.on_interrupted_turn(ev.reason);
-                    let effects = self.slop_fork_ui.on_turn_aborted(
+                    let effects = self.slop_fork_ui.on_pilot_turn_aborted(
                         &self.slop_fork_context(),
                         ev.turn_id.as_deref(),
                         "Pilot turn interrupted by the user.",
+                        from_replay,
+                    );
+                    self.apply_slop_fork_effects(effects);
+                    let effects = self.slop_fork_ui.on_autoresearch_turn_aborted(
+                        &self.slop_fork_context(),
+                        ev.turn_id.as_deref(),
+                        "Autoresearch turn interrupted by the user.",
                         from_replay,
                     );
                     self.apply_slop_fork_effects(effects);
@@ -5623,20 +5709,34 @@ impl ChatWidget {
                     self.pending_steers.clear();
                     self.refresh_pending_input_preview();
                     self.on_error("Turn aborted: replaced by a new task".to_owned());
-                    let effects = self.slop_fork_ui.on_turn_aborted(
+                    let effects = self.slop_fork_ui.on_pilot_turn_aborted(
                         &self.slop_fork_context(),
                         ev.turn_id.as_deref(),
                         "Pilot turn was replaced by another task.",
                         from_replay,
                     );
                     self.apply_slop_fork_effects(effects);
+                    let effects = self.slop_fork_ui.on_autoresearch_turn_aborted(
+                        &self.slop_fork_context(),
+                        ev.turn_id.as_deref(),
+                        "Autoresearch turn was replaced by another task.",
+                        from_replay,
+                    );
+                    self.apply_slop_fork_effects(effects);
                 }
                 TurnAbortReason::ReviewEnded => {
                     self.on_interrupted_turn(ev.reason);
-                    let effects = self.slop_fork_ui.on_turn_aborted(
+                    let effects = self.slop_fork_ui.on_pilot_turn_aborted(
                         &self.slop_fork_context(),
                         ev.turn_id.as_deref(),
                         "Pilot turn ended because review mode finished.",
+                        from_replay,
+                    );
+                    self.apply_slop_fork_effects(effects);
+                    let effects = self.slop_fork_ui.on_autoresearch_turn_aborted(
+                        &self.slop_fork_context(),
+                        ev.turn_id.as_deref(),
+                        "Autoresearch turn ended because review mode finished.",
                         from_replay,
                     );
                     self.apply_slop_fork_effects(effects);
@@ -9267,10 +9367,11 @@ impl ChatWidget {
         if matches!(&op, Op::Review { .. }) && !self.bottom_pane.is_task_running() {
             self.bottom_pane.set_task_running(true);
         }
-        if let Err(e) = self.codex_op_tx.send(op) {
+        if let Err(e) = self.codex_op_tx.send(op.clone()) {
             tracing::error!("failed to submit op: {e}");
             return false;
         }
+        self.slop_fork_ui.note_successful_outbound_op(&op);
         true
     }
 

@@ -1,0 +1,23 @@
+---
+source: tui/src/chatwidget/tests.rs
+expression: normalized
+---
+Autoresearch
+Status: running
+Goal: optimize latency
+Session: latency
+Metric: latency_ms
+Iterations: 0
+Runs in current segment: 1
+Discovery passes: 0
+Baseline: 450
+Best: 450
+Kept: 1
+Discarded: 0
+Crashes: 0
+Checks failed: 0
+Workdir: /tmp/workdir
+Staged targets: invalid
+Stage warning: staged targets must be ordered from easier to harder on `latency_ms`; `latency_ms <= 500 ms` cannot follow `latency_ms <= 400 ms`
+Max runs: 8
+Status message: Autoresearch started.

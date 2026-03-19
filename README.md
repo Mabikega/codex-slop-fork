@@ -145,8 +145,8 @@ Untouched quota behavior:
 Maintenance note:
 
 - the fork TUI keeps `codex-rs/tui/src/slop_fork/ui.rs` as the dispatch/controller seam and splits
-  login popup rendering, saved-account rate-limit handling, automation UI code, and Pilot UI code
-  into dedicated internal modules so future fork changes stay local
+  login popup rendering, saved-account rate-limit handling, automation UI code, Autoresearch UI
+  code, and Pilot UI code into dedicated internal modules so future fork changes stay local
 
 ### Automation engine
 
@@ -232,6 +232,71 @@ Behavior:
 Persisted Pilot files:
 
 - runtime state: `~/.codex/.codex-slop-fork-pilot-state.json`
+
+### Autoresearch benchmark loops
+
+`$autoresearch` runs an assistant-controlled benchmark optimization loop with native benchmark
+tools and session files in the project worktree.
+
+Examples:
+
+- `$autoresearch init "Create an OCR project with CER < 5% on dataset X"`
+- `$autoresearch start --max-runs 50 reduce benchmark wall clock time`
+- `$autoresearch optimize unit test runtime without changing semantics`
+- `$autoresearch status`
+- `$autoresearch pause`
+- `$autoresearch resume`
+- `$autoresearch wrap-up`
+- `$autoresearch stop`
+- `$autoresearch clear`
+
+Project-local session files:
+
+- `autoresearch.md`
+- `autoresearch.sh`
+- `autoresearch.checks.sh`
+- `autoresearch.ideas.md`
+- `autoresearch.jsonl`
+
+Behavior:
+
+- `init` asks the model to scaffold the workspace for autoresearch, including a structured
+  `autoresearch.md` plus benchmark/check scripts when it can define them
+- the model gets native tools `autoresearch_init`, `autoresearch_run`, `autoresearch_log`,
+  `autoresearch_request_discovery`, and `autoresearch_log_discovery`
+- if `autoresearch.sh` exists, benchmark runs must use it
+- `autoresearch.checks.sh` is optional and can veto `keep`
+- `autoresearch.md` can now carry a structured setup with a primary metric, hard constraints,
+  ordered staged targets on the primary metric, additional metrics, optional composite-score mode,
+  an explicit exploration policy, a discovery policy, and hidden constraints/unknowns
+- for reliable staged-target validation before the first journal config exists, write the
+  `Primary Metric` section with explicit bullets such as `- Name: latency_ms`, `- Unit: ms`, and
+  `- Direction: lower`
+- staged targets let the loop keep escalating milestone goals on the same primary metric, such as
+  `latency_ms <= 500 ms` and then `latency_ms <= 400 ms`, instead of treating the first threshold
+  as the natural stopping point
+- beyond local benchmark iterations, autoresearch can now queue one bounded discovery pass at a
+  time; that pass audits the local repo, can do targeted external research, can use parallel
+  sub-agents for distinct questions, and then logs findings back into `autoresearch.jsonl`
+- normal benchmark cycles stay separate from discovery cycles; the model should request discovery
+  when it hits plateaus, weak assumptions, architecture search needs, evaluation gaps, or other
+  cases where broader evidence is more useful than another immediate local tweak
+- staged targets must stay ordered from easier to harder, use the primary metric, and use
+  compatible units; if that section is malformed, status, prompts, and tool feedback will surface
+  a warning until it is fixed
+- when the current worktree is inside git, `keep` commits the experiment result and `discard`
+  restores the last accepted git revision
+- when the current worktree is not inside git, `keep` refreshes a filesystem snapshot and
+  `discard` restores that snapshot instead
+- `autoresearch.md`, benchmark scripts, ideas, and the JSONL journal are preserved across
+  discards so the session itself stays intact
+- `clear` removes runtime state and the JSONL journal, but leaves the session docs and scripts in
+  place
+
+Persisted Autoresearch files:
+
+- runtime state: `~/.codex/.codex-slop-fork-autoresearch-state.json`
+- non-git accepted snapshots: `~/.codex/.autoresearch-snapshots/`
 
 ### Additional instruction injection
 

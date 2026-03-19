@@ -132,7 +132,7 @@ bun install -g https://github.com/Mabikega/codex-slop-fork/releases/latest/downl
 
 保守メモ:
 
-- フォークの TUI は `codex-rs/tui/src/slop_fork/ui.rs` をディスパッチ兼コントローラの継ぎ目として維持し、ログインポップアップ描画、保存済みアカウントのレート制限処理、オートメーション UI コード、Pilot UI コードを専用の内部モジュールへ分割して、今後のフォーク変更を局所化しています
+- フォークの TUI は `codex-rs/tui/src/slop_fork/ui.rs` をディスパッチ兼コントローラの継ぎ目として維持し、ログインポップアップ描画、保存済みアカウントのレート制限処理、オートメーション UI コード、Autoresearch UI コード、Pilot UI コードを専用の内部モジュールへ分割して、今後のフォーク変更を局所化しています
 
 ### オートメーションエンジン
 
@@ -214,6 +214,55 @@ bun install -g https://github.com/Mabikega/codex-slop-fork/releases/latest/downl
 永続化される Pilot ファイル:
 
 - 実行時状態: `~/.codex/.codex-slop-fork-pilot-state.json`
+
+### Autoresearch ベンチマークループ
+
+`$autoresearch` は、プロジェクト内のセッションファイルとネイティブなベンチマーク
+ツールを使って、アシスタント主導のベンチマーク最適化ループを実行します。
+
+例:
+
+- `$autoresearch init "Create an OCR project with CER < 5% on dataset X"`
+- `$autoresearch start --max-runs 50 ベンチマークの経過時間を短くする`
+- `$autoresearch 振る舞いを変えずに unit test の実行時間を短くする`
+- `$autoresearch status`
+- `$autoresearch pause`
+- `$autoresearch resume`
+- `$autoresearch wrap-up`
+- `$autoresearch stop`
+- `$autoresearch clear`
+
+プロジェクト内のセッションファイル:
+
+- `autoresearch.md`
+- `autoresearch.sh`
+- `autoresearch.checks.sh`
+- `autoresearch.ideas.md`
+- `autoresearch.jsonl`
+
+挙動:
+
+- `init` は、構造化された `autoresearch.md` と、定義できる場合はベンチマーク/チェック用スクリプトを含む autoresearch 用の作業ツリーひな形をモデルに作らせます
+- モデルには `autoresearch_init`、`autoresearch_run`、`autoresearch_log`、
+  `autoresearch_request_discovery`、`autoresearch_log_discovery` のネイティブツールが渡されます
+- `autoresearch.sh` が存在する場合、ベンチマーク実行はそれを使う必要があります
+- `autoresearch.checks.sh` は任意ですが、失敗した場合は `keep` を拒否できます
+- `autoresearch.md` には、primary metric、hard constraints、primary metric 上の順序付き staged targets、additional metrics、任意の composite-score mode、exploration policy を構造化して持たせられます
+- `autoresearch.md` には discovery policy と hidden constraints / unknowns も書けます
+- staged targets を最初の journal config 前から確実に検証したい場合は、`Primary Metric` セクションを `- Name: latency_ms`、`- Unit: ms`、`- Direction: lower` のような明示的な bullet で書いてください
+- staged targets を使うと、たとえば `latency_ms <= 500 ms` を達成した後も、次の `latency_ms <= 400 ms` へ自動で目標を繰り上げながら同じ指標を継続的に改善できます
+- ローカルなベンチマーク反復とは別に、autoresearch は 1 回ずつ bounded discovery pass をキューできます。この pass は repo を監査し、必要なら限定的に外部調査し、distinct な問いごとに並列 sub-agent を使い、その結果を `autoresearch.jsonl` に記録します
+- 通常の benchmark cycle と discovery cycle は分離されています。plateau、weak assumption、architecture search、evaluation gap などで広い証拠集めが次のローカル変更より有益なときに discovery を使います
+- staged targets は、primary metric を使い、互換性のある unit を使い、易しい目標から難しい目標へ順序づけられている必要があります。壊れている場合は、status、prompt、tool feedback に警告が出続けます
+- 現在の作業ツリーが git 管理下なら、`keep` はその実験結果をコミットし、`discard` は最後に受理された git リビジョンへ戻します
+- git 管理外なら、`keep` はファイルシステムスナップショットを更新し、`discard` はそのスナップショットを復元します
+- `autoresearch.md`、ベンチマークスクリプト、ideas、JSONL ジャーナルは discard 後も保持されるため、セッション自体は残ります
+- `clear` は実行時状態と JSONL ジャーナルを削除しますが、セッション文書やスクリプトは残します
+
+永続化される Autoresearch ファイル:
+
+- 実行時状態: `~/.codex/.codex-slop-fork-autoresearch-state.json`
+- 非 git ワークツリー用の accepted スナップショット: `~/.codex/.autoresearch-snapshots/`
 
 ### 追加指示の注入
 

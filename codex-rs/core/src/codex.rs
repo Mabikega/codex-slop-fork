@@ -775,7 +775,7 @@ impl TurnSkillsContext {
 }
 
 /// The context needed for a single turn of the thread.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct TurnContext {
     pub(crate) sub_id: String,
     pub(crate) trace_id: Option<String>,
@@ -834,6 +834,21 @@ impl TurnContext {
             .apps_enabled_cached(self.auth_manager.as_deref())
     }
 
+    fn with_tools_config(&self, tools_config: ToolsConfig) -> Self {
+        let mut turn_context = self.clone();
+        turn_context.tools_config = tools_config;
+        turn_context.tool_call_gate = Arc::new(ReadinessFlag::new());
+        turn_context
+    }
+
+    pub(crate) fn with_slop_fork_autoresearch_tools(&self) -> Self {
+        self.with_tools_config(
+            self.tools_config
+                .clone()
+                .with_slop_fork_autoresearch_tools(true),
+        )
+    }
+
     pub(crate) async fn with_model(&self, model: String, models_manager: &ModelsManager) -> Self {
         let mut config = (*self.config).clone();
         config.model = Some(model.clone());
@@ -879,6 +894,7 @@ impl TurnContext {
         .with_unified_exec_shell_mode(self.tools_config.unified_exec_shell_mode.clone())
         .with_web_search_config(self.tools_config.web_search_config.clone())
         .with_allow_login_shell(self.tools_config.allow_login_shell)
+        .with_slop_fork_autoresearch_tools(self.tools_config.slop_fork_autoresearch_tools_enabled())
         .with_agent_roles(config.agent_roles.clone());
 
         Self {
@@ -4283,6 +4299,10 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                     handlers::slop_fork_pilot_turn(&sess, sub.id.clone(), prompt).await;
                     false
                 }
+                Op::SlopForkAutoresearchTurn { prompt } => {
+                    handlers::slop_fork_autoresearch_turn(&sess, sub.id.clone(), prompt).await;
+                    false
+                }
                 Op::ExecApproval {
                     id: approval_id,
                     turn_id,
@@ -4667,12 +4687,30 @@ mod handlers {
         .await;
     }
 
-    pub async fn slop_fork_pilot_turn(sess: &Arc<Session>, sub_id: String, prompt: String) {
+    async fn slop_fork_assistant_turn(
+        sess: &Arc<Session>,
+        sub_id: String,
+        prompt: String,
+        enable_autoresearch_tools: bool,
+    ) {
         let turn_context = sess.new_default_turn_with_sub_id(sub_id).await;
+        let turn_context = if enable_autoresearch_tools {
+            Arc::new(turn_context.as_ref().with_slop_fork_autoresearch_tools())
+        } else {
+            turn_context
+        };
         sess.maybe_emit_unknown_model_warning_for_turn(turn_context.as_ref())
             .await;
         sess.refresh_mcp_servers_if_requested(&turn_context).await;
         spawn_turn_task(sess, turn_context, prompt).await;
+    }
+
+    pub async fn slop_fork_pilot_turn(sess: &Arc<Session>, sub_id: String, prompt: String) {
+        slop_fork_assistant_turn(sess, sub_id, prompt, false).await;
+    }
+
+    pub async fn slop_fork_autoresearch_turn(sess: &Arc<Session>, sub_id: String, prompt: String) {
+        slop_fork_assistant_turn(sess, sub_id, prompt, true).await;
     }
 
     pub async fn resolve_elicitation(
