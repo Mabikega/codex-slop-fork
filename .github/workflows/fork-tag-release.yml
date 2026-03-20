@@ -59,6 +59,8 @@ jobs:
             raw_release_title=""
           fi
 
+          inferred_release_title=""
+
           release_tag="$(RAW_RELEASE_TAG="${raw_release_tag}" python3 - <<'PY'
           import os
 
@@ -69,13 +71,19 @@ jobs:
           print(raw)
           PY
           )"
+          if [[ "${release_tag}" =~ ^codex-slop-fork[[:space:]]+(.+)$ ]]; then
+            release_tag="codex-slop-fork-v${BASH_REMATCH[1]}"
+          fi
           if [[ -z "${release_tag}" ]]; then
             echo "::error::release_tag must not be empty."
             exit 1
           fi
+          if [[ "${release_tag}" =~ ^codex-slop-fork-v(.+)$ ]]; then
+            inferred_release_title="codex-slop-fork ${BASH_REMATCH[1]}"
+          fi
           normalized_tag_ref="$(git check-ref-format --normalize "refs/tags/${release_tag}" 2>/dev/null || true)"
           if [[ -z "${normalized_tag_ref}" ]]; then
-            printf '::error::release_tag is not a valid git tag name: %q\n' "${raw_release_tag}"
+            printf '::error::release_tag is not a valid git tag name: %q (expected e.g. codex-slop-fork-v0.116.0)\n' "${raw_release_tag}"
             exit 1
           fi
           release_tag="${normalized_tag_ref#refs/tags/}"
@@ -93,7 +101,11 @@ jobs:
           source_ref="${GITHUB_REF_NAME}"
           release_title="${raw_release_title}"
           if [[ -z "${release_title// }" ]]; then
-            release_title="${release_tag}"
+            if [[ -n "${inferred_release_title}" ]]; then
+              release_title="${inferred_release_title}"
+            else
+              release_title="${release_tag}"
+            fi
           fi
           release_exists=false
 
