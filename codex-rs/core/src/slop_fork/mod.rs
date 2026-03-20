@@ -79,6 +79,15 @@ pub(crate) fn save_auth_with_account_sync(
     Ok(())
 }
 
+/// Persist interactive login auth while preserving the previously active account in `.accounts/`.
+pub fn persist_login_auth(
+    codex_home: &Path,
+    auth: &AuthDotJson,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> std::io::Result<()> {
+    save_auth_with_account_sync(codex_home, auth, auth_credentials_store_mode)
+}
+
 pub(crate) fn activate_saved_account(
     codex_home: &Path,
     account_id: &str,
