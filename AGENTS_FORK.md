@@ -150,13 +150,16 @@ When bringing new upstream changes into the fork:
 
 - Fetch upstream tags and choose the exact final release tag first. Do not start from `main` and then try to "back into" a release later.
 - Create a safety branch or snapshot before rewriting branch state, replaying commits, or converting commits into uncommitted changes.
-- Rebase or reconstruct the fork on top of the chosen release tag, not on top of an arbitrary newer upstream state.
+- Prefer a history-preserving integration branch that starts from the current fork `main` (or its safety snapshot) and merges the chosen upstream release tag into it.
+- Keep the fork's existing commit history and the upstream commit history when that can be done with acceptable conflict resolution effort and acceptable resulting structure.
+- Use a rebuild or reconstruction on top of the chosen release tag only as a fallback when the history-preserving merge path is disproportionately noisy, misleading, or risky.
+- If a rebuild fallback is used, preserve the old fork tip on an explicit backup branch so the prior fork history remains available for blame, bisect, and audit work.
 - Replay only the intended fork delta. Do not preserve unrelated branch baggage, stale merge resolutions, or carried-forward upstream-only files just because they existed in an older local branch.
 - If a file differs from the chosen upstream release for reasons unrelated to the fork feature, restore the release-tag version first and then reapply only the minimal fork seam that is actually required.
 - Prefer proving provenance file-by-file in high-churn hotspots: first check whether the file should be byte-for-byte upstream, and only keep a diff when there is a clear fork-owned reason.
 - During every upstream merge, explicitly review whether new upstream capabilities create a better seam or implementation path for an existing fork feature. Do not limit the merge to conflict resolution if upstream now offers a cleaner way to express the same fork behavior.
 - During every upstream merge, explicitly review whether any fork feature has become partially or fully redundant because upstream gained a very similar capability. If so, prefer deleting or shrinking the fork overlay instead of preserving older fork code out of habit.
-- After the replay, verify that fork logic still lives under `slop_fork/`, that upstream hotspots only contain thin delegation hooks, and that generated docs or schemas are regenerated only when the fork feature truly changes them.
+- After the merge or replay, verify that fork logic still lives under `slop_fork/`, that upstream hotspots only contain thin delegation hooks, and that generated docs or schemas are regenerated only when the fork feature truly changes them.
 - When compile failures appear after a release rebase, first suspect mixed-version state before assuming the fork feature itself is wrong.
 
 ## Conflict Avoidance Rules

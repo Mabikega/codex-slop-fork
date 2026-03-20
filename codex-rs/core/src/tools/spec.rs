@@ -197,9 +197,12 @@ fn close_agent_output_schema() -> JsonValue {
     json!({
         "type": "object",
         "properties": {
-            "status": agent_status_output_schema()
+            "previous_status": {
+                "description": "The agent status observed before shutdown was requested.",
+                "allOf": [agent_status_output_schema()]
+            }
         },
-        "required": ["status"],
+        "required": ["previous_status"],
         "additionalProperties": false
     })
 }
@@ -799,7 +802,7 @@ fn create_write_stdin_tool() -> ToolSpec {
     })
 }
 
-fn create_exec_wait_tool() -> ToolSpec {
+fn create_wait_tool() -> ToolSpec {
     let properties = BTreeMap::from([
         (
             "cell_id".to_string(),
@@ -1553,7 +1556,7 @@ fn create_close_agent_tool() -> ToolSpec {
 
     ToolSpec::Function(ResponsesApiTool {
         name: "close_agent".to_string(),
-        description: "Close an agent when it is no longer needed and return its last known status. Don't keep agents open for too long if they are not needed anymore.".to_string(),
+        description: "Close an agent when it is no longer needed and return its previous status before shutdown was requested. Don't keep agents open for too long if they are not needed anymore.".to_string(),
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::Object {
@@ -1854,7 +1857,7 @@ fn format_discoverable_tools(discoverable_tools: &[DiscoverableTool]) -> String 
                 });
             let default_action = match tool.tool_type() {
                 DiscoverableToolType::Connector => DiscoverableToolAction::Install,
-                DiscoverableToolType::Plugin => DiscoverableToolAction::Enable,
+                DiscoverableToolType::Plugin => DiscoverableToolAction::Install,
             };
             format!(
                 "- {} (id: `{}`, type: {}, action: {}): {}",
@@ -2088,7 +2091,7 @@ plain_source: PLAIN_JS_SOURCE
 
 js_source: JS_SOURCE
 
-PRAGMA_LINE: /[ \t]*\/\/ codex-artifacts:[^\r\n]*/ | /[ \t]*\/\/ codex-artifact-tool:[^\r\n]*/
+PRAGMA_LINE: /[ \t]*\/\/ codex-artifact-tool:[^\r\n]*/
 NEWLINE: /\r?\n/
 PLAIN_JS_SOURCE: /(?:\s*)(?:[^\s{\"`]|`[^`]|``[^`])[\s\S]*/
 JS_SOURCE: /(?:\s*)(?:[^\s{\"`]|`[^`]|``[^`])[\s\S]*/
@@ -2096,7 +2099,7 @@ JS_SOURCE: /(?:\s*)(?:[^\s{\"`]|`[^`]|``[^`])[\s\S]*/
 
     ToolSpec::Freeform(FreeformTool {
         name: "artifacts".to_string(),
-        description: "Runs raw JavaScript against the preinstalled Codex @oai/artifact-tool runtime for creating presentations or spreadsheets. This is plain JavaScript executed by a local Node-compatible runtime with top-level await, not TypeScript: do not use type annotations, `interface`, `type`, or `import type`. Author code the same way you would for `import { Presentation, Workbook, PresentationFile, SpreadsheetFile, FileBlob, ... } from \"@oai/artifact-tool\"`, but omit that import line because the package surface is already preloaded. Named exports are available directly on `globalThis`, and the full module is available as `globalThis.artifactTool` (also aliased as `globalThis.artifacts` and `globalThis.codexArtifacts`). Node built-ins such as `node:fs/promises` may still be imported when needed for saving preview bytes. This is a freeform tool: send raw JavaScript source text, optionally with a first-line pragma like `// codex-artifacts: timeout_ms=15000` or `// codex-artifact-tool: timeout_ms=15000`; do not send JSON/quotes/markdown fences."
+        description: "Runs raw JavaScript against the installed `@oai/artifact-tool` package for creating presentations or spreadsheets. This is plain JavaScript executed by a local Node-compatible runtime with top-level await, not TypeScript: do not use type annotations, `interface`, `type`, or `import type`. Author code the same way you would for `import { Presentation, Workbook, PresentationFile, SpreadsheetFile, FileBlob, ... } from \"@oai/artifact-tool\"`, but omit that import line because the package is preloaded before your code runs. Named exports are copied onto `globalThis`, and the full module namespace is available as `globalThis.artifactTool`. This matches the upstream library-first API: create with `Presentation.create()` / `Workbook.create()`, preview with `presentation.export(...)` or `slide.export(...)`, and save files with `PresentationFile.exportPptx(...)` or `SpreadsheetFile.exportXlsx(...)`. Node built-ins such as `node:fs/promises` may still be imported when needed for saving preview bytes. This is a freeform tool: send raw JavaScript source text, optionally with a first-line pragma like `// codex-artifact-tool: timeout_ms=15000`; do not send JSON/quotes/markdown fences."
             .to_string(),
         format: FreeformToolFormat {
             r#type: "grammar".to_string(),
@@ -2288,7 +2291,7 @@ fn push_tool_spec(
 ) {
     let spec = augment_tool_spec_for_code_mode(spec, code_mode_enabled);
     if supports_parallel_tool_calls {
-        builder.push_spec_with_parallel_support(spec, true);
+        builder.push_spec_with_parallel_support(spec, /*supports_parallel_tool_calls*/ true);
     } else {
         builder.push_spec(spec);
     }
@@ -2596,14 +2599,16 @@ pub(crate) fn build_specs_with_discoverable_tools(
             &nested_config,
             mcp_tools.clone(),
             app_tools.clone(),
-            None,
+            /*discoverable_tools*/ None,
             dynamic_tools,
         )
         .build();
         let mut enabled_tools = nested_specs
             .into_iter()
             .filter_map(|spec| {
-                let (name, description) = match augment_tool_spec_for_code_mode(spec.spec, true) {
+                let (name, description) = match augment_tool_spec_for_code_mode(
+                    spec.spec, /*code_mode_enabled*/ true,
+                ) {
                     ToolSpec::Function(tool) => (tool.name, tool.description),
                     ToolSpec::Freeform(tool) => (tool.name, tool.description),
                     _ => return None,
@@ -2616,14 +2621,14 @@ pub(crate) fn build_specs_with_discoverable_tools(
         push_tool_spec(
             &mut builder,
             create_code_mode_tool(&enabled_tools, config.code_mode_only_enabled),
-            false,
+            /*supports_parallel_tool_calls*/ false,
             config.code_mode_enabled,
         );
         builder.register_handler(PUBLIC_TOOL_NAME, code_mode_handler);
         push_tool_spec(
             &mut builder,
-            create_exec_wait_tool(),
-            false,
+            create_wait_tool(),
+            /*supports_parallel_tool_calls*/ false,
             config.code_mode_enabled,
         );
         builder.register_handler(WAIT_TOOL_NAME, code_mode_wait_handler);
@@ -2634,7 +2639,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
             push_tool_spec(
                 &mut builder,
                 create_shell_tool(exec_permission_approvals_enabled),
-                true,
+                /*supports_parallel_tool_calls*/ true,
                 config.code_mode_enabled,
             );
         }
@@ -2642,7 +2647,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
             push_tool_spec(
                 &mut builder,
                 ToolSpec::LocalShell {},
-                true,
+                /*supports_parallel_tool_calls*/ true,
                 config.code_mode_enabled,
             );
         }
@@ -2653,13 +2658,13 @@ pub(crate) fn build_specs_with_discoverable_tools(
                     config.allow_login_shell,
                     exec_permission_approvals_enabled,
                 ),
-                true,
+                /*supports_parallel_tool_calls*/ true,
                 config.code_mode_enabled,
             );
             push_tool_spec(
                 &mut builder,
                 create_write_stdin_tool(),
-                false,
+                /*supports_parallel_tool_calls*/ false,
                 config.code_mode_enabled,
             );
             builder.register_handler("exec_command", unified_exec_handler.clone());
@@ -2675,7 +2680,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
                     config.allow_login_shell,
                     exec_permission_approvals_enabled,
                 ),
-                true,
+                /*supports_parallel_tool_calls*/ true,
                 config.code_mode_enabled,
             );
         }
@@ -2693,19 +2698,19 @@ pub(crate) fn build_specs_with_discoverable_tools(
         push_tool_spec(
             &mut builder,
             create_list_mcp_resources_tool(),
-            true,
+            /*supports_parallel_tool_calls*/ true,
             config.code_mode_enabled,
         );
         push_tool_spec(
             &mut builder,
             create_list_mcp_resource_templates_tool(),
-            true,
+            /*supports_parallel_tool_calls*/ true,
             config.code_mode_enabled,
         );
         push_tool_spec(
             &mut builder,
             create_read_mcp_resource_tool(),
-            true,
+            /*supports_parallel_tool_calls*/ true,
             config.code_mode_enabled,
         );
         builder.register_handler("list_mcp_resources", mcp_resource_handler.clone());
@@ -2716,7 +2721,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
     push_tool_spec(
         &mut builder,
         PLAN_TOOL.clone(),
-        false,
+        /*supports_parallel_tool_calls*/ false,
         config.code_mode_enabled,
     );
     builder.register_handler("update_plan", plan_handler);
@@ -2725,13 +2730,13 @@ pub(crate) fn build_specs_with_discoverable_tools(
         push_tool_spec(
             &mut builder,
             create_js_repl_tool(),
-            false,
+            /*supports_parallel_tool_calls*/ false,
             config.code_mode_enabled,
         );
         push_tool_spec(
             &mut builder,
             create_js_repl_reset_tool(),
-            false,
+            /*supports_parallel_tool_calls*/ false,
             config.code_mode_enabled,
         );
         builder.register_handler("js_repl", js_repl_handler);
@@ -2744,7 +2749,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
             create_request_user_input_tool(CollaborationModesConfig {
                 default_mode_request_user_input: config.default_mode_request_user_input,
             }),
-            false,
+            /*supports_parallel_tool_calls*/ false,
             config.code_mode_enabled,
         );
         builder.register_handler("request_user_input", request_user_input_handler);
@@ -2754,7 +2759,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
         push_tool_spec(
             &mut builder,
             create_request_permissions_tool(),
-            false,
+            /*supports_parallel_tool_calls*/ false,
             config.code_mode_enabled,
         );
         builder.register_handler("request_permissions", request_permissions_handler);
@@ -2767,7 +2772,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
         push_tool_spec(
             &mut builder,
             create_tool_search_tool(&app_tools),
-            true,
+            /*supports_parallel_tool_calls*/ true,
             config.code_mode_enabled,
         );
         builder.register_handler(TOOL_SEARCH_TOOL_NAME, search_tool_handler);
@@ -2785,7 +2790,10 @@ pub(crate) fn build_specs_with_discoverable_tools(
             .as_ref()
             .filter(|tools| !tools.is_empty())
     {
-        builder.push_spec_with_parallel_support(create_tool_suggest_tool(discoverable_tools), true);
+        builder.push_spec_with_parallel_support(
+            create_tool_suggest_tool(discoverable_tools),
+            /*supports_parallel_tool_calls*/ true,
+        );
         builder.register_handler(TOOL_SUGGEST_TOOL_NAME, tool_suggest_handler);
     }
 
@@ -2795,7 +2803,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
                 push_tool_spec(
                     &mut builder,
                     create_apply_patch_freeform_tool(),
-                    false,
+                    /*supports_parallel_tool_calls*/ false,
                     config.code_mode_enabled,
                 );
             }
@@ -2803,7 +2811,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
                 push_tool_spec(
                     &mut builder,
                     create_apply_patch_json_tool(),
-                    false,
+                    /*supports_parallel_tool_calls*/ false,
                     config.code_mode_enabled,
                 );
             }
@@ -2819,7 +2827,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
         push_tool_spec(
             &mut builder,
             create_grep_files_tool(),
-            true,
+            /*supports_parallel_tool_calls*/ true,
             config.code_mode_enabled,
         );
         builder.register_handler("grep_files", grep_files_handler);
@@ -2833,7 +2841,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
         push_tool_spec(
             &mut builder,
             create_read_file_tool(),
-            true,
+            /*supports_parallel_tool_calls*/ true,
             config.code_mode_enabled,
         );
         builder.register_handler("read_file", read_file_handler);
@@ -2848,7 +2856,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
         push_tool_spec(
             &mut builder,
             create_list_dir_tool(),
-            true,
+            /*supports_parallel_tool_calls*/ true,
             config.code_mode_enabled,
         );
         builder.register_handler("list_dir", list_dir_handler);
@@ -2862,7 +2870,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
         push_tool_spec(
             &mut builder,
             create_test_sync_tool(),
-            true,
+            /*supports_parallel_tool_calls*/ true,
             config.code_mode_enabled,
         );
         builder.register_handler("test_sync_tool", test_sync_handler);
@@ -2903,7 +2911,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
                     .and_then(|cfg| cfg.search_context_size),
                 search_content_types,
             },
-            false,
+            /*supports_parallel_tool_calls*/ false,
             config.code_mode_enabled,
         );
     }
@@ -2914,7 +2922,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
             ToolSpec::ImageGeneration {
                 output_format: "png".to_string(),
             },
-            false,
+            /*supports_parallel_tool_calls*/ false,
             config.code_mode_enabled,
         );
     }
@@ -2922,7 +2930,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
     push_tool_spec(
         &mut builder,
         create_view_image_tool(config.can_request_original_image_detail),
-        true,
+        /*supports_parallel_tool_calls*/ true,
         config.code_mode_enabled,
     );
     builder.register_handler("view_image", view_image_handler);
@@ -2931,7 +2939,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
         push_tool_spec(
             &mut builder,
             create_artifacts_tool(),
-            false,
+            /*supports_parallel_tool_calls*/ false,
             config.code_mode_enabled,
         );
         builder.register_handler("artifacts", artifacts_handler);
@@ -2948,31 +2956,31 @@ pub(crate) fn build_specs_with_discoverable_tools(
         push_tool_spec(
             &mut builder,
             create_spawn_agent_tool(config),
-            false,
+            /*supports_parallel_tool_calls*/ false,
             config.code_mode_enabled,
         );
         push_tool_spec(
             &mut builder,
             create_send_input_tool(),
-            false,
+            /*supports_parallel_tool_calls*/ false,
             config.code_mode_enabled,
         );
         push_tool_spec(
             &mut builder,
             create_resume_agent_tool(),
-            false,
+            /*supports_parallel_tool_calls*/ false,
             config.code_mode_enabled,
         );
         push_tool_spec(
             &mut builder,
             create_wait_agent_tool(),
-            false,
+            /*supports_parallel_tool_calls*/ false,
             config.code_mode_enabled,
         );
         push_tool_spec(
             &mut builder,
             create_close_agent_tool(),
-            false,
+            /*supports_parallel_tool_calls*/ false,
             config.code_mode_enabled,
         );
         builder.register_handler("spawn_agent", Arc::new(SpawnAgentHandler));
@@ -2987,7 +2995,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
         push_tool_spec(
             &mut builder,
             create_spawn_agents_on_csv_tool(),
-            false,
+            /*supports_parallel_tool_calls*/ false,
             config.code_mode_enabled,
         );
         builder.register_handler("spawn_agents_on_csv", agent_jobs_handler.clone());
@@ -2995,7 +3003,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
             push_tool_spec(
                 &mut builder,
                 create_report_agent_job_result_tool(),
-                false,
+                /*supports_parallel_tool_calls*/ false,
                 config.code_mode_enabled,
             );
             builder.register_handler("report_agent_job_result", agent_jobs_handler);
@@ -3012,7 +3020,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
                     push_tool_spec(
                         &mut builder,
                         ToolSpec::Function(converted_tool),
-                        false,
+                        /*supports_parallel_tool_calls*/ false,
                         config.code_mode_enabled,
                     );
                     builder.register_handler(name, mcp_handler.clone());
@@ -3031,7 +3039,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
                     push_tool_spec(
                         &mut builder,
                         ToolSpec::Function(converted_tool),
-                        false,
+                        /*supports_parallel_tool_calls*/ false,
                         config.code_mode_enabled,
                     );
                     builder.register_handler(tool.name.clone(), dynamic_tool_handler.clone());

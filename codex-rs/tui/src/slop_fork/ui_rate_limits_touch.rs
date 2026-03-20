@@ -611,7 +611,6 @@ mod tests {
             effective_context_window_percent: 95,
             experimental_supported_tools: Vec::new(),
             input_modalities: codex_protocol::openai_models::default_input_modalities(),
-            prefer_websockets: false,
             used_fallback_model_metadata: false,
             supports_search_tool: false,
         }

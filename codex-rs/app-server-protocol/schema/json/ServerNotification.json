@@ -1419,6 +1419,7 @@
     "HookEventName": {
       "enum": [
         "sessionStart",
+        "userPromptSubmit",
         "stop"
       ],
       "type": "string"
@@ -1736,6 +1737,54 @@
         "failed"
       ],
       "type": "string"
+    },
+    "MemoryCitation": {
+      "properties": {
+        "entries": {
+          "items": {
+            "$ref": "#/definitions/MemoryCitationEntry"
+          },
+          "type": "array"
+        },
+        "threadIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "entries",
+        "threadIds"
+      ],
+      "type": "object"
+    },
+    "MemoryCitationEntry": {
+      "properties": {
+        "lineEnd": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "lineStart": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "note": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "lineEnd",
+        "lineStart",
+        "note",
+        "path"
+      ],
+      "type": "object"
     },
     "MessagePhase": {
       "description": "Classifies an assistant message as interim commentary or final answer text.\n\nProviders do not emit this consistently, so callers must treat `None` as \"phase unknown\" and keep compatibility behavior for legacy models.",
@@ -2176,6 +2225,13 @@
       ],
       "type": "object"
     },
+    "RealtimeConversationVersion": {
+      "enum": [
+        "v1",
+        "v2"
+      ],
+      "type": "string"
+    },
     "ReasoningEffort": {
       "description": "See https://platform.openai.com/docs/guides/reasoning?api-mode=responses#get-started-with-reasoning",
       "enum": [
@@ -2305,6 +2361,19 @@
             "unknown"
           ],
           "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "custom": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "custom"
+          ],
+          "title": "CustomSessionSource",
+          "type": "object"
         },
         {
           "additionalProperties": false,
@@ -2654,6 +2723,17 @@
           "properties": {
             "id": {
               "type": "string"
+            },
+            "memoryCitation": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/MemoryCitation"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
             },
             "phase": {
               "anyOf": [
@@ -3232,6 +3312,12 @@
         "data": {
           "type": "string"
         },
+        "itemId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "numChannels": {
           "format": "uint16",
           "minimum": 0.0,
@@ -3333,10 +3419,14 @@
         },
         "threadId": {
           "type": "string"
+        },
+        "version": {
+          "$ref": "#/definitions/RealtimeConversationVersion"
         }
       },
       "required": [
-        "threadId"
+        "threadId",
+        "version"
       ],
       "type": "object"
     },

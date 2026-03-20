@@ -29,7 +29,8 @@ Supported transports:
 When running with `--listen ws://IP:PORT`, the same listener also serves basic HTTP health probes:
 
 - `GET /readyz` returns `200 OK` once the listener is accepting new connections.
-- `GET /healthz` currently always returns `200 OK`.
+- `GET /healthz` returns `200 OK` when no `Origin` header is present.
+- Any request carrying an `Origin` header is rejected with `403 Forbidden`.
 
 Websocket transport is currently experimental and unsupported. Do not rely on it for production workloads.
 
@@ -159,8 +160,6 @@ Example with notification opt-out:
 - `skills/list` — list skills for one or more `cwd` values (optional `forceReload`).
 - `plugin/list` — list discovered plugin marketplaces, including plugin id, installed/enabled state, and optional interface metadata (**under development; do not call from production clients yet**).
 - `skills/changed` — notification emitted when watched local skill files change.
-- `skills/remote/list` — list public remote skills (**under development; do not call from production clients yet**).
-- `skills/remote/export` — download a remote skill by `hazelnutId` into `skills` under `codex_home` (**under development; do not call from production clients yet**).
 - `app/list` — list available apps.
 - `pilot/read` — read the persisted state of the fork's Pilot autonomous run for a thread, even if that thread is not currently loaded (experimental).
 - `pilot/start` — start or replace the fork's persisted Pilot autonomous run for a thread; the listener queues assistant-only continuation turns once a loaded thread reaches idle (experimental).
@@ -252,7 +251,7 @@ Experimental API: `thread/start`, `thread/resume`, and `thread/fork` accept `per
 - `limit` — server defaults to a reasonable page size if unset.
 - `sortKey` — `created_at` (default) or `updated_at`.
 - `modelProviders` — restrict results to specific providers; unset, null, or an empty array will include all providers.
-- `sourceKinds` — restrict results to specific sources; omit or pass `[]` for interactive sessions only (`cli`, `vscode`).
+- `sourceKinds` — restrict results to specific sources; omit or pass `[]` for interactive sessions only (`cli`, `vscode`, and custom product sources).
 - `archived` — when `true`, list archived threads only. When `false` or `null`, list non-archived threads (default).
 - `cwd` — restrict results to threads whose session cwd exactly matches this path.
 - `searchTerm` — restrict results to threads whose extracted title contains this substring (case-sensitive).
@@ -887,7 +886,7 @@ Order of messages:
 
 ### Permission requests
 
-The built-in `request_permissions` tool sends an `item/permissions/requestApproval` JSON-RPC request to the client with the requested permission profile. Today that commonly means additional filesystem access, but the payload is intentionally general so future requests can include non-filesystem permissions too. This request is part of the v2 protocol surface.
+The built-in `request_permissions` tool sends an `item/permissions/requestApproval` JSON-RPC request to the client with the requested permission profile. This v2 payload mirrors the standalone tool's narrower permission shape, so it can request network access and additional filesystem access but does not include the broader `macos` branch used by command-execution `additionalPermissions`.
 
 ```json
 {

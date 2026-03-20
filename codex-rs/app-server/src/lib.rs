@@ -268,10 +268,10 @@ fn app_text_range(range: &CoreTextRange) -> AppTextRange {
 fn project_config_warning(config: &Config) -> Option<ConfigWarningNotification> {
     let mut disabled_folders = Vec::new();
 
-    for layer in config
-        .config_layer_stack
-        .get_layers(ConfigLayerStackOrdering::LowestPrecedenceFirst, true)
-    {
+    for layer in config.config_layer_stack.get_layers(
+        ConfigLayerStackOrdering::LowestPrecedenceFirst,
+        /*include_disabled*/ true,
+    ) {
         if !matches!(layer.name, ConfigLayerSource::Project { .. })
             || layer.disabled_reason.is_none()
         {
@@ -338,6 +338,7 @@ pub async fn run_main(
         loader_overrides,
         default_analytics_enabled,
         AppServerTransport::Stdio,
+        SessionSource::VSCode,
     )
     .await
 }
@@ -348,6 +349,7 @@ pub async fn run_main_with_transport(
     loader_overrides: LoaderOverrides,
     default_analytics_enabled: bool,
     transport: AppServerTransport,
+    session_source: SessionSource,
 ) -> IoResult<()> {
     let (transport_event_tx, mut transport_event_rx) =
         mpsc::channel::<TransportEvent>(CHANNEL_CAPACITY);
@@ -420,7 +422,7 @@ pub async fn run_main_with_transport(
 
             let auth_manager = AuthManager::shared(
                 config.codex_home.clone(),
-                false,
+                /*enable_codex_api_key_env*/ false,
                 config.cli_auth_credentials_store_mode,
             );
             cloud_requirements_loader(
@@ -474,6 +476,14 @@ pub async fn run_main_with_transport(
     for warning in &config.startup_warnings {
         config_warnings.push(ConfigWarningNotification {
             summary: warning.clone(),
+            details: None,
+            path: None,
+            range: None,
+        });
+    }
+    if let Some(warning) = codex_core::config::missing_system_bwrap_warning() {
+        config_warnings.push(ConfigWarningNotification {
+            summary: warning,
             details: None,
             path: None,
             range: None,
@@ -615,7 +625,7 @@ pub async fn run_main_with_transport(
             feedback: feedback.clone(),
             log_db,
             config_warnings,
-            session_source: SessionSource::VSCode,
+            session_source,
             enable_codex_api_key_env: false,
         });
         let mut thread_created_rx = processor.thread_created_receiver();
