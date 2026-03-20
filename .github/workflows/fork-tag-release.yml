@@ -47,15 +47,22 @@ jobs:
         id: plan
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          INPUT_RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
-          INPUT_RELEASE_TITLE: ${{ github.event_name == 'push' && '' || inputs.release_title }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag || '' }}
+          INPUT_RELEASE_TITLE: ${{ inputs.release_title || '' }}
         run: |
           set -euo pipefail
 
-          release_tag="$(python3 - <<'PY'
+          raw_release_tag="${INPUT_RELEASE_TAG}"
+          raw_release_title="${INPUT_RELEASE_TITLE}"
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            raw_release_tag="${GITHUB_REF_NAME}"
+            raw_release_title=""
+          fi
+
+          release_tag="$(RAW_RELEASE_TAG="${raw_release_tag}" python3 - <<'PY'
           import os
 
-          raw = os.environ["INPUT_RELEASE_TAG"].strip()
+          raw = os.environ["RAW_RELEASE_TAG"].strip()
           prefix = "refs/tags/"
           if raw.startswith(prefix):
             raw = raw[len(prefix):]
@@ -68,7 +75,7 @@ jobs:
           fi
           normalized_tag_ref="$(git check-ref-format --normalize "refs/tags/${release_tag}" 2>/dev/null || true)"
           if [[ -z "${normalized_tag_ref}" ]]; then
-            echo "::error::release_tag is not a valid git tag name."
+            printf '::error::release_tag is not a valid git tag name: %q\n' "${raw_release_tag}"
             exit 1
           fi
           release_tag="${normalized_tag_ref#refs/tags/}"
@@ -84,7 +91,7 @@ jobs:
           )"
           source_sha="$(git rev-parse HEAD)"
           source_ref="${GITHUB_REF_NAME}"
-          release_title="${INPUT_RELEASE_TITLE}"
+          release_title="${raw_release_title}"
           if [[ -z "${release_title// }" ]]; then
             release_title="${release_tag}"
           fi
