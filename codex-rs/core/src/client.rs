@@ -707,15 +707,6 @@ impl ModelClientSession {
         self.turn_state = Arc::new(OnceLock::new());
     }
 
-    fn activate_http_fallback(&self, websocket_enabled: bool) -> bool {
-        websocket_enabled
-            && !self
-                .client
-                .state
-                .disable_websockets
-                .swap(true, Ordering::Relaxed)
-    }
-
     fn build_responses_request(
         &self,
         provider: &codex_api::Provider,
