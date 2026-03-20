@@ -1799,9 +1799,7 @@ impl CodexMessageProcessor {
         self.ensure_listener_task_running(
             thread_id,
             conversation,
-            self.thread_state_manager
-                .thread_state(thread_id)
-                .await,
+            self.thread_state_manager.thread_state(thread_id).await,
             ApiVersion::V2,
         )
         .await;
@@ -1853,9 +1851,7 @@ impl CodexMessageProcessor {
         self.ensure_listener_task_running(
             thread_id,
             conversation,
-            self.thread_state_manager
-                .thread_state(thread_id)
-                .await,
+            self.thread_state_manager.thread_state(thread_id).await,
             ApiVersion::V2,
         )
         .await;
