@@ -1,6 +1,9 @@
 name: fork-tag-release
 
 on:
+  push:
+    tags:
+      - "codex-slop-fork-v*"
   workflow_dispatch:
     inputs:
       release_tag:
@@ -13,7 +16,7 @@ on:
         type: string
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.release_tag }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
   cancel-in-progress: false
 
 permissions:
@@ -44,20 +47,31 @@ jobs:
         id: plan
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
-          INPUT_RELEASE_TITLE: ${{ inputs.release_title }}
+          INPUT_RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
+          INPUT_RELEASE_TITLE: ${{ github.event_name == 'push' && '' || inputs.release_title }}
         run: |
           set -euo pipefail
 
-          release_tag="${INPUT_RELEASE_TAG}"
-          if [[ -z "${release_tag// }" ]]; then
+          release_tag="$(python3 - <<'PY'
+          import os
+
+          raw = os.environ["INPUT_RELEASE_TAG"].strip()
+          prefix = "refs/tags/"
+          if raw.startswith(prefix):
+            raw = raw[len(prefix):]
+          print(raw)
+          PY
+          )"
+          if [[ -z "${release_tag}" ]]; then
             echo "::error::release_tag must not be empty."
             exit 1
           fi
-          if ! git check-ref-format "refs/tags/${release_tag}" >/dev/null 2>&1; then
+          normalized_tag_ref="$(git check-ref-format --normalize "refs/tags/${release_tag}" 2>/dev/null || true)"
+          if [[ -z "${normalized_tag_ref}" ]]; then
             echo "::error::release_tag is not a valid git tag name."
             exit 1
           fi
+          release_tag="${normalized_tag_ref#refs/tags/}"
 
           version="$(python3 - <<'PY'
           import pathlib
