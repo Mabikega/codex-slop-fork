@@ -16,6 +16,13 @@ The goal of this repository is to keep this project as a lightly maintained fork
 
 This section describes the actual structure of this fork, not generic upstream Codex structure.
 
+- GitHub Actions policy: keep only fork-owned workflows whose filenames start with `fork-`.
+- The current fork-owned GitHub Actions workflows are:
+  - `.github/workflows/fork-release.yml`
+  - `.github/workflows/fork-tag-release.yml`
+- Remove upstream or non-fork GitHub Actions workflows and workflow-only support files when they are no longer needed by the fork.
+- Do not add new non-fork workflow files unless the user explicitly asks for an exception.
+
 - Core fork logic lives under `codex-rs/core/src/slop_fork/`.
 - Current core fork modules are:
   - `account_rate_limits.rs`
