@@ -16,11 +16,22 @@ use crate::bottom_pane::MentionBinding;
 use crate::chatwidget::realtime::RealtimeConversationPhase;
 use crate::history_cell::UserHistoryCell;
 use crate::model_catalog::ModelCatalog;
+use crate::slop_fork::AccountsPopupContext;
+use crate::slop_fork::AccountsRootOverview;
+use crate::slop_fork::RenameAccountsPopupOverview;
+use crate::slop_fork::SavedAccountLimitsOverview;
+use crate::slop_fork::SlopForkEvent;
+use crate::slop_fork::account_limits::SavedAccountLimitEntry;
+use crate::slop_fork::accounts::RenameSuggestionsSummary;
+use crate::slop_fork::accounts::SavedAccountRenameEntry;
+use crate::slop_fork::accounts::SharedActiveAccountChoice;
 use crate::test_backend::VT100Backend;
 use crate::test_support::PathBufExt;
 use crate::test_support::test_path_display;
 use crate::tui::FrameRequester;
 use assert_matches::assert_matches;
+use base64::Engine as _;
+use chrono::Utc;
 use codex_app_server_protocol::AppSummary;
 use codex_app_server_protocol::CollabAgentState as AppServerCollabAgentState;
 use codex_app_server_protocol::CollabAgentStatus as AppServerCollabAgentStatus;
@@ -62,6 +73,7 @@ use codex_app_server_protocol::TurnError as AppServerTurnError;
 use codex_app_server_protocol::TurnStartedNotification;
 use codex_app_server_protocol::TurnStatus as AppServerTurnStatus;
 use codex_app_server_protocol::UserInput as AppServerUserInput;
+use codex_core::auth::AuthDotJson;
 use codex_core::config::ApprovalsReviewer;
 use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
@@ -82,6 +94,9 @@ use codex_core::skills::model::SkillMetadata;
 use codex_features::FEATURES;
 use codex_features::Feature;
 use codex_git_utils::CommitLogEntry;
+use codex_login::AuthMode;
+use codex_login::token_data::IdTokenInfo;
+use codex_login::token_data::TokenData;
 use codex_otel::RuntimeMetricsSummary;
 use codex_otel::SessionTelemetry;
 use codex_protocol::ThreadId;
@@ -218,6 +233,47 @@ fn snapshot(percent: f64) -> RateLimitSnapshot {
         secondary: None,
         credits: None,
         plan_type: None,
+    }
+}
+
+fn fake_jwt(email: &str, account_id: &str) -> String {
+    let header = serde_json::json!({"alg": "HS256", "typ": "JWT"});
+    let payload = serde_json::json!({
+        "email": email,
+        "https://api.openai.com/auth": {
+            "chatgpt_plan_type": "pro",
+            "chatgpt_account_id": account_id,
+        }
+    });
+
+    fn b64url_no_pad(bytes: &[u8]) -> String {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+    }
+
+    let header_b64 = b64url_no_pad(&serde_json::to_vec(&header).expect("header"));
+    let payload_b64 = b64url_no_pad(&serde_json::to_vec(&payload).expect("payload"));
+    let signature_b64 = b64url_no_pad(b"sig");
+    format!("{header_b64}.{payload_b64}.{signature_b64}")
+}
+
+fn chatgpt_auth_dot_json(account_id: &str, email: &str) -> AuthDotJson {
+    let id_token = IdTokenInfo {
+        email: Some(email.to_string()),
+        chatgpt_account_id: Some(account_id.to_string()),
+        raw_jwt: fake_jwt(email, account_id),
+        ..Default::default()
+    };
+
+    AuthDotJson {
+        auth_mode: Some(AuthMode::Chatgpt),
+        openai_api_key: None,
+        tokens: Some(TokenData {
+            id_token,
+            access_token: "access".to_string(),
+            refresh_token: "refresh".to_string(),
+            account_id: Some(account_id.to_string()),
+        }),
+        last_refresh: Some(Utc::now()),
     }
 }
 
@@ -1888,7 +1944,13 @@ async fn turn_started_uses_runtime_context_window_before_first_token_count() {
     });
 
     assert_eq!(
-        chat.status_line_value_for_item(&crate::bottom_pane::StatusLineItem::ContextWindowSize),
+        chat.status_line_value_for_item(
+            &crate::bottom_pane::StatusLineItem::ContextWindowSize,
+            &crate::chatwidget::saved_account_status_line::SavedAccountStatusLineFormatter::load(
+                &chat.config.codex_home,
+                &[crate::bottom_pane::StatusLineItem::ContextWindowSize],
+            ),
+        ),
         Some("950K window".to_string())
     );
     assert_eq!(chat.bottom_pane.context_window_percent(), Some(100));
@@ -2045,6 +2107,8 @@ async fn make_chatwidget_manual(
         plan_type: None,
         rate_limit_warnings: RateLimitWarningState::default(),
         rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
+        rate_limit_poller: None,
+        saved_account_limits_refresh: None,
         adaptive_chunking: crate::streaming::chunking::AdaptiveChunkingPolicy::default(),
         stream_controller: None,
         plan_stream_controller: None,
@@ -2057,6 +2121,7 @@ async fn make_chatwidget_manual(
         suppressed_exec_calls: HashSet::new(),
         skills_all: Vec::new(),
         skills_initial_state: None,
+        auto_command_skill_conflict_warned: false,
         last_unified_wait: None,
         unified_exec_wait_streak: None,
         turn_sleep_inhibitor: SleepInhibitor::new(prevent_idle_sleep),
@@ -10080,6 +10145,250 @@ async fn fast_status_indicator_requires_chatgpt_auth() {
 }
 
 #[tokio::test]
+async fn accounts_slash_command_emits_slop_fork_event() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+
+    chat.dispatch_command(SlashCommand::Accounts);
+
+    match rx.try_recv() {
+        Ok(AppEvent::SlopFork(SlopForkEvent::OpenAccountsRoot)) => {}
+        other => panic!("expected accounts event, got {other:?}"),
+    }
+    assert_matches!(rx.try_recv(), Err(TryRecvError::Empty));
+    assert_no_submit_op(&mut op_rx);
+}
+
+#[tokio::test]
+async fn accounts_root_popup_lists_saved_account_limits() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.show_slop_fork_accounts_root(AccountsRootOverview {
+        popup_context: AccountsPopupContext {
+            session_account_label: Some("Account 1 (pro)".to_string()),
+            shared_active_account_label: Some("Account 2 (pro)".to_string()),
+            rename_summary: RenameSuggestionsSummary {
+                total_count: 2,
+                renameable_count: 1,
+                blocked_count: 1,
+            },
+        },
+        saved_account_count: 2,
+        due_count: 1,
+        shared_active_choice: Some(SharedActiveAccountChoice {
+            account_id: "acct-shared".to_string(),
+            label: "Account 2 (pro)".to_string(),
+        }),
+    });
+
+    let popup = render_bottom_popup(&chat, 90);
+    assert!(popup.contains("Login with device code"), "popup: {popup}");
+    assert!(
+        popup.contains("Switch to shared active account"),
+        "popup: {popup}"
+    );
+    assert!(popup.contains("Rename account files"), "popup: {popup}");
+    assert!(popup.contains("View account limits"), "popup: {popup}");
+    assert!(popup.contains("1 more option(s) below"), "popup: {popup}");
+    assert!(popup.contains("refresh due"), "popup: {popup}");
+}
+
+#[tokio::test]
+async fn accounts_root_popup_settings_is_selectable_when_scrolled() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.show_slop_fork_accounts_root(AccountsRootOverview {
+        popup_context: AccountsPopupContext {
+            session_account_label: Some("Account 1 (pro)".to_string()),
+            shared_active_account_label: Some("Account 2 (pro)".to_string()),
+            rename_summary: RenameSuggestionsSummary {
+                total_count: 2,
+                renameable_count: 1,
+                blocked_count: 1,
+            },
+        },
+        saved_account_count: 2,
+        due_count: 1,
+        shared_active_choice: Some(SharedActiveAccountChoice {
+            account_id: "acct-shared".to_string(),
+            label: "Account 2 (pro)".to_string(),
+        }),
+    });
+
+    for _ in 0..8 {
+        chat.handle_key_event(KeyEvent::from(KeyCode::Down));
+    }
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+
+    match rx.try_recv() {
+        Ok(AppEvent::SlopFork(SlopForkEvent::OpenAccountsSettings)) => {}
+        other => panic!("expected settings event, got {other:?}"),
+    }
+    assert_matches!(rx.try_recv(), Err(TryRecvError::Empty));
+}
+
+#[tokio::test]
+async fn saved_account_limits_popup_snapshot() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.show_slop_fork_saved_account_limits(SavedAccountLimitsOverview {
+        popup_context: AccountsPopupContext {
+            session_account_label: Some("primary@example.com (pro)".to_string()),
+            shared_active_account_label: Some("primary@example.com (pro)".to_string()),
+            rename_summary: RenameSuggestionsSummary {
+                total_count: 1,
+                renameable_count: 1,
+                blocked_count: 0,
+            },
+        },
+        entries: vec![
+            SavedAccountLimitEntry {
+                account_id: "acct-primary".to_string(),
+                label: "primary@example.com".to_string(),
+                summary: "5h  40% until 12:00 on 1 Jan · weekly  10% until 09:00 on 4 Jan"
+                    .to_string(),
+                is_current: true,
+                is_due: true,
+                is_refreshable: true,
+            },
+            SavedAccountLimitEntry {
+                account_id: "acct-api-key".to_string(),
+                label: "api-key".to_string(),
+                summary: "No snapshot yet".to_string(),
+                is_current: false,
+                is_due: false,
+                is_refreshable: false,
+            },
+        ],
+        due_count: 1,
+        refreshable_account_count: 1,
+    });
+
+    let popup = render_bottom_popup(&chat, 100);
+    assert_snapshot!("saved_account_limits_popup", popup);
+}
+
+#[tokio::test]
+async fn accounts_root_popup_full_featured_snapshot() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.show_slop_fork_accounts_root(AccountsRootOverview {
+        popup_context: AccountsPopupContext {
+            session_account_label: Some("Account 1 (pro)".to_string()),
+            shared_active_account_label: Some("Account 2 (pro)".to_string()),
+            rename_summary: RenameSuggestionsSummary {
+                total_count: 3,
+                renameable_count: 2,
+                blocked_count: 1,
+            },
+        },
+        saved_account_count: 4,
+        due_count: 2,
+        shared_active_choice: Some(SharedActiveAccountChoice {
+            account_id: "acct-shared".to_string(),
+            label: "Account 2 (pro)".to_string(),
+        }),
+    });
+
+    let popup = render_bottom_popup(&chat, 100);
+    assert_snapshot!("accounts_root_popup_full_featured", popup);
+}
+
+#[tokio::test]
+async fn rename_accounts_popup_snapshot() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.show_slop_fork_saved_account_renames(RenameAccountsPopupOverview {
+        popup_context: AccountsPopupContext {
+            session_account_label: Some("Account 1 (pro)".to_string()),
+            shared_active_account_label: Some("Account 1 (pro)".to_string()),
+            rename_summary: RenameSuggestionsSummary {
+                total_count: 2,
+                renameable_count: 1,
+                blocked_count: 1,
+            },
+        },
+        entries: vec![
+            SavedAccountRenameEntry {
+                path: PathBuf::from("/tmp/chatgpt-old.json"),
+                current_name: "chatgpt-old.json".to_string(),
+                suggested_name: "chatgpt-1234abcd5678ef90.json".to_string(),
+                account_label: "Account 2 (pro)".to_string(),
+                target_exists: false,
+            },
+            SavedAccountRenameEntry {
+                path: PathBuf::from("/tmp/chatgpt-duplicate.json"),
+                current_name: "chatgpt-duplicate.json".to_string(),
+                suggested_name: "chatgpt-1111222233334444.json".to_string(),
+                account_label: "Account 3 (pro)".to_string(),
+                target_exists: true,
+            },
+        ],
+        renameable_count: 1,
+        blocked_count: 1,
+    });
+
+    let popup = render_bottom_popup(&chat, 100);
+    assert_snapshot!("rename_accounts_popup", popup);
+}
+
+#[tokio::test]
+async fn auto_command_submit_emits_slop_fork_event_instead_of_user_turn() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.bottom_pane
+        .set_composer_text("$auto list".to_string(), Vec::new(), Vec::new());
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    match rx.try_recv() {
+        Ok(AppEvent::SlopFork(SlopForkEvent::ExecuteAuto { args, history })) => {
+            assert_eq!(args, "list");
+            assert!(history.is_none());
+        }
+        other => panic!("expected auto command event, got {other:?}"),
+    }
+    assert_matches!(rx.try_recv(), Err(TryRecvError::Empty));
+    assert_no_submit_op(&mut op_rx);
+}
+
+#[tokio::test]
+async fn pilot_command_submit_emits_slop_fork_event_instead_of_user_turn() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.bottom_pane
+        .set_composer_text("$pilot status".to_string(), Vec::new(), Vec::new());
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    match rx.try_recv() {
+        Ok(AppEvent::SlopFork(SlopForkEvent::ExecutePilot { args, history })) => {
+            assert_eq!(args, "status");
+            assert!(history.is_none());
+        }
+        other => panic!("expected pilot command event, got {other:?}"),
+    }
+    assert_matches!(rx.try_recv(), Err(TryRecvError::Empty));
+    assert_no_submit_op(&mut op_rx);
+}
+
+#[tokio::test]
+async fn autoresearch_command_submit_emits_slop_fork_event_instead_of_user_turn() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.bottom_pane
+        .set_composer_text("$autoresearch status".to_string(), Vec::new(), Vec::new());
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    match rx.try_recv() {
+        Ok(AppEvent::SlopFork(SlopForkEvent::ExecuteAutoresearch { args, history })) => {
+            assert_eq!(args, "status");
+            assert!(history.is_none());
+        }
+        other => panic!("expected autoresearch command event, got {other:?}"),
+    }
+    assert_matches!(rx.try_recv(), Err(TryRecvError::Empty));
+    assert_no_submit_op(&mut op_rx);
+}
+
+#[tokio::test]
 async fn fast_status_indicator_is_hidden_for_non_gpt54_model() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.3-codex")).await;
     chat.set_service_tier(Some(ServiceTier::Fast));
@@ -12415,6 +12724,96 @@ async fn status_line_branch_refreshes_after_interrupt() {
     });
 
     assert!(chat.status_line_branch_pending);
+}
+
+#[tokio::test]
+async fn status_line_limits_show_saved_account_average_when_enabled() {
+    let dir = tempdir().expect("temp dir");
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.config.tui_status_line = Some(vec![
+        "five-hour-limit".to_string(),
+        "weekly-limit".to_string(),
+    ]);
+
+    let first = chatgpt_auth_dot_json("acct-average-1", "average-1@example.com");
+    let second = chatgpt_auth_dot_json("acct-average-2", "average-2@example.com");
+    codex_core::slop_fork::auth_accounts::upsert_account(&chat.config.codex_home, &first)
+        .expect("save first account");
+    codex_core::slop_fork::auth_accounts::upsert_account(&chat.config.codex_home, &second)
+        .expect("save second account");
+    codex_core::slop_fork::account_rate_limits::record_rate_limit_snapshot(
+        &chat.config.codex_home,
+        "acct-average-1",
+        Some("pro"),
+        &RateLimitSnapshot {
+            limit_id: Some("codex".to_string()),
+            limit_name: Some("codex".to_string()),
+            primary: Some(RateLimitWindow {
+                used_percent: 40.0,
+                window_minutes: Some(300),
+                resets_at: None,
+            }),
+            secondary: Some(RateLimitWindow {
+                used_percent: 80.0,
+                window_minutes: Some(10_080),
+                resets_at: None,
+            }),
+            credits: None,
+            plan_type: None,
+        },
+        Utc::now(),
+    )
+    .expect("record first account limits");
+    codex_core::slop_fork::account_rate_limits::record_rate_limit_snapshot(
+        &chat.config.codex_home,
+        "acct-average-2",
+        Some("pro"),
+        &RateLimitSnapshot {
+            limit_id: Some("codex".to_string()),
+            limit_name: Some("codex".to_string()),
+            primary: Some(RateLimitWindow {
+                used_percent: 20.0,
+                window_minutes: Some(300),
+                resets_at: None,
+            }),
+            secondary: Some(RateLimitWindow {
+                used_percent: 60.0,
+                window_minutes: Some(10_080),
+                resets_at: None,
+            }),
+            credits: None,
+            plan_type: None,
+        },
+        Utc::now(),
+    )
+    .expect("record second account limits");
+    codex_core::slop_fork::update_slop_fork_config(&chat.config.codex_home, |config| {
+        config.show_average_account_limits_in_status_line = true;
+    })
+    .expect("enable status line averages");
+
+    chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
+        limit_id: Some("codex".to_string()),
+        limit_name: Some("codex".to_string()),
+        primary: Some(RateLimitWindow {
+            used_percent: 5.0,
+            window_minutes: Some(300),
+            resets_at: None,
+        }),
+        secondary: Some(RateLimitWindow {
+            used_percent: 1.0,
+            window_minutes: Some(10_080),
+            resets_at: None,
+        }),
+        credits: None,
+        plan_type: None,
+    }));
+
+    assert_eq!(
+        status_line_text(&chat),
+        Some("5h 95% (70%) · weekly 99% (30%)".to_string())
+    );
 }
 
 #[tokio::test]

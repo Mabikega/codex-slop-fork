@@ -2,8 +2,10 @@ pub mod auth;
 pub mod token_data;
 
 mod device_code_auth;
+mod path_utils;
 mod pkce;
 mod server;
+pub(crate) mod slop_fork;
 
 pub use codex_client::BuildCustomCaTransportError as BuildLoginHttpClientError;
 pub use device_code_auth::DeviceCode;
@@ -26,12 +28,15 @@ pub use auth::OPENAI_API_KEY_ENV_VAR;
 pub use auth::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
 pub use auth::RefreshTokenError;
 pub use auth::UnauthorizedRecovery;
+pub use auth::auth_for_auth_file;
+pub use auth::auth_for_saved_account;
 pub use auth::default_client;
 pub use auth::enforce_login_restrictions;
 pub use auth::load_auth_dot_json;
 pub use auth::login_with_api_key;
 pub use auth::logout;
 pub use auth::read_openai_api_key_from_env;
+pub use auth::refresh_chatgpt_auth_from_authority_for_auth;
 pub use auth::save_auth;
 pub use codex_app_server_protocol::AuthMode;
 pub use token_data::TokenData;

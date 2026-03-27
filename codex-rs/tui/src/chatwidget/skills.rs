@@ -141,6 +141,9 @@ impl ChatWidget {
         let skills = skills_for_cwd(&self.config.cwd, &response.skills);
         self.skills_all = skills;
         self.set_skills(Some(enabled_skills_for_mentions(&self.skills_all)));
+        if let Some(warning) = self.slop_fork_ui.on_skills_loaded(&self.skills_all) {
+            self.on_warning(warning);
+        }
     }
 }
 

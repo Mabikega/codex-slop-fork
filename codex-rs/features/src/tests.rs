@@ -151,6 +151,12 @@ fn tool_call_mcp_elicitation_is_stable_and_enabled_by_default() {
 }
 
 #[test]
+fn tui_app_server_is_stable_and_enabled_by_default() {
+    assert_eq!(Feature::TuiAppServer.stage(), Stage::Stable);
+    assert_eq!(Feature::TuiAppServer.default_enabled(), true);
+}
+
+#[test]
 fn image_detail_original_feature_is_under_development() {
     assert_eq!(
         Feature::ImageDetailOriginal.stage(),

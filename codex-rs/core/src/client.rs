@@ -60,6 +60,7 @@ use codex_api::create_text_param_for_request;
 use codex_api::error::ApiError;
 use codex_api::requests::responses::Compression;
 use codex_api::response_create_client_metadata;
+use codex_app_server_protocol::AuthMode as ApiAuthMode;
 use codex_otel::SessionTelemetry;
 use codex_otel::current_span_w3c_trace_context;
 
@@ -197,6 +198,8 @@ pub struct ModelClient {
 pub struct ModelClientSession {
     client: ModelClient,
     websocket_session: WebsocketSession,
+    cache_websocket_across_turns: bool,
+    last_request_auth: StdMutex<Option<CodexAuth>>,
     /// Turn state for sticky routing.
     ///
     /// This is an `OnceLock` that stores the turn state value received from the server
@@ -290,6 +293,8 @@ impl ModelClient {
         ModelClientSession {
             client: self.clone(),
             websocket_session: self.take_cached_websocket_session(),
+            cache_websocket_across_turns: true,
+            last_request_auth: StdMutex::new(None),
             turn_state: Arc::new(OnceLock::new()),
         }
     }
@@ -330,76 +335,6 @@ impl ModelClient {
 
         self.store_cached_websocket_session(WebsocketSession::default());
         activated
-    }
-
-    /// Compacts the current conversation history using the Compact endpoint.
-    ///
-    /// This is a unary call (no streaming) that returns a new list of
-    /// `ResponseItem`s representing the compacted transcript.
-    ///
-    /// The model selection and telemetry context are passed explicitly to keep `ModelClient`
-    /// session-scoped.
-    pub async fn compact_conversation_history(
-        &self,
-        prompt: &Prompt,
-        model_info: &ModelInfo,
-        effort: Option<ReasoningEffortConfig>,
-        summary: ReasoningSummaryConfig,
-        session_telemetry: &SessionTelemetry,
-    ) -> Result<Vec<ResponseItem>> {
-        if prompt.input.is_empty() {
-            return Ok(Vec::new());
-        }
-        let client_setup = self.current_client_setup().await?;
-        let transport = ReqwestTransport::new(build_reqwest_client());
-        let request_telemetry = Self::build_request_telemetry(
-            session_telemetry,
-            AuthRequestTelemetryContext::new(
-                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
-                &client_setup.api_auth,
-                PendingUnauthorizedRetry::default(),
-            ),
-            RequestRouteTelemetry::for_endpoint(RESPONSES_COMPACT_ENDPOINT),
-            self.state.auth_env_telemetry.clone(),
-        );
-        let client =
-            ApiCompactClient::new(transport, client_setup.api_provider, client_setup.api_auth)
-                .with_telemetry(Some(request_telemetry));
-
-        let instructions = prompt.base_instructions.text.clone();
-        let input = prompt.get_formatted_input();
-        let tools = create_tools_json_for_responses_api(&prompt.tools)?;
-        let reasoning = Self::build_reasoning(model_info, effort, summary);
-        let verbosity = if model_info.support_verbosity {
-            self.state.model_verbosity.or(model_info.default_verbosity)
-        } else {
-            if self.state.model_verbosity.is_some() {
-                warn!(
-                    "model_verbosity is set but ignored as the model does not support verbosity: {}",
-                    model_info.slug
-                );
-            }
-            None
-        };
-        let text = create_text_param_for_request(verbosity, &prompt.output_schema);
-        let payload = ApiCompactionInput {
-            model: &model_info.slug,
-            input: &input,
-            instructions: &instructions,
-            tools,
-            parallel_tool_calls: prompt.parallel_tool_calls,
-            reasoning,
-            text,
-        };
-
-        let mut extra_headers = self.build_subagent_headers();
-        extra_headers.extend(build_conversation_headers(Some(
-            self.state.conversation_id.to_string(),
-        )));
-        client
-            .compact_input(&payload, extra_headers)
-            .await
-            .map_err(map_api_error)
     }
 
     /// Builds memory summaries for each provided normalized raw memory.
@@ -665,18 +600,141 @@ impl ModelClient {
 impl Drop for ModelClientSession {
     fn drop(&mut self) {
         let websocket_session = std::mem::take(&mut self.websocket_session);
-        self.client
-            .store_cached_websocket_session(websocket_session);
+        if self.cache_websocket_across_turns {
+            self.client
+                .store_cached_websocket_session(websocket_session);
+        }
     }
 }
 
 impl ModelClientSession {
+    /// Compacts the current conversation history using the Compact endpoint.
+    ///
+    /// This is a unary call (no streaming) that returns a new list of
+    /// `ResponseItem`s representing the compacted transcript.
+    pub async fn compact_conversation_history(
+        &mut self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        effort: Option<ReasoningEffortConfig>,
+        summary: ReasoningSummaryConfig,
+        session_telemetry: &SessionTelemetry,
+    ) -> Result<Vec<ResponseItem>> {
+        if prompt.input.is_empty() {
+            return Ok(Vec::new());
+        }
+        let auth_manager = self.client.state.auth_manager.clone();
+        let mut auth_recovery = auth_manager
+            .as_ref()
+            .map(super::auth::AuthManager::unauthorized_recovery);
+        let mut pending_retry = PendingUnauthorizedRetry::default();
+        loop {
+            let client_setup = self.client.current_client_setup().await?;
+            // Compact requests do not use websocket state, so avoid clearing a cached
+            // cross-turn websocket on the first compact call. If this session is reused and the
+            // auth changes mid-session, still reset turn-scoped transport state before later
+            // stream requests can observe the new auth.
+            if self.last_request_auth().is_some() {
+                self.reset_transport_state_for_auth_change(client_setup.auth.as_ref());
+            }
+            self.record_last_request_auth(client_setup.auth.as_ref());
+            let transport = ReqwestTransport::new(build_reqwest_client());
+            let request_telemetry = ModelClient::build_request_telemetry(
+                session_telemetry,
+                AuthRequestTelemetryContext::new(
+                    client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                    &client_setup.api_auth,
+                    pending_retry,
+                ),
+                RequestRouteTelemetry::for_endpoint(RESPONSES_COMPACT_ENDPOINT),
+                self.client.state.auth_env_telemetry.clone(),
+            );
+            let client =
+                ApiCompactClient::new(transport, client_setup.api_provider, client_setup.api_auth)
+                    .with_telemetry(Some(request_telemetry));
+
+            let instructions = prompt.base_instructions.text.clone();
+            let input = prompt.get_formatted_input();
+            let tools = create_tools_json_for_responses_api(&prompt.tools)?;
+            let reasoning = ModelClient::build_reasoning(model_info, effort, summary);
+            let verbosity = if model_info.support_verbosity {
+                self.client
+                    .state
+                    .model_verbosity
+                    .or(model_info.default_verbosity)
+            } else {
+                if self.client.state.model_verbosity.is_some() {
+                    warn!(
+                        "model_verbosity is set but ignored as the model does not support verbosity: {}",
+                        model_info.slug
+                    );
+                }
+                None
+            };
+            let text = create_text_param_for_request(verbosity, &prompt.output_schema);
+            let payload = ApiCompactionInput {
+                model: &model_info.slug,
+                input: &input,
+                instructions: &instructions,
+                tools,
+                parallel_tool_calls: prompt.parallel_tool_calls,
+                reasoning,
+                text,
+            };
+
+            let mut extra_headers = self.client.build_subagent_headers();
+            extra_headers.extend(build_conversation_headers(Some(
+                self.client.state.conversation_id.to_string(),
+            )));
+            match client.compact_input(&payload, extra_headers).await {
+                Ok(compacted_history) => return Ok(compacted_history),
+                Err(ApiError::Transport(
+                    unauthorized_transport @ TransportError::Http { status, .. },
+                )) if status == StatusCode::UNAUTHORIZED => {
+                    pending_retry = PendingUnauthorizedRetry::from_recovery(
+                        handle_unauthorized(
+                            unauthorized_transport,
+                            &mut auth_recovery,
+                            session_telemetry,
+                        )
+                        .await?,
+                    );
+                }
+                Err(err) => return Err(map_api_error(err)),
+            }
+        }
+    }
+
     fn reset_websocket_session(&mut self) {
         self.websocket_session.connection = None;
         self.websocket_session.last_request = None;
         self.websocket_session.last_response_rx = None;
         self.websocket_session
             .set_connection_reused(/*connection_reused*/ false);
+    }
+
+    fn record_last_request_auth(&self, auth: Option<&CodexAuth>) {
+        *self
+            .last_request_auth
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = auth.cloned();
+    }
+
+    pub(crate) fn last_request_auth(&self) -> Option<CodexAuth> {
+        self.last_request_auth
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn reset_transport_state_for_auth_change(&mut self, auth: Option<&CodexAuth>) {
+        if auths_equal_for_transport(self.last_request_auth().as_ref(), auth) {
+            return;
+        }
+        self.websocket_session.connection = None;
+        self.websocket_session.last_request = None;
+        self.websocket_session.last_response_rx = None;
+        self.turn_state = Arc::new(OnceLock::new());
     }
 
     fn build_responses_request(
@@ -996,7 +1054,7 @@ impl ModelClientSession {
         )
     )]
     async fn stream_responses_api(
-        &self,
+        &mut self,
         prompt: &Prompt,
         model_info: &ModelInfo,
         session_telemetry: &SessionTelemetry,
@@ -1023,6 +1081,8 @@ impl ModelClientSession {
         let mut pending_retry = PendingUnauthorizedRetry::default();
         loop {
             let client_setup = self.client.current_client_setup().await?;
+            self.reset_transport_state_for_auth_change(client_setup.auth.as_ref());
+            self.record_last_request_auth(client_setup.auth.as_ref());
             let transport = ReqwestTransport::new(build_reqwest_client());
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
@@ -1112,6 +1172,8 @@ impl ModelClientSession {
         let mut pending_retry = PendingUnauthorizedRetry::default();
         loop {
             let client_setup = self.client.current_client_setup().await?;
+            self.reset_transport_state_for_auth_change(client_setup.auth.as_ref());
+            self.record_last_request_auth(client_setup.auth.as_ref());
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
                 &client_setup.api_auth,
@@ -1245,6 +1307,10 @@ impl ModelClientSession {
         if self.websocket_session.last_request.is_some() {
             return Ok(());
         }
+        // Startup prewarm should accelerate the first turn only. Reusing that
+        // transport across later turns can carry stale websocket state into a
+        // fresh turn and is not required for correctness.
+        self.cache_websocket_across_turns = false;
 
         match self
             .stream_responses_websocket(
@@ -1352,6 +1418,21 @@ impl ModelClientSession {
             .force_http_fallback(session_telemetry, model_info);
         self.websocket_session = WebsocketSession::default();
         activated
+    }
+}
+
+fn auths_equal_for_transport(a: Option<&CodexAuth>, b: Option<&CodexAuth>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => match (a.api_auth_mode(), b.api_auth_mode()) {
+            (ApiAuthMode::ApiKey, ApiAuthMode::ApiKey) => a.api_key() == b.api_key(),
+            (ApiAuthMode::Chatgpt, ApiAuthMode::Chatgpt)
+            | (ApiAuthMode::ChatgptAuthTokens, ApiAuthMode::ChatgptAuthTokens) => {
+                a.auth_dot_json() == b.auth_dot_json()
+            }
+            _ => false,
+        },
+        _ => false,
     }
 }
 

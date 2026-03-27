@@ -108,7 +108,7 @@ use crate::event_processor::EventProcessor;
 use codex_core::default_client::set_default_client_residency_requirement;
 use codex_core::default_client::set_default_originator;
 
-const DEFAULT_ANALYTICS_ENABLED: bool = true;
+const DEFAULT_ANALYTICS_ENABLED: bool = false;
 
 enum InitialOperation {
     UserTurn {
@@ -1618,8 +1618,8 @@ mod tests {
     }
 
     #[test]
-    fn exec_defaults_analytics_to_enabled() {
-        assert_eq!(DEFAULT_ANALYTICS_ENABLED, true);
+    fn exec_defaults_analytics_to_disabled() {
+        assert_eq!(DEFAULT_ANALYTICS_ENABLED, false);
     }
 
     #[test]

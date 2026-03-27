@@ -1,0 +1,21 @@
+---
+source: tui/src/chatwidget/tests.rs
+expression: rendered
+---
+Pilot
+Run an assistant-controlled autonomous work loop.
+
+Usage:
+$pilot start [--for <duration>] <goal>
+$pilot status
+$pilot pause
+$pilot resume
+$pilot wrap-up
+$pilot stop
+
+Options:
+--for <duration>
+
+Examples:
+$pilot start --for 4h Improve benchmark accuracy end-to-end
+$pilot wrap-up

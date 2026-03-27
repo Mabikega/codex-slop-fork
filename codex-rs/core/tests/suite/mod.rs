@@ -137,6 +137,7 @@ mod shell_serialization;
 mod shell_snapshot;
 mod skill_approval;
 mod skills;
+mod slop_fork_code_mode;
 mod spawn_agent_description;
 mod sqlite_state;
 mod stream_error_allows_next_turn;

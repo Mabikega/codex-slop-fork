@@ -60,6 +60,12 @@ const TOOL_SEARCH_DESCRIPTION_TEMPLATE: &str =
 const TOOL_SUGGEST_DESCRIPTION_TEMPLATE: &str =
     include_str!("../../templates/search_tool/tool_suggest_description.md");
 const WEB_SEARCH_CONTENT_TYPES: [&str; 2] = ["text", "image"];
+const SLOP_FORK_AUTORESEARCH_TOOL_NAMES: [&str; 4] = [
+    "autoresearch_init",
+    "autoresearch_run",
+    "autoresearch_log",
+    "autoresearch_log_approach",
+];
 
 fn unified_exec_output_schema() -> JsonValue {
     json!({
@@ -525,6 +531,34 @@ impl ToolsConfig {
     pub fn with_web_search_config(mut self, web_search_config: Option<WebSearchConfig>) -> Self {
         self.web_search_config = web_search_config;
         self
+    }
+
+    pub fn with_slop_fork_autoresearch_tools(mut self, enabled: bool) -> Self {
+        if enabled {
+            for tool_name in SLOP_FORK_AUTORESEARCH_TOOL_NAMES {
+                if !self
+                    .experimental_supported_tools
+                    .iter()
+                    .any(|candidate| candidate == tool_name)
+                {
+                    self.experimental_supported_tools
+                        .push(tool_name.to_string());
+                }
+            }
+        } else {
+            self.experimental_supported_tools.retain(|tool_name| {
+                !SLOP_FORK_AUTORESEARCH_TOOL_NAMES.contains(&tool_name.as_str())
+            });
+        }
+        self
+    }
+
+    pub fn slop_fork_autoresearch_tools_enabled(&self) -> bool {
+        SLOP_FORK_AUTORESEARCH_TOOL_NAMES.iter().all(|tool_name| {
+            self.experimental_supported_tools
+                .iter()
+                .any(|candidate| candidate == tool_name)
+        })
     }
 
     pub fn for_code_mode_nested_tools(&self) -> Self {
@@ -3023,6 +3057,12 @@ pub(crate) fn build_specs_with_discoverable_tools(
     );
     builder.register_handler("view_image", view_image_handler);
 
+    if config.slop_fork_autoresearch_tools_enabled() {
+        crate::slop_fork::autoresearch::tools::register_autoresearch_tools(
+            &mut builder,
+            config.code_mode_enabled,
+        );
+    }
     if config.collab_tools {
         if config.multi_agent_v2 {
             push_tool_spec(

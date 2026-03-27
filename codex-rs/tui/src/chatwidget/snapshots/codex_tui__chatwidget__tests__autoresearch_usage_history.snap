@@ -1,0 +1,28 @@
+---
+source: tui/src/chatwidget/tests.rs
+expression: rendered
+---
+Autoresearch
+Run autonomous benchmark, research, or scientist loops with native benchmark logging tools.
+
+Usage:
+$autoresearch init [--open] <request>
+$autoresearch start [--mode optimize|research|scientist] [--max-runs <count>] <goal>
+$autoresearch <goal>
+$autoresearch status
+$autoresearch portfolio
+$autoresearch discover [focus]
+$autoresearch pause
+$autoresearch resume
+$autoresearch wrap-up
+$autoresearch stop
+$autoresearch clear
+
+Examples:
+$autoresearch init "Create an OCR project with CER < 5% on dataset X"
+$autoresearch init --open "Explore OCR approaches with CER < 5% on dataset X"
+$autoresearch optimize unit test runtime without changing semantics
+$autoresearch start --mode research --max-runs 50 search for better OCR architectures
+$autoresearch start --mode scientist --max-runs 50 map promising OCR hypotheses
+$autoresearch start --max-runs 50 reduce benchmark wall clock time
+$autoresearch wrap-up

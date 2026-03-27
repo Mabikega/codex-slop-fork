@@ -29,12 +29,12 @@ use codex_protocol::protocol::McpToolCallBeginEvent;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::user_input::UserInput;
-use codex_utils_cargo_bin::cargo_bin;
 use core_test_support::responses;
 use core_test_support::responses::mount_models_once;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::skip_if_no_network;
 use core_test_support::stdio_server_bin;
+use core_test_support::streamable_http_server_bin;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use core_test_support::wait_for_event_with_timeout;
@@ -719,7 +719,7 @@ async fn streamable_http_tool_call_round_trip() -> anyhow::Result<()> {
     .await;
 
     let expected_env_value = "propagated-env-http";
-    let rmcp_http_server_bin = match cargo_bin("test_streamable_http_server") {
+    let rmcp_http_server_bin = match streamable_http_server_bin() {
         Ok(path) => path,
         Err(err) => {
             eprintln!("test_streamable_http_server binary not available, skipping test: {err}");
@@ -925,7 +925,7 @@ async fn streamable_http_with_oauth_round_trip_impl() -> anyhow::Result<()> {
     let expected_token = "initial-access-token";
     let client_id = "test-client-id";
     let refresh_token = "initial-refresh-token";
-    let rmcp_http_server_bin = match cargo_bin("test_streamable_http_server") {
+    let rmcp_http_server_bin = match streamable_http_server_bin() {
         Ok(path) => path,
         Err(err) => {
             eprintln!("test_streamable_http_server binary not available, skipping test: {err}");

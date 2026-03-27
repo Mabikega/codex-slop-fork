@@ -1,0 +1,6 @@
+---
+source: tui/src/chatwidget/tests.rs
+assertion_line: 8554
+expression: blob
+---
+• Created automation session:auto-1. Seconds are rounded up to the nearest minute. Using 1m. Session scope only. It will disappear when this conversation ends.

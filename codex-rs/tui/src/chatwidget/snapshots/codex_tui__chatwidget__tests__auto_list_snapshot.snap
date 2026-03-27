@@ -1,0 +1,11 @@
+---
+source: tui/src/chatwidget/tests.rs
+expression: blob
+---
+Automations
+Configured follow-up rules for this session.
+
+session:auto-1 [enabled] on-complete
+  source: continue working on this | runs: 0
+session:auto-2 [enabled] every 10m
+  source: run tests | runs: 0

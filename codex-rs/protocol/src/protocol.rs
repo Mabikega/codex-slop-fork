@@ -301,6 +301,18 @@ pub enum Op {
         personality: Option<Personality>,
     },
 
+    /// Fork-only assistant-controlled continuation turn used by Pilot.
+    SlopForkPilotTurn {
+        /// Developer prompt that directs the next autonomous cycle.
+        prompt: String,
+    },
+
+    /// Fork-only assistant-controlled continuation turn used by Autoresearch.
+    SlopForkAutoresearchTurn {
+        /// Developer prompt that directs the next autonomous cycle.
+        prompt: String,
+    },
+
     /// Inter-agent communication that should be recorded as assistant history
     /// while still using the normal thread submission lifecycle.
     InterAgentCommunication {
@@ -574,6 +586,8 @@ impl Op {
             Self::RealtimeConversationClose => "realtime_conversation_close",
             Self::UserInput { .. } => "user_input",
             Self::UserTurn { .. } => "user_turn",
+            Self::SlopForkPilotTurn { .. } => "slop_fork_pilot_turn",
+            Self::SlopForkAutoresearchTurn { .. } => "slop_fork_autoresearch_turn",
             Self::InterAgentCommunication { .. } => "inter_agent_communication",
             Self::OverrideTurnContext { .. } => "override_turn_context",
             Self::ExecApproval { .. } => "exec_approval",

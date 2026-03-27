@@ -4,6 +4,7 @@ use std::fmt::Debug;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::AtomicU64;
 
 use crate::AuthManager;
@@ -38,6 +39,9 @@ use crate::realtime_conversation::handle_text as handle_realtime_conversation_te
 use crate::render_skills_section;
 use crate::rollout::session_index;
 use crate::skills_load_input_from_config;
+use crate::slop_fork;
+use crate::slop_fork::RateLimitSwitchState;
+use crate::slop_fork::automation::AutomationTurnSuppression;
 use crate::stream_events_utils::HandleOutputCtx;
 use crate::stream_events_utils::handle_non_tool_response_item;
 use crate::stream_events_utils::handle_output_item_done;
@@ -61,6 +65,7 @@ use codex_exec_server::EnvironmentManager;
 use codex_features::FEATURES;
 use codex_features::Feature;
 use codex_features::unstable_features_warning_event;
+use codex_hooks::HookDispatchMetadata;
 use codex_hooks::HookEvent;
 use codex_hooks::HookEventAfterAgent;
 use codex_hooks::HookPayload;
@@ -830,7 +835,7 @@ impl TurnSkillsContext {
 }
 
 /// The context needed for a single turn of the thread.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct TurnContext {
     pub(crate) sub_id: String,
     pub(crate) trace_id: Option<String>,
@@ -876,6 +881,7 @@ pub(crate) struct TurnContext {
     pub(crate) turn_metadata_state: Arc<TurnMetadataState>,
     pub(crate) turn_skills: TurnSkillsContext,
     pub(crate) turn_timing_state: Arc<TurnTimingState>,
+    pub(crate) slop_fork_automation_turn_suppression: Arc<StdMutex<AutomationTurnSuppression>>,
 }
 impl TurnContext {
     pub(crate) fn model_context_window(&self) -> Option<i64> {
@@ -888,6 +894,21 @@ impl TurnContext {
     pub(crate) fn apps_enabled(&self) -> bool {
         self.features
             .apps_enabled_cached(self.auth_manager.as_deref())
+    }
+
+    fn with_tools_config(&self, tools_config: ToolsConfig) -> Self {
+        let mut turn_context = self.clone();
+        turn_context.tools_config = tools_config;
+        turn_context.tool_call_gate = Arc::new(ReadinessFlag::new());
+        turn_context
+    }
+
+    pub(crate) fn with_slop_fork_autoresearch_tools(&self) -> Self {
+        self.with_tools_config(
+            self.tools_config
+                .clone()
+                .with_slop_fork_autoresearch_tools(/*enabled*/ true),
+        )
     }
 
     pub(crate) async fn with_model(&self, model: String, models_manager: &ModelsManager) -> Self {
@@ -937,6 +958,7 @@ impl TurnContext {
         .with_unified_exec_shell_mode(self.tools_config.unified_exec_shell_mode.clone())
         .with_web_search_config(self.tools_config.web_search_config.clone())
         .with_allow_login_shell(self.tools_config.allow_login_shell)
+        .with_slop_fork_autoresearch_tools(self.tools_config.slop_fork_autoresearch_tools_enabled())
         .with_agent_roles(config.agent_roles.clone());
 
         Self {
@@ -984,6 +1006,30 @@ impl TurnContext {
             turn_metadata_state: self.turn_metadata_state.clone(),
             turn_skills: self.turn_skills.clone(),
             turn_timing_state: Arc::clone(&self.turn_timing_state),
+            slop_fork_automation_turn_suppression: Arc::clone(
+                &self.slop_fork_automation_turn_suppression,
+            ),
+        }
+    }
+
+    pub(crate) fn merge_slop_fork_automation_turn_suppression(
+        &self,
+        suppression: AutomationTurnSuppression,
+    ) {
+        if suppression == AutomationTurnSuppression::default() {
+            return;
+        }
+        let mut current = match self.slop_fork_automation_turn_suppression.lock() {
+            Ok(current) => current,
+            Err(_) => panic!("automation turn suppression state poisoned"),
+        };
+        current.suppress_legacy_notify |= suppression.suppress_legacy_notify;
+    }
+
+    pub(crate) fn slop_fork_automation_turn_suppression(&self) -> AutomationTurnSuppression {
+        match self.slop_fork_automation_turn_suppression.lock() {
+            Ok(suppression) => *suppression,
+            Err(_) => panic!("automation turn suppression state poisoned"),
         }
     }
 
@@ -1358,6 +1404,7 @@ impl Session {
         sub_id: String,
         js_repl: Arc<JsReplHandle>,
         skills_outcome: Arc<SkillLoadOutcome>,
+        slop_fork_automation_turn_suppression: AutomationTurnSuppression,
     ) -> TurnContext {
         let reasoning_effort = session_configuration.collaboration_mode.reasoning_effort();
         let reasoning_summary = session_configuration
@@ -1442,6 +1489,9 @@ impl Session {
             turn_metadata_state,
             turn_skills: TurnSkillsContext::new(skills_outcome),
             turn_timing_state: Arc::new(TurnTimingState::default()),
+            slop_fork_automation_turn_suppression: Arc::new(StdMutex::new(
+                slop_fork_automation_turn_suppression,
+            )),
         }
     }
 
@@ -2345,6 +2395,7 @@ impl Session {
         &self,
         sub_id: String,
         updates: SessionSettingsUpdate,
+        slop_fork_automation_turn_suppression: AutomationTurnSuppression,
     ) -> ConstraintResult<Arc<TurnContext>> {
         let (
             session_configuration,
@@ -2398,6 +2449,7 @@ impl Session {
                 session_configuration,
                 updates.final_output_json_schema,
                 sandbox_policy_changed,
+                slop_fork_automation_turn_suppression,
             )
             .await)
     }
@@ -2408,6 +2460,7 @@ impl Session {
         session_configuration: SessionConfiguration,
         final_output_json_schema: Option<Option<Value>>,
         sandbox_policy_changed: bool,
+        slop_fork_automation_turn_suppression: AutomationTurnSuppression,
     ) -> Arc<TurnContext> {
         let per_turn_config = Self::build_per_turn_config(&session_configuration);
         self.services
@@ -2474,6 +2527,7 @@ impl Session {
             sub_id,
             Arc::clone(&self.js_repl),
             skills_outcome,
+            slop_fork_automation_turn_suppression,
         );
         turn_context.realtime_active = self.conversation.running_state().await.is_some();
 
@@ -2585,6 +2639,7 @@ impl Session {
             session_configuration,
             /*final_output_json_schema*/ None,
             /*sandbox_policy_changed*/ false,
+            AutomationTurnSuppression::default(),
         )
         .await
     }
@@ -3742,6 +3797,29 @@ impl Session {
         turn_context: &TurnContext,
         new_rate_limits: RateLimitSnapshot,
     ) {
+        self.update_rate_limits_for_auth(turn_context, new_rate_limits, /*auth*/ None)
+            .await;
+    }
+
+    pub(crate) async fn update_rate_limits_for_auth(
+        &self,
+        turn_context: &TurnContext,
+        new_rate_limits: RateLimitSnapshot,
+        auth: Option<&crate::auth::CodexAuth>,
+    ) {
+        if let Some(auth) = auth {
+            slop_fork::record_rate_limit_snapshot_for_auth(
+                &turn_context.config.codex_home,
+                auth,
+                &new_rate_limits,
+            );
+        } else {
+            slop_fork::record_active_account_rate_limit_snapshot(
+                &turn_context.config.codex_home,
+                self.services.auth_manager.as_ref(),
+                &new_rate_limits,
+            );
+        }
         {
             let mut state = self.state.lock().await;
             state.set_rate_limits(new_rate_limits);
@@ -4342,6 +4420,14 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                     handlers::user_input_or_turn(&sess, sub.id.clone(), sub.op).await;
                     false
                 }
+                Op::SlopForkPilotTurn { prompt } => {
+                    handlers::slop_fork_pilot_turn(&sess, sub.id.clone(), prompt).await;
+                    false
+                }
+                Op::SlopForkAutoresearchTurn { prompt } => {
+                    handlers::slop_fork_autoresearch_turn(&sess, sub.id.clone(), prompt).await;
+                    false
+                }
                 Op::InterAgentCommunication { communication } => {
                     handlers::inter_agent_communication(&sess, sub.id.clone(), communication).await;
                     false
@@ -4521,6 +4607,9 @@ mod handlers {
     use crate::review_prompts::resolve_review_request;
     use crate::rollout::RolloutRecorder;
     use crate::rollout::session_index;
+    use crate::slop_fork::automation::AutomationTurnSuppression;
+    use crate::slop_fork::automation::take_automation_turn_suppression;
+    use crate::slop_fork::pilot::spawn_turn_task;
     use crate::tasks::CompactTask;
     use crate::tasks::UndoTask;
     use crate::tasks::UserShellCommandMode;
@@ -4643,19 +4732,41 @@ mod handlers {
             _ => unreachable!(),
         };
 
-        let Ok(current_context) = sess.new_turn_with_sub_id(sub_id.clone(), updates).await else {
+        let Ok(current_context) = sess
+            .new_turn_with_sub_id(
+                sub_id.clone(),
+                updates,
+                AutomationTurnSuppression::default(),
+            )
+            .await
+        else {
             // new_turn_with_sub_id already emits the error event.
             return;
         };
         sess.maybe_emit_unknown_model_warning_for_turn(current_context.as_ref())
             .await;
+        current_context.session_telemetry.user_prompt(&items);
+        let active_turn_context = sess
+            .active_turn_context_and_cancellation_token()
+            .await
+            .map(|(turn_context, _)| turn_context);
+
+        // Attempt to inject input into current task.
         match sess
             .steer_input(items.clone(), /*expected_turn_id*/ None)
             .await
         {
-            Ok(_) => current_context.session_telemetry.user_prompt(&items),
+            Ok(_) => {
+                if let Some(turn_context) = active_turn_context {
+                    turn_context.merge_slop_fork_automation_turn_suppression(
+                        take_automation_turn_suppression(&sess.conversation_id.to_string()),
+                    );
+                }
+            }
             Err(SteerInputError::NoActiveTurn(items)) => {
-                current_context.session_telemetry.user_prompt(&items);
+                current_context.merge_slop_fork_automation_turn_suppression(
+                    take_automation_turn_suppression(&sess.conversation_id.to_string()),
+                );
                 sess.refresh_mcp_servers_if_requested(&current_context)
                     .await;
                 sess.spawn_task(
@@ -4665,6 +4776,8 @@ mod handlers {
                 )
                 .await;
             }
+            Err(SteerInputError::ExpectedTurnMismatch { .. })
+            | Err(SteerInputError::EmptyInput) => {}
             Err(err) => {
                 sess.send_event_raw(Event {
                     id: sub_id,
@@ -4721,6 +4834,38 @@ mod handlers {
             Arc::clone(&turn_context),
             Vec::new(),
             UserShellCommandTask::new(command),
+        )
+        .await;
+    }
+
+    async fn slop_fork_assistant_turn(
+        sess: &Arc<Session>,
+        sub_id: String,
+        prompt: String,
+        enable_autoresearch_tools: bool,
+    ) {
+        let turn_context = sess.new_default_turn_with_sub_id(sub_id).await;
+        let turn_context = if enable_autoresearch_tools {
+            Arc::new(turn_context.as_ref().with_slop_fork_autoresearch_tools())
+        } else {
+            turn_context
+        };
+        sess.maybe_emit_unknown_model_warning_for_turn(turn_context.as_ref())
+            .await;
+        sess.refresh_mcp_servers_if_requested(&turn_context).await;
+        spawn_turn_task(sess, turn_context, prompt).await;
+    }
+
+    pub async fn slop_fork_pilot_turn(sess: &Arc<Session>, sub_id: String, prompt: String) {
+        slop_fork_assistant_turn(
+            sess, sub_id, prompt, /*enable_autoresearch_tools*/ false,
+        )
+        .await;
+    }
+
+    pub async fn slop_fork_autoresearch_turn(sess: &Arc<Session>, sub_id: String, prompt: String) {
+        slop_fork_assistant_turn(
+            sess, sub_id, prompt, /*enable_autoresearch_tools*/ true,
         )
         .await;
     }
@@ -5488,6 +5633,9 @@ async fn spawn_review_thread(
         turn_metadata_state,
         turn_skills: TurnSkillsContext::new(parent_turn_context.turn_skills.outcome.clone()),
         turn_timing_state: Arc::new(TurnTimingState::default()),
+        slop_fork_automation_turn_suppression: Arc::new(StdMutex::new(
+            AutomationTurnSuppression::default(),
+        )),
     };
 
     // Seed the child task with the review prompt as the initial user message.
@@ -5579,7 +5727,6 @@ fn errors_to_info(errors: &[SkillError]) -> Vec<SkillErrorInfo> {
 ///   back to the model in the next sampling request.
 /// - If the model sends only an assistant message, we record it in the
 ///   conversation history and consider the turn complete.
-///
 pub(crate) async fn run_turn(
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
@@ -5587,7 +5734,36 @@ pub(crate) async fn run_turn(
     prewarmed_client_session: Option<ModelClientSession>,
     cancellation_token: CancellationToken,
 ) -> Option<String> {
-    if input.is_empty() && !sess.has_pending_input().await {
+    run_turn_with_options(
+        sess,
+        turn_context,
+        input,
+        TurnRunOptions {
+            additional_instructions: None,
+            prewarmed_client_session,
+        },
+        cancellation_token,
+    )
+    .await
+}
+
+pub(crate) struct TurnRunOptions {
+    pub(crate) additional_instructions: Option<String>,
+    pub(crate) prewarmed_client_session: Option<ModelClientSession>,
+}
+
+pub(crate) async fn run_turn_with_options(
+    sess: Arc<Session>,
+    turn_context: Arc<TurnContext>,
+    input: Vec<UserInput>,
+    options: TurnRunOptions,
+    cancellation_token: CancellationToken,
+) -> Option<String> {
+    let TurnRunOptions {
+        additional_instructions,
+        prewarmed_client_session,
+    } = options;
+    if additional_instructions.is_none() && input.is_empty() && !sess.has_pending_input().await {
         return None;
     }
 
@@ -5853,11 +6029,14 @@ pub(crate) async fn run_turn(
         }
 
         // Construct the input that we will send to the model.
-        let sampling_request_input: Vec<ResponseItem> = {
+        let mut sampling_request_input: Vec<ResponseItem> = {
             sess.clone_history()
                 .await
                 .for_prompt(&turn_context.model_info.input_modalities)
         };
+        if let Some(prompt) = additional_instructions.as_ref() {
+            sampling_request_input.push(DeveloperInstructions::new(prompt.clone()).into());
+        }
 
         let sampling_request_input_messages = sampling_request_input
             .iter()
@@ -5991,6 +6170,11 @@ pub(crate) async fn run_turn(
                                     input_messages: sampling_request_input_messages,
                                     last_assistant_message: last_agent_message.clone(),
                                 },
+                            },
+                            dispatch_metadata: HookDispatchMetadata {
+                                skip_legacy_notify: turn_context
+                                    .slop_fork_automation_turn_suppression()
+                                    .suppress_legacy_notify,
                             },
                         })
                         .await;
@@ -6406,6 +6590,7 @@ async fn run_sampling_request(
         )
         .await;
     let mut retries = 0;
+    let mut rate_limit_switch_state = RateLimitSwitchState::default();
     loop {
         let err = match try_run_sampling_request(
             tool_runtime.clone(),
@@ -6428,14 +6613,38 @@ async fn run_sampling_request(
                 return Err(CodexErr::ContextWindowExceeded);
             }
             Err(CodexErr::UsageLimitReached(e)) => {
-                let rate_limits = e.rate_limits.clone();
-                if let Some(rate_limits) = rate_limits {
-                    sess.update_rate_limits(&turn_context, *rate_limits).await;
+                if slop_fork::handle_usage_limit_error(
+                    sess.as_ref(),
+                    turn_context.as_ref(),
+                    client_session,
+                    &mut rate_limit_switch_state,
+                    e.rate_limits.as_deref(),
+                    e.resets_at,
+                )
+                .await
+                {
+                    retries = 0;
+                    continue;
                 }
                 return Err(CodexErr::UsageLimitReached(e));
             }
             Err(err) => err,
         };
+
+        if matches!(
+            &err,
+            CodexErr::RetryLimit(retry) if retry.status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        ) && slop_fork::handle_too_many_requests_retry_limit(
+            sess.as_ref(),
+            turn_context.as_ref(),
+            client_session,
+            &mut rate_limit_switch_state,
+        )
+        .await
+        {
+            retries = 0;
+            continue;
+        }
 
         if !err.is_retryable() {
             return Err(err);

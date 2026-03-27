@@ -1,5 +1,7 @@
 use crate::outgoing_message::ConnectionId;
 use crate::outgoing_message::ConnectionRequestId;
+use crate::outgoing_message::OutgoingMessageSender;
+use crate::outgoing_message::ThreadScopedOutgoingMessageSender;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ThreadHistoryBuilder;
 use codex_app_server_protocol::Turn;
@@ -33,6 +35,9 @@ pub(crate) struct PendingThreadResumeRequest {
 pub(crate) enum ThreadListenerCommand {
     // SendThreadResumeResponse is used to resume an already running thread by sending the thread's history to the client and atomically subscribing for new updates.
     SendThreadResumeResponse(Box<PendingThreadResumeRequest>),
+    // WakeAutomationTimer nudges the listener loop to recompute fork-owned background work such
+    // as automation sleeps and Pilot idle scheduling.
+    WakeAutomationTimer,
     // ResolveServerRequest is used to notify the client that the request has been resolved.
     // It is executed in the thread listener's context to ensure that the resolved notification is ordered with regard to the request itself.
     ResolveServerRequest {
@@ -162,6 +167,22 @@ impl ThreadStateManager {
             .get(&thread_id)
             .map(|thread_entry| thread_entry.connection_ids.iter().copied().collect())
             .unwrap_or_default()
+    }
+
+    pub(crate) async fn thread_outgoing(
+        &self,
+        outgoing: Arc<OutgoingMessageSender>,
+        thread_id: &ThreadId,
+    ) -> Option<ThreadScopedOutgoingMessageSender> {
+        let connection_ids = self.subscribed_connection_ids(*thread_id).await;
+        if connection_ids.is_empty() {
+            return None;
+        }
+        Some(ThreadScopedOutgoingMessageSender::new(
+            outgoing,
+            connection_ids,
+            *thread_id,
+        ))
     }
 
     pub(crate) async fn thread_state(&self, thread_id: ThreadId) -> Arc<Mutex<ThreadState>> {

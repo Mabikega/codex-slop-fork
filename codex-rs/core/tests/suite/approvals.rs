@@ -394,8 +394,11 @@ impl Expectation {
                 for needle in *message_contains {
                     if needle.contains('|') {
                         let options: Vec<&str> = needle.split('|').collect();
-                        let matches_any =
-                            options.iter().any(|option| result.stdout.contains(option));
+                        let stdout_lower = result.stdout.to_ascii_lowercase();
+                        let matches_any = options.iter().any(|option| {
+                            result.stdout.contains(option)
+                                || stdout_lower.contains(&option.to_ascii_lowercase())
+                        });
                         assert!(
                             matches_any,
                             "stdout missing one of {options:?}: {}",

@@ -1,11 +1,17 @@
 #![allow(clippy::expect_used)]
 
+use std::ffi::OsString;
 use std::fs;
 use std::path::PathBuf;
 
 use anyhow::Result;
 use codex_core::CodexAuth;
+use codex_core::auth::AuthCredentialsStoreMode;
+use codex_core::auth::AuthDotJson;
+use codex_core::auth::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
+use codex_core::auth::load_auth_dot_json;
 use codex_core::compact::SUMMARY_PREFIX;
+use codex_core::slop_fork::auth_accounts;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
@@ -35,7 +41,13 @@ use core_test_support::wait_for_event;
 use core_test_support::wait_for_event_match;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use tempfile::TempDir;
+use wiremock::Mock;
 use wiremock::ResponseTemplate;
+use wiremock::matchers::header;
+use wiremock::matchers::header_regex;
+use wiremock::matchers::method;
+use wiremock::matchers::path;
 
 fn approx_token_count(text: &str) -> i64 {
     i64::try_from(text.len().saturating_add(3) / 4).unwrap_or(i64::MAX)
@@ -55,8 +67,134 @@ fn estimate_compact_payload_tokens(request: &responses::ResponsesRequest) -> i64
 const PRETURN_CONTEXT_DIFF_CWD: &str = "/tmp/PRETURN_CONTEXT_DIFF_CWD";
 const DUMMY_FUNCTION_NAME: &str = "test_tool";
 
+#[expect(clippy::unwrap_used)]
+fn write_chatgpt_auth_json(
+    codex_home: &TempDir,
+    email: &str,
+    account_id: &str,
+    access_token: &str,
+) -> AuthDotJson {
+    use base64::Engine as _;
+
+    let header = json!({ "alg": "none", "typ": "JWT" });
+    let payload = json!({
+        "email": email,
+        "https://api.openai.com/auth": {
+            "chatgpt_plan_type": "pro",
+            "chatgpt_account_id": account_id,
+        }
+    });
+
+    let b64 = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    let header_b64 = b64(&serde_json::to_vec(&header).unwrap());
+    let payload_b64 = b64(&serde_json::to_vec(&payload).unwrap());
+    let signature_b64 = b64(b"sig");
+    let fake_jwt = format!("{header_b64}.{payload_b64}.{signature_b64}");
+
+    let auth_json = json!({
+        "tokens": {
+            "id_token": fake_jwt,
+            "access_token": access_token,
+            "refresh_token": "refresh-test",
+            "account_id": account_id,
+        },
+        "last_refresh": chrono::Utc::now(),
+    });
+
+    std::fs::write(
+        codex_home.path().join("auth.json"),
+        serde_json::to_string_pretty(&auth_json).unwrap(),
+    )
+    .unwrap();
+
+    load_auth_dot_json(codex_home.path(), AuthCredentialsStoreMode::File)
+        .unwrap()
+        .expect("auth.json should deserialize")
+}
+
 fn summary_with_prefix(summary: &str) -> String {
     format!("{SUMMARY_PREFIX}\n{summary}")
+}
+
+struct SavedAccountSwitchSetup {
+    home: std::sync::Arc<TempDir>,
+    active_auth: CodexAuth,
+    saved_active_account_id: String,
+    saved_account_id: String,
+}
+
+fn setup_saved_chatgpt_accounts() -> Result<SavedAccountSwitchSetup> {
+    let home = std::sync::Arc::new(TempDir::new()?);
+    let active_auth_json =
+        write_chatgpt_auth_json(&home, "first@example.com", "acct-first", "access-first");
+    let active_auth = CodexAuth::from_auth_storage(home.path(), AuthCredentialsStoreMode::File)?
+        .expect("active auth");
+    let saved_active_account_id =
+        auth_accounts::upsert_account(home.path(), &active_auth_json)?.expect("active account id");
+
+    let saved_auth_json =
+        write_chatgpt_auth_json(&home, "second@example.com", "acct-second", "access-second");
+    let saved_account_id =
+        auth_accounts::upsert_account(home.path(), &saved_auth_json)?.expect("saved account id");
+    std::fs::write(
+        home.path().join("auth.json"),
+        serde_json::to_string_pretty(&active_auth_json)?,
+    )?;
+
+    Ok(SavedAccountSwitchSetup {
+        home,
+        active_auth,
+        saved_active_account_id,
+        saved_account_id,
+    })
+}
+
+fn assert_active_saved_account(
+    home: &TempDir,
+    saved_account_id: &str,
+    saved_active_account_id: &str,
+) -> Result<()> {
+    let active_auth_after = load_auth_dot_json(home.path(), AuthCredentialsStoreMode::File)?
+        .expect("switched auth should be saved");
+    let active_account_after =
+        auth_accounts::current_active_account_id(home.path(), AuthCredentialsStoreMode::File)?;
+    assert_eq!(active_account_after, Some(saved_account_id.to_string()));
+    assert_eq!(
+        auth_accounts::find_account(home.path(), saved_account_id)?
+            .expect("saved account should exist")
+            .auth,
+        active_auth_after
+    );
+    assert_ne!(saved_active_account_id, saved_account_id);
+    Ok(())
+}
+
+struct EnvGuard {
+    key: &'static str,
+    original: Option<OsString>,
+}
+
+impl EnvGuard {
+    fn set(key: &'static str, value: String) -> Self {
+        let original = std::env::var_os(key);
+        // SAFETY: the test using this helper is serial, so updating the process environment is safe.
+        unsafe {
+            std::env::set_var(key, &value);
+        }
+        Self { key, original }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: the guard restores the original value before other tests run.
+        unsafe {
+            match &self.original {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 }
 
 fn context_snapshot_options() -> ContextSnapshotOptions {
@@ -1082,6 +1220,364 @@ async fn remote_manual_compact_failure_emits_task_error_event() -> Result<()> {
     wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
 
     assert_eq!(compact_mock.requests().len(), 1);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_manual_compact_switches_saved_account_after_usage_limit() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let harness_server = responses::start_mock_server().await;
+    let setup = setup_saved_chatgpt_accounts()?;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .and(header("authorization", "Bearer access-first"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_raw(
+                    sse(vec![
+                        responses::ev_response_created("resp-1"),
+                        responses::ev_assistant_message("assistant-1", "REMOTE_REPLY"),
+                        responses::ev_completed("resp-1"),
+                    ]),
+                    "text/event-stream",
+                ),
+        )
+        .expect(1)
+        .mount(&harness_server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/responses/compact"))
+        .and(header_regex("authorization", "^Bearer access-first$"))
+        .respond_with(ResponseTemplate::new(429).set_body_json(json!({
+            "error": {
+                "type": "usage_limit_reached",
+                "message": "limit reached",
+                "resets_at": 1704067242,
+                "plan_type": "team"
+            }
+        })))
+        .expect(1)
+        .mount(&harness_server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/responses/compact"))
+        .and(header_regex("authorization", "^Bearer access-second$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "output": compacted_summary_only_output("REMOTE_COMPACT_SUMMARY"),
+        })))
+        .expect(1)
+        .mount(&harness_server)
+        .await;
+
+    let mut builder = test_codex()
+        .with_home(setup.home.clone())
+        .with_auth(setup.active_auth.clone())
+        .with_config(|config| {
+            config.cli_auth_credentials_store_mode = AuthCredentialsStoreMode::File;
+        });
+    let test = builder.build(&harness_server).await?;
+
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "manual remote compact".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+        })
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    test.codex.submit(Op::Compact).await?;
+
+    let warning_event = wait_for_event_match(&test.codex, |event| match event {
+        EventMsg::Warning(warning) => Some(warning.message.clone()),
+        _ => None,
+    })
+    .await;
+    assert!(
+        warning_event.contains("Switched to saved account"),
+        "unexpected warning message: {warning_event}"
+    );
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    assert_active_saved_account(
+        setup.home.as_ref(),
+        &setup.saved_account_id,
+        &setup.saved_active_account_id,
+    )?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_manual_compact_switches_saved_account_after_retry_limit_429() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let harness_server = responses::start_mock_server().await;
+    let setup = setup_saved_chatgpt_accounts()?;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .and(header_regex("authorization", "^Bearer access-first$"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_raw(
+                    sse(vec![
+                        responses::ev_response_created("resp-1"),
+                        responses::ev_assistant_message("assistant-1", "REMOTE_REPLY"),
+                        responses::ev_completed("resp-1"),
+                    ]),
+                    "text/event-stream",
+                ),
+        )
+        .expect(1)
+        .mount(&harness_server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/responses/compact"))
+        .and(header_regex("authorization", "^Bearer access-first$"))
+        .respond_with(ResponseTemplate::new(429).set_body_json(json!({
+            "error": {
+                "type": "slow_down",
+                "message": "too many requests"
+            }
+        })))
+        .expect(1)
+        .mount(&harness_server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/responses/compact"))
+        .and(header_regex("authorization", "^Bearer access-second$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "output": compacted_summary_only_output("REMOTE_COMPACT_SUMMARY"),
+        })))
+        .expect(1)
+        .mount(&harness_server)
+        .await;
+
+    let mut builder = test_codex()
+        .with_home(setup.home.clone())
+        .with_auth(setup.active_auth.clone())
+        .with_config(|config| {
+            config.cli_auth_credentials_store_mode = AuthCredentialsStoreMode::File;
+        });
+    let test = builder.build(&harness_server).await?;
+
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "manual remote compact".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+        })
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    test.codex.submit(Op::Compact).await?;
+
+    let warning_event = wait_for_event_match(&test.codex, |event| match event {
+        EventMsg::Warning(warning) => Some(warning.message.clone()),
+        _ => None,
+    })
+    .await;
+    assert!(
+        warning_event.contains("Switched to saved account"),
+        "unexpected warning message: {warning_event}"
+    );
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    assert_active_saved_account(
+        setup.home.as_ref(),
+        &setup.saved_account_id,
+        &setup.saved_active_account_id,
+    )?;
+
+    Ok(())
+}
+
+#[serial_test::serial(auth_refresh)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_manual_compact_refreshes_switched_account_after_401() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let harness_server = responses::start_mock_server().await;
+    let _refresh_url_guard = EnvGuard::set(
+        REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR,
+        format!("{}/oauth/token", harness_server.uri()),
+    );
+    let setup = setup_saved_chatgpt_accounts()?;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .and(header_regex("authorization", "^Bearer access-first$"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_raw(
+                    sse(vec![
+                        responses::ev_response_created("resp-1"),
+                        responses::ev_assistant_message("assistant-1", "REMOTE_REPLY"),
+                        responses::ev_completed("resp-1"),
+                    ]),
+                    "text/event-stream",
+                ),
+        )
+        .mount(&harness_server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/responses/compact"))
+        .and(header("authorization", "Bearer access-first"))
+        .respond_with(ResponseTemplate::new(429).set_body_json(json!({
+            "error": {
+                "type": "usage_limit_reached",
+                "message": "limit reached",
+                "resets_at": 1704067242,
+                "plan_type": "team"
+            }
+        })))
+        .mount(&harness_server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/responses/compact"))
+        .and(header("authorization", "Bearer access-second"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&harness_server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "new-access-second",
+            "refresh_token": "new-refresh-second"
+        })))
+        .mount(&harness_server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/responses/compact"))
+        .and(header("authorization", "Bearer new-access-second"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "output": compacted_summary_only_output("REMOTE_COMPACT_SUMMARY"),
+        })))
+        .mount(&harness_server)
+        .await;
+
+    let mut builder = test_codex()
+        .with_home(setup.home.clone())
+        .with_auth(setup.active_auth.clone())
+        .with_config(|config| {
+            config.cli_auth_credentials_store_mode = AuthCredentialsStoreMode::File;
+        });
+    let test = builder.build(&harness_server).await?;
+
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "manual remote compact".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+        })
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    test.codex.submit(Op::Compact).await?;
+
+    let warning_event = wait_for_event_match(&test.codex, |event| match event {
+        EventMsg::Warning(warning) => Some(warning.message.clone()),
+        _ => None,
+    })
+    .await;
+    assert!(
+        warning_event.contains("Switched to saved account"),
+        "unexpected warning message: {warning_event}"
+    );
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    assert_active_saved_account(
+        setup.home.as_ref(),
+        &setup.saved_account_id,
+        &setup.saved_active_account_id,
+    )?;
+
+    let stored_auth = load_auth_dot_json(setup.home.path(), AuthCredentialsStoreMode::File)?
+        .expect("refreshed auth should be saved");
+    let stored_tokens = stored_auth.tokens.expect("tokens should exist");
+    assert_eq!(stored_tokens.access_token, "new-access-second");
+    assert_eq!(stored_tokens.refresh_token, "new-refresh-second");
+    let requests = harness_server.received_requests().await.unwrap_or_default();
+    let compact_first_account = requests
+        .iter()
+        .filter(|req| {
+            req.url.path() == "/v1/responses/compact"
+                && req
+                    .headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    == Some("Bearer access-first")
+        })
+        .count();
+    let compact_stale_second_account = requests
+        .iter()
+        .filter(|req| {
+            req.url.path() == "/v1/responses/compact"
+                && req
+                    .headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    == Some("Bearer access-second")
+        })
+        .count();
+    let compact_refreshed_second_account = requests
+        .iter()
+        .filter(|req| {
+            req.url.path() == "/v1/responses/compact"
+                && req
+                    .headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    == Some("Bearer new-access-second")
+        })
+        .count();
+    let refresh_requests = requests
+        .iter()
+        .filter(|req| req.url.path() == "/oauth/token")
+        .count();
+    assert_eq!(compact_first_account, 1);
+    assert_eq!(compact_stale_second_account, 2);
+    assert_eq!(compact_refreshed_second_account, 1);
+    assert_eq!(refresh_requests, 1);
 
     Ok(())
 }

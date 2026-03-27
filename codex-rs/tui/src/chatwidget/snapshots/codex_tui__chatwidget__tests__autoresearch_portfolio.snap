@@ -1,0 +1,17 @@
+---
+source: tui/src/chatwidget/tests.rs
+expression: rendered
+---
+Autoresearch Portfolio
+Candidates: 2
+Families: 2
+Selection policy: weak_gap=8 stagnation_window=3 synthesis_after=2
+Portfolio refresh policy: min_families=3 low_diversity_cycles=2 exploit_cycles=5 cooldown=300s
+Portfolio refresh status: waiting for 2 more exploit cycles via low-diversity (0 / 2, families=2)
+Validation policy: promising_keeps=1 winner_keeps=2 holdout_before_winner=no adversarial_before_winner=no evaluator_audit_before_winner=no
+approach-1 [distillation] status=active best=4.7000 runs=1 keeps=1
+  Teacher-student OCR
+  Validation state: `approach-1` has 1 keep run(s); pending: needs at least 2 keep run(s) before it can be marked winner
+approach-2 [retrieval] status=dead_end best=n/a runs=1 keeps=0
+  Sparse retrieval decoder
+  Validation state: `approach-2` has 0 keep run(s); pending: needs at least 1 keep run(s) before it can be marked promising; needs at least 2 keep run(s) before it can be marked winner

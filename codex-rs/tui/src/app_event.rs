@@ -147,6 +147,14 @@ pub(crate) enum AppEvent {
     /// Result of computing a `/diff` command.
     DiffResult(String),
 
+    /// Auth state changed outside the main UI thread and the chat widget should refresh local auth-
+    /// sensitive state such as rate-limit polling.
+    AuthStateChanged {
+        message: String,
+        is_error: bool,
+        is_warning: bool,
+    },
+
     /// Open the app link view in the bottom pane.
     OpenAppLink {
         app_id: String,
@@ -162,6 +170,9 @@ pub(crate) enum AppEvent {
     OpenUrlInBrowser {
         url: String,
     },
+
+    /// Handle fork-specific `/accounts` and `$auto` behavior.
+    SlopFork(crate::slop_fork::SlopForkEvent),
 
     /// Refresh app connector state and mention bindings.
     RefreshConnectors {

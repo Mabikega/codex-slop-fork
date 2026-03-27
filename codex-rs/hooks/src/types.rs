@@ -70,6 +70,13 @@ pub struct HookPayload {
     #[serde(serialize_with = "serialize_triggered_at")]
     pub triggered_at: DateTime<Utc>,
     pub hook_event: HookEvent,
+    #[serde(skip)]
+    pub dispatch_metadata: HookDispatchMetadata,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct HookDispatchMetadata {
+    pub skip_legacy_notify: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -168,6 +175,7 @@ mod tests {
     use pretty_assertions::assert_eq;
     use serde_json::json;
 
+    use super::HookDispatchMetadata;
     use super::HookEvent;
     use super::HookEventAfterAgent;
     use super::HookEventAfterToolUse;
@@ -196,6 +204,7 @@ mod tests {
                     last_assistant_message: Some("hi".to_string()),
                 },
             },
+            dispatch_metadata: HookDispatchMetadata::default(),
         };
 
         let actual = serde_json::to_value(payload).expect("serialize hook payload");
@@ -251,6 +260,7 @@ mod tests {
                     output_preview: "ok".to_string(),
                 },
             },
+            dispatch_metadata: HookDispatchMetadata::default(),
         };
 
         let actual = serde_json::to_value(payload).expect("serialize hook payload");

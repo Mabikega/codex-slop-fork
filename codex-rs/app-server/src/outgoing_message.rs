@@ -654,11 +654,20 @@ mod tests {
     use codex_app_server_protocol::AccountUpdatedNotification;
     use codex_app_server_protocol::ApplyPatchApprovalParams;
     use codex_app_server_protocol::AuthMode;
+    use codex_app_server_protocol::AutomationMessageSource;
+    use codex_app_server_protocol::AutomationScope;
+    use codex_app_server_protocol::AutomationTrigger;
+    use codex_app_server_protocol::AutomationUpdateType;
+    use codex_app_server_protocol::AutomationUpdatedNotification;
     use codex_app_server_protocol::ConfigWarningNotification;
     use codex_app_server_protocol::DynamicToolCallParams;
     use codex_app_server_protocol::FileChangeRequestApprovalParams;
     use codex_app_server_protocol::ModelRerouteReason;
     use codex_app_server_protocol::ModelReroutedNotification;
+    use codex_app_server_protocol::PilotRun;
+    use codex_app_server_protocol::PilotStatus;
+    use codex_app_server_protocol::PilotUpdateType;
+    use codex_app_server_protocol::PilotUpdatedNotification;
     use codex_app_server_protocol::RateLimitSnapshot;
     use codex_app_server_protocol::RateLimitWindow;
     use codex_app_server_protocol::ToolRequestUserInputParams;
@@ -778,6 +787,142 @@ mod tests {
                 "params": {
                     "authMode": "apikey",
                     "planType": null
+                },
+            }),
+            serde_json::to_value(jsonrpc_notification)
+                .expect("ensure the notification serializes correctly"),
+            "ensure the notification serializes correctly"
+        );
+    }
+
+    #[test]
+    fn verify_automation_updated_notification_serialization() {
+        let notification = ServerNotification::AutomationUpdated(AutomationUpdatedNotification {
+            thread_id: "thr_123".to_string(),
+            runtime_id: "session:auto-1".to_string(),
+            update_type: AutomationUpdateType::Fired,
+            automation: Some(codex_app_server_protocol::Automation {
+                runtime_id: "session:auto-1".to_string(),
+                id: "auto-1".to_string(),
+                scope: AutomationScope::Session,
+                enabled: true,
+                paused: false,
+                stopped: false,
+                run_count: 1,
+                next_fire_at: Some(123),
+                last_error: None,
+                trigger: AutomationTrigger::TurnCompleted,
+                message_source: AutomationMessageSource::Static {
+                    message: "continue".to_string(),
+                },
+                limits: codex_app_server_protocol::AutomationLimits::default(),
+                policy_command: None,
+            }),
+            message: Some("continue".to_string()),
+        });
+
+        let jsonrpc_notification = OutgoingMessage::AppServerNotification(notification);
+        assert_eq!(
+            json!({
+                "method": "automation/updated",
+                "params": {
+                    "threadId": "thr_123",
+                    "runtimeId": "session:auto-1",
+                    "updateType": "fired",
+                    "automation": {
+                        "runtimeId": "session:auto-1",
+                        "id": "auto-1",
+                        "scope": "session",
+                        "enabled": true,
+                        "paused": false,
+                        "stopped": false,
+                        "runCount": 1,
+                        "nextFireAt": 123,
+                        "lastError": null,
+                        "trigger": {
+                            "type": "turnCompleted"
+                        },
+                        "messageSource": {
+                            "type": "static",
+                            "message": "continue"
+                        },
+                        "limits": {
+                            "maxRuns": null,
+                            "untilAt": null
+                        },
+                        "policyCommand": null
+                    },
+                    "message": "continue"
+                },
+            }),
+            serde_json::to_value(jsonrpc_notification)
+                .expect("ensure the notification serializes correctly"),
+            "ensure the notification serializes correctly"
+        );
+    }
+
+    #[test]
+    fn verify_pilot_updated_notification_serialization() {
+        let notification = ServerNotification::PilotUpdated(PilotUpdatedNotification {
+            thread_id: "thr_123".to_string(),
+            update_type: PilotUpdateType::CycleCompleted,
+            run: Some(PilotRun {
+                goal: "ship it".to_string(),
+                status: PilotStatus::Running,
+                started_at: 100,
+                deadline_at: Some(200),
+                updated_at: 150,
+                iteration_count: 3,
+                pending_cycle_kind: None,
+                active_cycle_kind: None,
+                active_turn_id: None,
+                last_submitted_turn_id: Some("turn_123".to_string()),
+                wrap_up_requested: false,
+                wrap_up_requested_at: None,
+                stop_requested_at: None,
+                last_error: None,
+                status_message: Some("Pilot completed a cycle.".to_string()),
+                last_progress_at: Some(150),
+                last_cycle_completed_at: Some(150),
+                last_cycle_summary: Some("Updated the scheduler".to_string()),
+                last_cycle_kind: None,
+                last_agent_message: Some(
+                    "Updated the scheduler and verified the tests.".to_string(),
+                ),
+            }),
+            message: Some("Pilot completed a cycle.".to_string()),
+        });
+
+        let jsonrpc_notification = OutgoingMessage::AppServerNotification(notification);
+        assert_eq!(
+            json!({
+                "method": "pilot/updated",
+                "params": {
+                    "threadId": "thr_123",
+                    "updateType": "cycleCompleted",
+                    "run": {
+                        "goal": "ship it",
+                        "status": "running",
+                        "startedAt": 100,
+                        "deadlineAt": 200,
+                        "updatedAt": 150,
+                        "iterationCount": 3,
+                        "pendingCycleKind": null,
+                        "activeCycleKind": null,
+                        "activeTurnId": null,
+                        "lastSubmittedTurnId": "turn_123",
+                        "wrapUpRequested": false,
+                        "wrapUpRequestedAt": null,
+                        "stopRequestedAt": null,
+                        "lastError": null,
+                        "statusMessage": "Pilot completed a cycle.",
+                        "lastProgressAt": 150,
+                        "lastCycleCompletedAt": 150,
+                        "lastCycleSummary": "Updated the scheduler",
+                        "lastCycleKind": null,
+                        "lastAgentMessage": "Updated the scheduler and verified the tests."
+                    },
+                    "message": "Pilot completed a cycle."
                 },
             }),
             serde_json::to_value(jsonrpc_notification)

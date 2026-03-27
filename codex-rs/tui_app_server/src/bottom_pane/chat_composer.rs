@@ -192,6 +192,9 @@ use crate::render::Insets;
 use crate::render::RectExt;
 use crate::render::renderable::Renderable;
 use crate::slash_command::SlashCommand;
+use crate::slop_fork::auto_command::auto_command_mention_item;
+use crate::slop_fork::autoresearch_command::autoresearch_command_mention_item;
+use crate::slop_fork::pilot_command::pilot_command_mention_item;
 use crate::style::user_message_style;
 use codex_protocol::custom_prompts::CustomPrompt;
 use codex_protocol::custom_prompts::PROMPTS_CMD_PREFIX;
@@ -3599,6 +3602,9 @@ impl ChatComposer {
 
     fn mention_items(&self) -> Vec<MentionItem> {
         let mut mentions = Vec::new();
+        mentions.push(auto_command_mention_item());
+        mentions.push(autoresearch_command_mention_item());
+        mentions.push(pilot_command_mention_item());
         if let Some(skills) = self.skills.as_ref() {
             for skill in skills {
                 let display_name = skill_display_name(skill).to_string();
@@ -5296,8 +5302,7 @@ mod tests {
             false,
         );
         composer.set_connectors_enabled(true);
-        composer.set_text_content("$".to_string(), Vec::new(), Vec::new());
-        assert!(matches!(composer.active_popup, ActivePopup::None));
+        composer.set_text_content("$not".to_string(), Vec::new(), Vec::new());
 
         let connectors = vec![AppInfo {
             id: "connector_1".to_string(),
@@ -5338,8 +5343,7 @@ mod tests {
             false,
         );
         composer.set_connectors_enabled(true);
-        composer.set_text_content("$".to_string(), Vec::new(), Vec::new());
-        assert!(matches!(composer.active_popup, ActivePopup::None));
+        composer.set_text_content("$not".to_string(), Vec::new(), Vec::new());
 
         let connectors = vec![AppInfo {
             id: "connector_1".to_string(),
@@ -5358,10 +5362,14 @@ mod tests {
         }];
         composer.set_connector_mentions(Some(ConnectorsSnapshot { connectors }));
 
-        assert!(
-            matches!(composer.active_popup, ActivePopup::None),
-            "disabled connectors should not appear in the mention popup"
-        );
+        match &composer.active_popup {
+            ActivePopup::None => {}
+            ActivePopup::Skill(popup) => assert!(
+                popup.selected_mention().is_none(),
+                "disabled connectors should not appear in the mention popup"
+            ),
+            _ => panic!("unexpected popup state"),
+        }
     }
 
     #[test]
@@ -5375,8 +5383,7 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_text_content("$".to_string(), Vec::new(), Vec::new());
-        assert!(matches!(composer.active_popup, ActivePopup::None));
+        composer.set_text_content("$samp".to_string(), Vec::new(), Vec::new());
 
         composer.set_plugin_mentions(Some(vec![PluginCapabilitySummary {
             config_name: "sample@test".to_string(),
@@ -5461,26 +5468,41 @@ mod tests {
         }));
 
         let mentions = composer.mention_items();
-        assert_eq!(mentions.len(), 3);
-        assert_eq!(mentions[0].category_tag, Some("[Skill]".to_string()));
+        assert_eq!(mentions.len(), 6);
+        assert_eq!(mentions[0].display_name, "auto".to_string());
         assert_eq!(
             mentions[0].path,
-            Some("/tmp/repo/google-calendar/SKILL.md".to_string())
+            Some("slop-fork://command/auto".to_string())
         );
-        assert_eq!(mentions[0].display_name, "Google Calendar".to_string());
-        assert_eq!(mentions[1].category_tag, Some("[Plugin]".to_string()));
+        assert_eq!(mentions[1].display_name, "autoresearch".to_string());
         assert_eq!(
             mentions[1].path,
+            Some("slop-fork://command/autoresearch".to_string())
+        );
+        assert_eq!(mentions[2].display_name, "pilot".to_string());
+        assert_eq!(
+            mentions[2].path,
+            Some("slop-fork://command/pilot".to_string())
+        );
+        assert_eq!(mentions[3].category_tag, Some("[Skill]".to_string()));
+        assert_eq!(
+            mentions[3].path,
+            Some("/tmp/repo/google-calendar/SKILL.md".to_string())
+        );
+        assert_eq!(mentions[3].display_name, "Google Calendar".to_string());
+        assert_eq!(mentions[4].category_tag, Some("[Plugin]".to_string()));
+        assert_eq!(
+            mentions[4].path,
             Some("plugin://google-calendar@debug".to_string())
         );
-        assert_eq!(mentions[2].category_tag, Some("[App]".to_string()));
-        assert_eq!(mentions[2].path, Some("app://google_calendar".to_string()));
+        assert_eq!(mentions[5].category_tag, Some("[App]".to_string()));
+        assert_eq!(mentions[5].path, Some("app://google_calendar".to_string()));
     }
 
     #[test]
     fn plugin_mention_popup_snapshot() {
         snapshot_composer_state("plugin_mention_popup", false, |composer| {
-            composer.set_text_content("$sa".to_string(), Vec::new(), Vec::new());
+            composer.set_text_content("$samp".to_string(), Vec::new(), Vec::new());
             composer.set_plugin_mentions(Some(vec![PluginCapabilitySummary {
                 config_name: "sample@test".to_string(),
                 display_name: "Sample Plugin".to_string(),
@@ -5564,7 +5586,7 @@ mod tests {
             false,
         );
         composer.set_connectors_enabled(true);
-        composer.set_text_content("$".to_string(), Vec::new(), Vec::new());
+        composer.set_text_content("$not".to_string(), Vec::new(), Vec::new());
 
         let connectors = vec![AppInfo {
             id: "connector_1".to_string(),
@@ -5583,7 +5605,11 @@ mod tests {
         }];
         composer.set_connector_mentions(Some(ConnectorsSnapshot { connectors }));
 
-        assert!(matches!(composer.active_popup, ActivePopup::None));
+        match &composer.active_popup {
+            ActivePopup::None => {}
+            ActivePopup::Skill(popup) => assert!(popup.selected_mention().is_none()),
+            _ => panic!("unexpected popup state"),
+        }
     }
 
     #[test]

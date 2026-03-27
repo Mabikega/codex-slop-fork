@@ -30,6 +30,7 @@ use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::StatusLineItem;
 use crate::bottom_pane::TerminalTitleItem;
 use crate::history_cell::HistoryCell;
+use crate::slop_fork::SlopForkEvent;
 
 use codex_core::config::types::ApprovalsReviewer;
 use codex_features::Feature;
@@ -165,6 +166,9 @@ pub(crate) enum AppEvent {
     OpenUrlInBrowser {
         url: String,
     },
+
+    /// Fork-specific overlay actions routed through the app layer.
+    SlopFork(SlopForkEvent),
 
     /// Refresh app connector state and mention bindings.
     RefreshConnectors {

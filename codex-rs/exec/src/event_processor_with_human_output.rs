@@ -10,6 +10,7 @@ use codex_app_server_protocol::ThreadTokenUsage;
 use codex_app_server_protocol::TurnStatus;
 use codex_core::WireApi;
 use codex_core::config::Config;
+use codex_core::slop_fork::FORK_DISPLAY_NAME;
 use codex_protocol::num_format::format_with_separators;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionConfiguredEvent;
@@ -216,8 +217,15 @@ impl EventProcessor for EventProcessorWithHumanOutput {
         session_configured_event: &SessionConfiguredEvent,
     ) {
         const VERSION: &str = env!("CARGO_PKG_VERSION");
-        eprintln!("OpenAI Codex v{VERSION} (research preview)\n--------");
-        for (key, value) in config_summary_entries(config, session_configured_event) {
+        eprintln!("{FORK_DISPLAY_NAME} v{VERSION} (research preview)\n--------");
+
+        let mut entries = config_summary_entries(config, session_configured_event);
+        entries.push((
+            "session id",
+            session_configured_event.session_id.to_string(),
+        ));
+
+        for (key, value) in entries {
             eprintln!("{} {}", format!("{key}:").style(self.bold), value);
         }
         eprintln!("--------");

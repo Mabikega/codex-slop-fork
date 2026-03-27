@@ -7,7 +7,10 @@ use anyhow::Result;
 use codex_client::build_reqwest_client_with_custom_ca;
 use codex_core::auth::CodexAuth;
 use codex_core::default_client::get_codex_user_agent;
+use codex_core::models_manager::client_version_to_whole;
 use codex_protocol::account::PlanType as AccountPlanType;
+use codex_protocol::openai_models::ModelInfo;
+use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::protocol::CreditsSnapshot;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::RateLimitWindow;
@@ -31,6 +34,20 @@ pub enum RequestError {
         body: String,
     },
     Other(anyhow::Error),
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RawRateLimitSnapshotInput {
+    pub primary: Option<RawRateLimitWindowSnapshot>,
+    pub secondary: Option<RawRateLimitWindowSnapshot>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RawRateLimitWindowSnapshot {
+    pub used_percent: i32,
+    pub limit_window_seconds: i32,
+    pub reset_after_seconds: i32,
+    pub reset_at: i32,
 }
 
 impl RequestError {
@@ -254,15 +271,90 @@ impl Client {
         Ok(preferred.unwrap_or_else(|| snapshots[0].clone()))
     }
 
+    pub async fn get_detailed_rate_limits_many(
+        &self,
+    ) -> Result<Vec<(RateLimitSnapshot, RawRateLimitSnapshotInput)>> {
+        self.get_detailed_rate_limits_many_detailed()
+            .await
+            .map_err(anyhow::Error::from)
+    }
+
+    pub async fn get_detailed_rate_limits_many_detailed(
+        &self,
+    ) -> std::result::Result<Vec<(RateLimitSnapshot, RawRateLimitSnapshotInput)>, RequestError>
+    {
+        let payload = self.get_rate_limits_payload_detailed().await?;
+        Ok(Self::detailed_rate_limit_snapshots_from_payload(payload))
+    }
+
     pub async fn get_rate_limits_many(&self) -> Result<Vec<RateLimitSnapshot>> {
+        Ok(self
+            .get_detailed_rate_limits_many()
+            .await?
+            .into_iter()
+            .map(|(snapshot, _raw)| snapshot)
+            .collect())
+    }
+
+    pub async fn get_rate_limits_payload(&self) -> Result<RateLimitStatusPayload> {
+        self.get_rate_limits_payload_detailed()
+            .await
+            .map_err(anyhow::Error::from)
+    }
+
+    async fn get_rate_limits_payload_detailed(
+        &self,
+    ) -> std::result::Result<RateLimitStatusPayload, RequestError> {
         let url = match self.path_style {
             PathStyle::CodexApi => format!("{}/api/codex/usage", self.base_url),
             PathStyle::ChatGptApi => format!("{}/wham/usage", self.base_url),
         };
         let req = self.http.get(&url).headers(self.headers());
-        let (body, ct) = self.exec_request(req, "GET", &url).await?;
-        let payload: RateLimitStatusPayload = self.decode_json(&url, &ct, &body)?;
-        Ok(Self::rate_limit_snapshots_from_payload(payload))
+        let (body, ct) = self.exec_request_detailed(req, "GET", &url).await?;
+        self.decode_json(&url, &ct, &body)
+            .map_err(RequestError::from)
+    }
+
+    pub async fn create_response(
+        &self,
+        request_body: &serde_json::Value,
+    ) -> std::result::Result<(), RequestError> {
+        let url = match self.path_style {
+            PathStyle::CodexApi => format!("{}/v1/responses", self.base_url),
+            PathStyle::ChatGptApi => format!("{}/codex/responses", self.base_url),
+        };
+        let req = self
+            .http
+            .post(&url)
+            .headers(self.headers())
+            .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
+            .json(request_body);
+        self.exec_request_detailed(req, "POST", &url).await?;
+        Ok(())
+    }
+
+    pub async fn list_models_detailed(&self) -> std::result::Result<Vec<ModelInfo>, RequestError> {
+        let client_version = client_version_to_whole();
+        let url = match self.path_style {
+            PathStyle::CodexApi => {
+                format!(
+                    "{}/api/codex/models?client_version={client_version}",
+                    self.base_url
+                )
+            }
+            PathStyle::ChatGptApi => {
+                format!(
+                    "{}/codex/models?client_version={client_version}",
+                    self.base_url
+                )
+            }
+        };
+        let req = self.http.get(&url).headers(self.headers());
+        let (body, ct) = self.exec_request_detailed(req, "GET", &url).await?;
+        let response = self
+            .decode_json::<ModelsResponse>(&url, &ct, &body)
+            .map_err(RequestError::from)?;
+        Ok(response.models)
     }
 
     pub async fn list_tasks(
@@ -393,29 +485,47 @@ impl Client {
     }
 
     // rate limit helpers
-    fn rate_limit_snapshots_from_payload(
+    pub fn detailed_rate_limit_snapshots_from_payload(
         payload: RateLimitStatusPayload,
-    ) -> Vec<RateLimitSnapshot> {
+    ) -> Vec<(RateLimitSnapshot, RawRateLimitSnapshotInput)> {
         let plan_type = Some(Self::map_plan_type(payload.plan_type));
-        let mut snapshots = vec![Self::make_rate_limit_snapshot(
-            Some("codex".to_string()),
-            /*limit_name*/ None,
-            payload.rate_limit.flatten().map(|details| *details),
-            payload.credits.flatten().map(|details| *details),
-            plan_type,
+        let primary_rate_limit = payload.rate_limit.flatten().map(|details| *details);
+        let mut snapshots = vec![(
+            Self::make_rate_limit_snapshot(
+                Some("codex".to_string()),
+                /*limit_name*/ None,
+                primary_rate_limit.clone(),
+                payload.credits.flatten().map(|details| *details),
+                plan_type,
+            ),
+            Self::raw_rate_limit_snapshot_input(primary_rate_limit),
         )];
         if let Some(additional) = payload.additional_rate_limits.flatten() {
             snapshots.extend(additional.into_iter().map(|details| {
-                Self::make_rate_limit_snapshot(
-                    Some(details.metered_feature),
-                    Some(details.limit_name),
-                    details.rate_limit.flatten().map(|rate_limit| *rate_limit),
-                    /*credits*/ None,
-                    plan_type,
+                let rate_limit = details.rate_limit.flatten().map(|value| *value);
+                (
+                    Self::make_rate_limit_snapshot(
+                        Some(details.metered_feature),
+                        Some(details.limit_name),
+                        rate_limit.clone(),
+                        /*credits*/ None,
+                        plan_type,
+                    ),
+                    Self::raw_rate_limit_snapshot_input(rate_limit),
                 )
             }));
         }
         snapshots
+    }
+
+    #[cfg(test)]
+    fn rate_limit_snapshots_from_payload(
+        payload: RateLimitStatusPayload,
+    ) -> Vec<RateLimitSnapshot> {
+        Self::detailed_rate_limit_snapshots_from_payload(payload)
+            .into_iter()
+            .map(|(snapshot, _raw)| snapshot)
+            .collect()
     }
 
     fn make_rate_limit_snapshot(
@@ -491,6 +601,35 @@ impl Client {
 
         let seconds_i64 = i64::from(seconds);
         Some((seconds_i64 + 59) / 60)
+    }
+
+    fn raw_rate_limit_snapshot_input(
+        rate_limit: Option<crate::types::RateLimitStatusDetails>,
+    ) -> RawRateLimitSnapshotInput {
+        let Some(rate_limit) = rate_limit else {
+            return RawRateLimitSnapshotInput::default();
+        };
+        RawRateLimitSnapshotInput {
+            primary: rate_limit
+                .primary_window
+                .flatten()
+                .map(|window| Self::raw_rate_limit_window(*window)),
+            secondary: rate_limit
+                .secondary_window
+                .flatten()
+                .map(|window| Self::raw_rate_limit_window(*window)),
+        }
+    }
+
+    fn raw_rate_limit_window(
+        window: crate::types::RateLimitWindowSnapshot,
+    ) -> RawRateLimitWindowSnapshot {
+        RawRateLimitWindowSnapshot {
+            used_percent: window.used_percent,
+            limit_window_seconds: window.limit_window_seconds,
+            reset_after_seconds: window.reset_after_seconds,
+            reset_at: window.reset_at,
+        }
     }
 }
 

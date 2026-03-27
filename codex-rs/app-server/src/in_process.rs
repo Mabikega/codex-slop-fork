@@ -238,6 +238,8 @@ pub struct InProcessClientHandle {
     client: InProcessClientSender,
     event_rx: mpsc::Receiver<InProcessServerEvent>,
     runtime_handle: tokio::task::JoinHandle<()>,
+    #[cfg(test)]
+    test_codex_home: Option<tempfile::TempDir>,
 }
 
 impl InProcessClientHandle {
@@ -679,6 +681,8 @@ fn start_uninitialized(args: InProcessStartArgs) -> InProcessClientHandle {
         client: InProcessClientSender { client_tx },
         event_rx,
         runtime_handle,
+        #[cfg(test)]
+        test_codex_home: None,
     }
 }
 
@@ -696,21 +700,26 @@ mod tests {
     use codex_core::config::ConfigBuilder;
     use pretty_assertions::assert_eq;
 
-    async fn build_test_config() -> Config {
-        match ConfigBuilder::default().build().await {
-            Ok(config) => config,
-            Err(_) => Config::load_default_with_cli_overrides(Vec::new())
-                .expect("default config should load"),
-        }
+    async fn build_test_config() -> (Config, tempfile::TempDir) {
+        let codex_home = tempfile::tempdir().expect("create temp codex home");
+        let cwd = codex_home.path().to_path_buf();
+        let config = ConfigBuilder::default()
+            .codex_home(codex_home.path().to_path_buf())
+            .fallback_cwd(Some(cwd))
+            .build()
+            .await
+            .expect("test config should load");
+        (config, codex_home)
     }
 
     async fn start_test_client_with_capacity(
         session_source: SessionSource,
         channel_capacity: usize,
     ) -> InProcessClientHandle {
+        let (config, test_codex_home) = build_test_config().await;
         let args = InProcessStartArgs {
             arg0_paths: Arg0DispatchPaths::default(),
-            config: Arc::new(build_test_config().await),
+            config: Arc::new(config),
             cli_overrides: Vec::new(),
             loader_overrides: LoaderOverrides::default(),
             cloud_requirements: CloudRequirementsLoader::default(),
@@ -728,7 +737,9 @@ mod tests {
             },
             channel_capacity,
         };
-        start(args).await.expect("in-process runtime should start")
+        let mut handle = start(args).await.expect("in-process runtime should start");
+        handle.test_codex_home = Some(test_codex_home);
+        handle
     }
 
     async fn start_test_client(session_source: SessionSource) -> InProcessClientHandle {

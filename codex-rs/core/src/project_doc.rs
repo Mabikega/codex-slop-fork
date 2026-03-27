@@ -20,6 +20,9 @@ use crate::config_loader::ConfigLayerStackOrdering;
 use crate::config_loader::default_project_root_markers;
 use crate::config_loader::merge_toml_values;
 use crate::config_loader::project_root_markers_from_config;
+use crate::slop_fork::extend_project_doc_paths;
+use crate::slop_fork::load_project_doc_overlay;
+use crate::slop_fork::push_unique_project_doc_path;
 use codex_app_server_protocol::ConfigLayerSource;
 use codex_features::Feature;
 use dunce::canonicalize as normalize_path;
@@ -126,19 +129,32 @@ pub(crate) async fn get_user_instructions(config: &Config) -> Option<String> {
 /// function returns `Ok(None)`. Unexpected I/O failures bubble up as `Err` so
 /// callers can decide how to handle them.
 pub async fn read_project_docs(config: &Config) -> std::io::Result<Option<String>> {
+    let project_doc_overlay = load_project_doc_overlay(config)?;
     let max_total = config.project_doc_max_bytes;
 
     if max_total == 0 {
-        return Ok(None);
+        let mut inline_sections = project_doc_overlay.prefix_sections;
+        inline_sections.extend(project_doc_overlay.suffix_sections);
+        return if inline_sections.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(inline_sections.join("\n\n")))
+        };
     }
 
     let paths = discover_project_doc_paths(config)?;
     if paths.is_empty() {
-        return Ok(None);
+        let mut inline_sections = project_doc_overlay.prefix_sections;
+        inline_sections.extend(project_doc_overlay.suffix_sections);
+        return if inline_sections.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(inline_sections.join("\n\n")))
+        };
     }
 
     let mut remaining: u64 = max_total as u64;
-    let mut parts: Vec<String> = Vec::new();
+    let mut parts = project_doc_overlay.prefix_sections;
 
     for p in paths {
         if remaining == 0 {
@@ -171,6 +187,8 @@ pub async fn read_project_docs(config: &Config) -> std::io::Result<Option<String
         }
     }
 
+    parts.extend(project_doc_overlay.suffix_sections);
+
     if parts.is_empty() {
         Ok(None)
     } else {
@@ -184,6 +202,20 @@ pub async fn read_project_docs(config: &Config) -> std::io::Result<Option<String
 /// directory (inclusive). Symlinks are allowed. When `project_doc_max_bytes`
 /// is zero, returns an empty list.
 pub fn discover_project_doc_paths(config: &Config) -> std::io::Result<Vec<PathBuf>> {
+    if config.project_doc_max_bytes == 0 {
+        return Ok(Vec::new());
+    }
+    let project_doc_overlay = load_project_doc_overlay(config)?;
+    discover_project_doc_paths_with_additional_filenames(
+        config,
+        &project_doc_overlay.additional_filenames,
+    )
+}
+
+fn discover_project_doc_paths_with_additional_filenames(
+    config: &Config,
+    additional_filenames: &[String],
+) -> std::io::Result<Vec<PathBuf>> {
     let mut dir = config.cwd.to_path_buf();
     if let Ok(canon) = normalize_path(&dir) {
         dir = canon;
@@ -244,33 +276,29 @@ pub fn discover_project_doc_paths(config: &Config) -> std::io::Result<Vec<PathBu
         dirs.reverse();
         dirs
     } else {
-        vec![dir]
+        vec![dir.clone()]
     };
 
     let mut found: Vec<PathBuf> = Vec::new();
-    let candidate_filenames = candidate_filenames(config);
-    for d in search_dirs {
-        for name in &candidate_filenames {
-            let candidate = d.join(name);
-            match std::fs::symlink_metadata(&candidate) {
-                Ok(md) => {
-                    let ft = md.file_type();
-                    // Allow regular files and symlinks; opening will later fail for dangling links.
-                    if ft.is_file() || ft.is_symlink() {
-                        found.push(candidate);
-                        break;
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(e),
-            }
+    let primary_candidate_filenames = primary_candidate_filenames(config);
+    for d in &search_dirs {
+        if let Some(primary_doc) = first_existing_doc_path(d, &primary_candidate_filenames)? {
+            push_unique_project_doc_path(&mut found, primary_doc);
         }
     }
+    extend_project_doc_paths(
+        config,
+        &dir,
+        &search_dirs,
+        &primary_candidate_filenames,
+        additional_filenames,
+        &mut found,
+    )?;
 
     Ok(found)
 }
 
-fn candidate_filenames<'a>(config: &'a Config) -> Vec<&'a str> {
+fn primary_candidate_filenames<'a>(config: &'a Config) -> Vec<&'a str> {
     let mut names: Vec<&'a str> =
         Vec::with_capacity(2 + config.project_doc_fallback_filenames.len());
     names.push(LOCAL_PROJECT_DOC_FILENAME);
@@ -285,6 +313,29 @@ fn candidate_filenames<'a>(config: &'a Config) -> Vec<&'a str> {
         }
     }
     names
+}
+
+fn first_existing_doc_path(
+    directory: &std::path::Path,
+    candidate_filenames: &[&str],
+) -> std::io::Result<Option<PathBuf>> {
+    for name in candidate_filenames {
+        if let Some(path) = existing_doc_path(&directory.join(name))? {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
+fn existing_doc_path(path: &std::path::Path) -> std::io::Result<Option<PathBuf>> {
+    match std::fs::symlink_metadata(path) {
+        Ok(md) => {
+            let ft = md.file_type();
+            Ok((ft.is_file() || ft.is_symlink()).then(|| path.to_path_buf()))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(test)]

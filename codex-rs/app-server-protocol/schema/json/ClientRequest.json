@@ -96,6 +96,382 @@
         }
       ]
     },
+    "AutomationDefinition": {
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limits": {
+          "$ref": "#/definitions/AutomationLimits"
+        },
+        "messageSource": {
+          "$ref": "#/definitions/AutomationMessageSource"
+        },
+        "policyCommand": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AutomationPolicyCommand"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "trigger": {
+          "$ref": "#/definitions/AutomationTrigger"
+        }
+      },
+      "required": [
+        "enabled",
+        "limits",
+        "messageSource",
+        "trigger"
+      ],
+      "type": "object"
+    },
+    "AutomationDeleteParams": {
+      "properties": {
+        "runtimeId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "runtimeId",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "AutomationLimits": {
+      "properties": {
+        "maxRuns": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "untilAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "AutomationListParams": {
+      "properties": {
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "AutomationMessageSource": {
+      "oneOf": [
+        {
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "static"
+              ],
+              "title": "StaticAutomationMessageSourceType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "message",
+            "type"
+          ],
+          "title": "StaticAutomationMessageSource",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "messages": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": {
+              "enum": [
+                "roundRobin"
+              ],
+              "title": "RoundRobinAutomationMessageSourceType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "messages",
+            "type"
+          ],
+          "title": "RoundRobinAutomationMessageSource",
+          "type": "object"
+        }
+      ]
+    },
+    "AutomationPolicyCommand": {
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "cwd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timeoutMs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "AutomationScope": {
+      "enum": [
+        "session",
+        "repo",
+        "global"
+      ],
+      "type": "string"
+    },
+    "AutomationSetEnabledParams": {
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "runtimeId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "enabled",
+        "runtimeId",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "AutomationTrigger": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "turnCompleted"
+              ],
+              "title": "TurnCompletedAutomationTriggerType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "TurnCompletedAutomationTrigger",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "every_seconds": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "type": {
+              "enum": [
+                "interval"
+              ],
+              "title": "IntervalAutomationTriggerType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "every_seconds",
+            "type"
+          ],
+          "title": "IntervalAutomationTrigger",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "expression": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "cron"
+              ],
+              "title": "CronAutomationTriggerType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "expression",
+            "type"
+          ],
+          "title": "CronAutomationTrigger",
+          "type": "object"
+        }
+      ]
+    },
+    "AutomationUpsertParams": {
+      "properties": {
+        "automation": {
+          "$ref": "#/definitions/AutomationDefinition"
+        },
+        "scope": {
+          "$ref": "#/definitions/AutomationScope"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "automation",
+        "scope",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "AutoresearchControlAction": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "pause"
+              ],
+              "title": "PauseAutoresearchControlActionType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "PauseAutoresearchControlAction",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "resume"
+              ],
+              "title": "ResumeAutoresearchControlActionType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "ResumeAutoresearchControlAction",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "wrapUp"
+              ],
+              "title": "WrapUpAutoresearchControlActionType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "WrapUpAutoresearchControlAction",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "stop"
+              ],
+              "title": "StopAutoresearchControlActionType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "StopAutoresearchControlAction",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "clear"
+              ],
+              "title": "ClearAutoresearchControlActionType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "ClearAutoresearchControlAction",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "discover"
+              ],
+              "title": "DiscoverAutoresearchControlActionType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "DiscoverAutoresearchControlAction",
+          "type": "object"
+        }
+      ]
+    },
+    "AutoresearchMode": {
+      "enum": [
+        "optimize",
+        "research",
+        "scientist"
+      ],
+      "type": "string"
+    },
     "ByteRange": {
       "properties": {
         "end": {
@@ -1293,6 +1669,15 @@
         "none",
         "friendly",
         "pragmatic"
+      ],
+      "type": "string"
+    },
+    "PilotControlAction": {
+      "enum": [
+        "pause",
+        "resume",
+        "wrapUp",
+        "stop"
       ],
       "type": "string"
     },
@@ -4043,6 +4428,102 @@
         "params"
       ],
       "title": "Fs/copyRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "automation/list"
+          ],
+          "title": "Automation/listRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AutomationListParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Automation/listRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "automation/upsert"
+          ],
+          "title": "Automation/upsertRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AutomationUpsertParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Automation/upsertRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "automation/delete"
+          ],
+          "title": "Automation/deleteRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AutomationDeleteParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Automation/deleteRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "automation/setEnabled"
+          ],
+          "title": "Automation/setEnabledRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AutomationSetEnabledParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Automation/setEnabledRequest",
       "type": "object"
     },
     {

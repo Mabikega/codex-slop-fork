@@ -7,7 +7,7 @@ expression: terminal.backend()
 "                                                                                                    "
 "                                                                                                    "
 "                                                                                                    "
-"                                                                                                    "
 "  Sample Plugin  [Plugin] Plugin that includes the Figma MCP server and Skills for common workflows "
+"  autoresearch   [Command] autoresearch command                                                     "
 "                                                                                                    "
 "  Press enter to insert or esc to close                                                             "

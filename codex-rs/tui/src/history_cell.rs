@@ -43,6 +43,7 @@ use codex_core::config::Config;
 use codex_core::config::types::McpServerTransportConfig;
 use codex_core::mcp::McpManager;
 use codex_core::plugins::PluginsManager;
+use codex_core::slop_fork::FORK_DISPLAY_NAME;
 use codex_core::web_search::web_search_detail;
 use codex_otel::RuntimeMetricsSummary;
 use codex_protocol::account::PlanType;
@@ -85,6 +86,22 @@ use tracing::error;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+const RATATUI_SAFE_LINE_WIDTH: usize = u16::MAX as usize - 1;
+
+fn normalize_lines_for_paragraph(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
+    let wrap_width = usize::from(width.max(1));
+    let opts = RtOptions::new(wrap_width);
+    let mut normalized = Vec::new();
+    for line in lines {
+        if line.width() >= RATATUI_SAFE_LINE_WIDTH {
+            push_owned_lines(&adaptive_wrap_line(&line, opts.clone()), &mut normalized);
+        } else {
+            normalized.push(line);
+        }
+    }
+    normalized
+}
+
 /// Represents an event to display in the conversation history. Returns its
 /// `Vec<Line<'static>>` representation to make it easier to display in a
 /// scrollable list.
@@ -109,7 +126,8 @@ pub(crate) trait HistoryCell: std::fmt::Debug + Send + Sync + Any {
     /// for lines containing URL-like tokens that are wider than the
     /// terminal — the logical line count would undercount.
     fn desired_height(&self, width: u16) -> u16 {
-        Paragraph::new(Text::from(self.display_lines(width)))
+        let lines = normalize_lines_for_paragraph(self.display_lines(width), width);
+        Paragraph::new(Text::from(lines))
             .wrap(Wrap { trim: false })
             .line_count(width)
             .try_into()
@@ -143,6 +161,7 @@ pub(crate) trait HistoryCell: std::fmt::Debug + Send + Sync + Any {
             return 1;
         }
 
+        let lines = normalize_lines_for_paragraph(lines, width);
         Paragraph::new(Text::from(lines))
             .wrap(Wrap { trim: false })
             .line_count(width)
@@ -171,7 +190,7 @@ pub(crate) trait HistoryCell: std::fmt::Debug + Send + Sync + Any {
 
 impl Renderable for Box<dyn HistoryCell> {
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        let lines = self.display_lines(area.width);
+        let lines = normalize_lines_for_paragraph(self.display_lines(area.width), area.width);
         let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
         let y = if area.height == 0 {
             0
@@ -1312,10 +1331,10 @@ impl HistoryCell for SessionHeaderHistoryCell {
 
         let make_row = |spans: Vec<Span<'static>>| Line::from(spans);
 
-        // Title line rendered inside the box: ">_ OpenAI Codex (vX)"
+        // Title line rendered inside the box: ">_ Codex Slop Fork (vX)"
         let title_spans: Vec<Span<'static>> = vec![
             Span::from(">_ ").dim(),
-            Span::from("OpenAI Codex").bold(),
+            Span::from(FORK_DISPLAY_NAME).bold(),
             Span::from(" ").dim(),
             Span::from(format!("(v{})", self.version)).dim(),
         ];
@@ -2541,6 +2560,7 @@ mod tests {
     use crate::exec_cell::CommandOutput;
     use crate::exec_cell::ExecCall;
     use crate::exec_cell::ExecCell;
+    use crate::render::renderable::Renderable;
     use codex_core::config::Config;
     use codex_core::config::ConfigBuilder;
     use codex_core::config::types::McpServerConfig;
@@ -2557,8 +2577,11 @@ mod tests {
     use codex_protocol::protocol::SessionConfiguredEvent;
     use dirs::home_dir;
     use pretty_assertions::assert_eq;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
     use serde_json::json;
     use std::collections::HashMap;
+    use std::panic::AssertUnwindSafe;
     use std::path::PathBuf;
 
     use codex_protocol::mcp::CallToolResult;
@@ -2686,6 +2709,26 @@ mod tests {
         let cell = new_unified_exec_interaction(None, String::new());
         let lines = render_transcript(&cell);
         assert_eq!(lines, vec!["• Waited for background terminal"]);
+    }
+
+    #[test]
+    fn oversized_history_line_does_not_panic_during_measure_or_render() {
+        let oversized = "x".repeat(usize::from(u16::MAX) + 128);
+        let cell: Box<dyn HistoryCell> = Box::new(PlainHistoryCell::new(vec![oversized.into()]));
+
+        let height = std::panic::catch_unwind(AssertUnwindSafe(|| cell.desired_height(80)));
+        assert!(
+            height.is_ok(),
+            "desired_height should not panic on oversized lines"
+        );
+        assert!(height.expect("height result") > 0);
+
+        let render = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let area = Rect::new(0, 0, 80, 6);
+            let mut buf = Buffer::empty(area);
+            Renderable::render(&cell, area, &mut buf);
+        }));
+        assert!(render.is_ok(), "render should not panic on oversized lines");
     }
 
     #[test]

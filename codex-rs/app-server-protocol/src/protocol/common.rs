@@ -326,6 +326,47 @@ client_request_definitions! {
         params: v2::FsCopyParams,
         response: v2::FsCopyResponse,
     },
+    AutomationList => "automation/list" {
+        params: v2::AutomationListParams,
+        response: v2::AutomationListResponse,
+    },
+    AutomationUpsert => "automation/upsert" {
+        params: v2::AutomationUpsertParams,
+        response: v2::AutomationUpsertResponse,
+    },
+    AutomationDelete => "automation/delete" {
+        params: v2::AutomationDeleteParams,
+        response: v2::AutomationDeleteResponse,
+    },
+    AutomationSetEnabled => "automation/setEnabled" {
+        params: v2::AutomationSetEnabledParams,
+        response: v2::AutomationSetEnabledResponse,
+    },
+    #[experimental("pilot/read")]
+    PilotRead => "pilot/read" {
+        params: v2::PilotReadParams,
+        response: v2::PilotReadResponse,
+    },
+    #[experimental("pilot/start")]
+    PilotStart => "pilot/start" {
+        params: v2::PilotStartParams,
+        response: v2::PilotStartResponse,
+    },
+    #[experimental("pilot/control")]
+    PilotControl => "pilot/control" {
+        params: v2::PilotControlParams,
+        response: v2::PilotControlResponse,
+    },
+    #[experimental("autoresearch/start")]
+    AutoresearchStart => "autoresearch/start" {
+        params: v2::AutoresearchStartParams,
+        response: v2::AutoresearchStartResponse,
+    },
+    #[experimental("autoresearch/control")]
+    AutoresearchControl => "autoresearch/control" {
+        params: v2::AutoresearchControlParams,
+        response: v2::AutoresearchControlResponse,
+    },
     FsWatch => "fs/watch" {
         params: v2::FsWatchParams,
         response: v2::FsWatchResponse,
@@ -505,6 +546,16 @@ client_request_definitions! {
     GetAccount => "account/read" {
         params: v2::GetAccountParams,
         response: v2::GetAccountResponse,
+    },
+    #[experimental("account/saved/activate")]
+    SavedAccountActivate => "account/saved/activate" {
+        params: v2::SavedAccountActivateParams,
+        response: v2::SavedAccountActivateResponse,
+    },
+    #[experimental("account/saved/remove")]
+    SavedAccountRemove => "account/saved/remove" {
+        params: v2::SavedAccountRemoveParams,
+        response: v2::SavedAccountRemoveResponse,
     },
 
     /// DEPRECATED APIs below
@@ -911,6 +962,9 @@ server_notification_definitions! {
     AccountUpdated => "account/updated" (v2::AccountUpdatedNotification),
     AccountRateLimitsUpdated => "account/rateLimits/updated" (v2::AccountRateLimitsUpdatedNotification),
     AppListUpdated => "app/list/updated" (v2::AppListUpdatedNotification),
+    AutomationUpdated => "automation/updated" (v2::AutomationUpdatedNotification),
+    #[experimental("pilot/updated")]
+    PilotUpdated => "pilot/updated" (v2::PilotUpdatedNotification),
     FsChanged => "fs/changed" (v2::FsChangedNotification),
     ReasoningSummaryTextDelta => "item/reasoning/summaryTextDelta" (v2::ReasoningSummaryTextDeltaNotification),
     ReasoningSummaryPartAdded => "item/reasoning/summaryPartAdded" (v2::ReasoningSummaryPartAddedNotification),
@@ -1386,6 +1440,96 @@ mod tests {
     }
 
     #[test]
+    fn serialize_automation_list() -> Result<()> {
+        let request = ClientRequest::AutomationList {
+            request_id: RequestId::Integer(7),
+            params: v2::AutomationListParams {
+                thread_id: "thr_123".to_string(),
+            },
+        };
+        assert_eq!(
+            json!({
+                "method": "automation/list",
+                "id": 7,
+                "params": {
+                    "threadId": "thr_123"
+                }
+            }),
+            serde_json::to_value(&request)?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_pilot_read() -> Result<()> {
+        let request = ClientRequest::PilotRead {
+            request_id: RequestId::Integer(8),
+            params: v2::PilotReadParams {
+                thread_id: "thr_123".to_string(),
+            },
+        };
+        assert_eq!(
+            json!({
+                "method": "pilot/read",
+                "id": 8,
+                "params": {
+                    "threadId": "thr_123"
+                }
+            }),
+            serde_json::to_value(&request)?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_pilot_start() -> Result<()> {
+        let request = ClientRequest::PilotStart {
+            request_id: RequestId::Integer(9),
+            params: v2::PilotStartParams {
+                thread_id: "thr_123".to_string(),
+                goal: "Improve benchmark accuracy".to_string(),
+                deadline_at: Some(20),
+            },
+        };
+        assert_eq!(
+            json!({
+                "method": "pilot/start",
+                "id": 9,
+                "params": {
+                    "threadId": "thr_123",
+                    "goal": "Improve benchmark accuracy",
+                    "deadlineAt": 20
+                }
+            }),
+            serde_json::to_value(&request)?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_pilot_control() -> Result<()> {
+        let request = ClientRequest::PilotControl {
+            request_id: RequestId::Integer(10),
+            params: v2::PilotControlParams {
+                thread_id: "thr_123".to_string(),
+                action: v2::PilotControlAction::WrapUp,
+            },
+        };
+        assert_eq!(
+            json!({
+                "method": "pilot/control",
+                "id": 10,
+                "params": {
+                    "threadId": "thr_123",
+                    "action": "wrapUp"
+                }
+            }),
+            serde_json::to_value(&request)?,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn account_serializes_fields_in_camel_case() -> Result<()> {
         let api_key = v2::Account::ApiKey {};
         assert_eq!(
@@ -1634,6 +1778,71 @@ mod tests {
     }
 
     #[test]
+    fn serialize_pilot_updated_notification() -> Result<()> {
+        let notification = ServerNotification::PilotUpdated(v2::PilotUpdatedNotification {
+            thread_id: "thr_123".to_string(),
+            update_type: v2::PilotUpdateType::Queued,
+            run: Some(v2::PilotRun {
+                goal: "Improve benchmark accuracy".to_string(),
+                status: v2::PilotStatus::Running,
+                started_at: 10,
+                deadline_at: Some(20),
+                updated_at: 11,
+                iteration_count: 2,
+                pending_cycle_kind: Some(v2::PilotCycleKind::Continue),
+                active_cycle_kind: None,
+                active_turn_id: None,
+                last_submitted_turn_id: Some("turn_123".to_string()),
+                wrap_up_requested: false,
+                wrap_up_requested_at: None,
+                stop_requested_at: None,
+                last_error: None,
+                status_message: Some("Pilot queued the next autonomous cycle.".to_string()),
+                last_progress_at: Some(9),
+                last_cycle_completed_at: Some(8),
+                last_cycle_summary: Some("Improved prompt structure.".to_string()),
+                last_cycle_kind: Some(v2::PilotCycleKind::Continue),
+                last_agent_message: Some("Implemented the pilot scheduler.".to_string()),
+            }),
+            message: Some("Pilot queued the next autonomous cycle.".to_string()),
+        });
+        assert_eq!(
+            json!({
+                "method": "pilot/updated",
+                "params": {
+                    "threadId": "thr_123",
+                    "updateType": "queued",
+                    "run": {
+                        "goal": "Improve benchmark accuracy",
+                        "status": "running",
+                        "startedAt": 10,
+                        "deadlineAt": 20,
+                        "updatedAt": 11,
+                        "iterationCount": 2,
+                        "pendingCycleKind": "continue",
+                        "activeCycleKind": null,
+                        "activeTurnId": null,
+                        "lastSubmittedTurnId": "turn_123",
+                        "wrapUpRequested": false,
+                        "wrapUpRequestedAt": null,
+                        "stopRequestedAt": null,
+                        "lastError": null,
+                        "statusMessage": "Pilot queued the next autonomous cycle.",
+                        "lastProgressAt": 9,
+                        "lastCycleCompletedAt": 8,
+                        "lastCycleSummary": "Improved prompt structure.",
+                        "lastCycleKind": "continue",
+                        "lastAgentMessage": "Implemented the pilot scheduler."
+                    },
+                    "message": "Pilot queued the next autonomous cycle."
+                }
+            }),
+            serde_json::to_value(&notification)?,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn mock_experimental_method_is_marked_experimental() {
         let request = ClientRequest::MockExperimentalMethod {
             request_id: RequestId::Integer(1),
@@ -1654,6 +1863,57 @@ mod tests {
         };
         let reason = crate::experimental_api::ExperimentalApi::experimental_reason(&request);
         assert_eq!(reason, Some("thread/realtime/start"));
+    }
+
+    #[test]
+    fn pilot_start_is_marked_experimental() {
+        let request = ClientRequest::PilotStart {
+            request_id: RequestId::Integer(1),
+            params: v2::PilotStartParams {
+                thread_id: "thr_123".to_string(),
+                goal: "Improve benchmark accuracy".to_string(),
+                deadline_at: Some(20),
+            },
+        };
+        let reason = crate::experimental_api::ExperimentalApi::experimental_reason(&request);
+        assert_eq!(reason, Some("pilot/start"));
+    }
+
+    #[test]
+    fn pilot_read_is_marked_experimental() {
+        let request = ClientRequest::PilotRead {
+            request_id: RequestId::Integer(1),
+            params: v2::PilotReadParams {
+                thread_id: "thr_123".to_string(),
+            },
+        };
+        let reason = crate::experimental_api::ExperimentalApi::experimental_reason(&request);
+        assert_eq!(reason, Some("pilot/read"));
+    }
+
+    #[test]
+    fn pilot_control_is_marked_experimental() {
+        let request = ClientRequest::PilotControl {
+            request_id: RequestId::Integer(1),
+            params: v2::PilotControlParams {
+                thread_id: "thr_123".to_string(),
+                action: v2::PilotControlAction::Stop,
+            },
+        };
+        let reason = crate::experimental_api::ExperimentalApi::experimental_reason(&request);
+        assert_eq!(reason, Some("pilot/control"));
+    }
+
+    #[test]
+    fn pilot_updated_notification_is_marked_experimental() {
+        let notification = ServerNotification::PilotUpdated(v2::PilotUpdatedNotification {
+            thread_id: "thr_123".to_string(),
+            update_type: v2::PilotUpdateType::Updated,
+            run: None,
+            message: None,
+        });
+        let reason = crate::experimental_api::ExperimentalApi::experimental_reason(&notification);
+        assert_eq!(reason, Some("pilot/updated"));
     }
     #[test]
     fn thread_realtime_started_notification_is_marked_experimental() {

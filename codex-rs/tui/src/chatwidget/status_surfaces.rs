@@ -4,6 +4,10 @@
 //! behavior easier to review without paging through the rest of `chatwidget.rs`.
 
 use super::*;
+use std::time::Duration;
+
+use crate::slop_fork::SavedAccountLimitKind;
+use crate::slop_fork::SavedAccountStatusLineFormatter;
 
 pub(super) const DEFAULT_TERMINAL_TITLE_ITEMS: [&str; 2] = ["spinner", "project"];
 pub(super) const TERMINAL_TITLE_SPINNER_FRAMES: [&str; 10] =
@@ -136,9 +140,15 @@ impl ChatWidget {
             return;
         }
 
+        let saved_account_limit_formatter = SavedAccountStatusLineFormatter::load(
+            &self.config.codex_home,
+            &selections.status_line_items,
+        );
         let mut parts = Vec::new();
         for item in &selections.status_line_items {
-            if let Some(value) = self.status_line_value_for_item(item) {
+            if let Some(value) =
+                self.status_line_value_for_item(item, &saved_account_limit_formatter)
+            {
                 parts.push(value);
             }
         }
@@ -385,7 +395,7 @@ impl ChatWidget {
     ///
     /// This prefers the cached project-root name and falls back to the current
     /// directory name when no project root can be inferred.
-    fn terminal_title_project_name(&mut self) -> Option<String> {
+    pub(super) fn terminal_title_project_name(&mut self) -> Option<String> {
         let project = self.status_line_project_root_name().or_else(|| {
             let cwd = self.status_line_cwd();
             Some(
@@ -438,7 +448,11 @@ impl ChatWidget {
     /// Returning `None` means "omit this item for now", not "configuration error". Callers rely on
     /// this to keep partially available status lines readable while waiting for session, token, or
     /// git metadata.
-    pub(super) fn status_line_value_for_item(&mut self, item: &StatusLineItem) -> Option<String> {
+    pub(super) fn status_line_value_for_item(
+        &mut self,
+        item: &StatusLineItem,
+        saved_account_limit_formatter: &SavedAccountStatusLineFormatter,
+    ) -> Option<String> {
         match item {
             StatusLineItem::ModelName => Some(self.model_display_name().to_string()),
             StatusLineItem::ModelWithReasoning => {
@@ -485,7 +499,11 @@ impl ChatWidget {
                     .and_then(|window| window.window_minutes)
                     .map(get_limits_duration)
                     .unwrap_or_else(|| "5h".to_string());
-                self.status_line_limit_display(window, &label)
+                saved_account_limit_formatter.format_limit(
+                    SavedAccountLimitKind::FiveHour,
+                    window,
+                    &label,
+                )
             }
             StatusLineItem::WeeklyLimit => {
                 let window = self
@@ -496,7 +514,11 @@ impl ChatWidget {
                     .and_then(|window| window.window_minutes)
                     .map(get_limits_duration)
                     .unwrap_or_else(|| "weekly".to_string());
-                self.status_line_limit_display(window, &label)
+                saved_account_limit_formatter.format_limit(
+                    SavedAccountLimitKind::Weekly,
+                    window,
+                    &label,
+                )
             }
             StatusLineItem::CodexVersion => Some(CODEX_CLI_VERSION.to_string()),
             StatusLineItem::ContextWindowSize => self
@@ -531,7 +553,9 @@ impl ChatWidget {
         now: Instant,
     ) -> Option<String> {
         match item {
-            TerminalTitleItem::AppName => Some("codex".to_string()),
+            TerminalTitleItem::AppName => {
+                Some(codex_core::slop_fork::FORK_DISPLAY_NAME.to_string())
+            }
             TerminalTitleItem::Project => self.terminal_title_project_name(),
             TerminalTitleItem::Spinner => self.terminal_title_spinner_text_at(now),
             TerminalTitleItem::Status => Some(self.terminal_title_status_text()),

@@ -388,6 +388,289 @@
         }
       ]
     },
+    "Automation": {
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "lastError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limits": {
+          "$ref": "#/definitions/AutomationLimits"
+        },
+        "messageSource": {
+          "$ref": "#/definitions/AutomationMessageSource"
+        },
+        "nextFireAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "paused": {
+          "type": "boolean"
+        },
+        "policyCommand": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AutomationPolicyCommand"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "runCount": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "runtimeId": {
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "#/definitions/AutomationScope"
+        },
+        "stopped": {
+          "type": "boolean"
+        },
+        "trigger": {
+          "$ref": "#/definitions/AutomationTrigger"
+        }
+      },
+      "required": [
+        "enabled",
+        "id",
+        "limits",
+        "messageSource",
+        "paused",
+        "runCount",
+        "runtimeId",
+        "scope",
+        "stopped",
+        "trigger"
+      ],
+      "type": "object"
+    },
+    "AutomationLimits": {
+      "properties": {
+        "maxRuns": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "untilAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "AutomationMessageSource": {
+      "oneOf": [
+        {
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "static"
+              ],
+              "title": "StaticAutomationMessageSourceType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "message",
+            "type"
+          ],
+          "title": "StaticAutomationMessageSource",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "messages": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": {
+              "enum": [
+                "roundRobin"
+              ],
+              "title": "RoundRobinAutomationMessageSourceType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "messages",
+            "type"
+          ],
+          "title": "RoundRobinAutomationMessageSource",
+          "type": "object"
+        }
+      ]
+    },
+    "AutomationPolicyCommand": {
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "cwd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timeoutMs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "AutomationScope": {
+      "enum": [
+        "session",
+        "repo",
+        "global"
+      ],
+      "type": "string"
+    },
+    "AutomationTrigger": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "turnCompleted"
+              ],
+              "title": "TurnCompletedAutomationTriggerType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "TurnCompletedAutomationTrigger",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "every_seconds": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "type": {
+              "enum": [
+                "interval"
+              ],
+              "title": "IntervalAutomationTriggerType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "every_seconds",
+            "type"
+          ],
+          "title": "IntervalAutomationTrigger",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "expression": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "cron"
+              ],
+              "title": "CronAutomationTriggerType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "expression",
+            "type"
+          ],
+          "title": "CronAutomationTrigger",
+          "type": "object"
+        }
+      ]
+    },
+    "AutomationUpdateType": {
+      "enum": [
+        "upserted",
+        "deleted",
+        "fired",
+        "paused",
+        "failed",
+        "stopped"
+      ],
+      "type": "string"
+    },
+    "AutomationUpdatedNotification": {
+      "properties": {
+        "automation": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Automation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runtimeId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "updateType": {
+          "$ref": "#/definitions/AutomationUpdateType"
+        }
+      },
+      "required": [
+        "runtimeId",
+        "threadId",
+        "updateType"
+      ],
+      "type": "object"
+    },
     "ByteRange": {
       "properties": {
         "end": {
@@ -1745,6 +2028,205 @@
           "type": "object"
         }
       ]
+    },
+    "PilotCycleKind": {
+      "enum": [
+        "continue",
+        "wrapUp"
+      ],
+      "type": "string"
+    },
+    "PilotRun": {
+      "properties": {
+        "activeCycleKind": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PilotCycleKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "activeTurnId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "deadlineAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "goal": {
+          "type": "string"
+        },
+        "iterationCount": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "lastAgentMessage": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastCycleCompletedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "lastCycleKind": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PilotCycleKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lastCycleSummary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastProgressAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "lastSubmittedTurnId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pendingCycleKind": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PilotCycleKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "startedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/definitions/PilotStatus"
+        },
+        "statusMessage": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stopRequestedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "updatedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "wrapUpRequested": {
+          "type": "boolean"
+        },
+        "wrapUpRequestedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "goal",
+        "iterationCount",
+        "startedAt",
+        "status",
+        "updatedAt",
+        "wrapUpRequested"
+      ],
+      "type": "object"
+    },
+    "PilotStatus": {
+      "enum": [
+        "running",
+        "paused",
+        "stopped",
+        "completed"
+      ],
+      "type": "string"
+    },
+    "PilotUpdateType": {
+      "enum": [
+        "started",
+        "queued",
+        "cycleStarted",
+        "cycleCompleted",
+        "paused",
+        "resumed",
+        "wrapUpRequested",
+        "stopped",
+        "completed",
+        "failed",
+        "updated"
+      ],
+      "type": "string"
+    },
+    "PilotUpdatedNotification": {
+      "properties": {
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "run": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PilotRun"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "updateType": {
+          "$ref": "#/definitions/PilotUpdateType"
+        }
+      },
+      "required": [
+        "threadId",
+        "updateType"
+      ],
+      "type": "object"
     },
     "PlanDeltaNotification": {
       "description": "EXPERIMENTAL - proposed plan streaming deltas for plan items. Clients should not assume concatenated deltas match the completed plan item content.",
@@ -4418,6 +4900,46 @@
         "params"
       ],
       "title": "App/list/updatedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "automation/updated"
+          ],
+          "title": "Automation/updatedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AutomationUpdatedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Automation/updatedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "pilot/updated"
+          ],
+          "title": "Pilot/updatedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/PilotUpdatedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Pilot/updatedNotification",
       "type": "object"
     },
     {

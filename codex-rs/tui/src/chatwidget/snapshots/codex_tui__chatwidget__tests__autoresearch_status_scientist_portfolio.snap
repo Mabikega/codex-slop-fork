@@ -1,0 +1,31 @@
+---
+source: tui/src/chatwidget/tests.rs
+expression: normalized
+---
+Autoresearch
+Status: running
+Mode: scientist
+Goal: map robust OCR hypotheses
+Session: ocr scientist
+Metric: cer
+Iterations: 0
+Runs in current segment: 1
+Discovery passes: 0
+Portfolio: 1 candidates across 1 families
+Baseline: 4.6000
+Best: 4.6000
+Kept: 1
+Discarded: 0
+Crashes: 0
+Checks failed: 0
+Workdir: /tmp/workdir
+Max runs: 12
+Selection policy: weak_gap=8 stagnation_window=3 synthesis_after=2
+Portfolio refresh policy: min_families=3 low_diversity_cycles=2 exploit_cycles=5 cooldown=300s
+Portfolio refresh status: waiting for 2 more exploit cycles via low-diversity (0 / 2, families=1)
+Validation policy: promising_keeps=1 winner_keeps=2 holdout_before_winner=no adversarial_before_winner=no evaluator_audit_before_winner=no
+Active approach: approach-1 [distillation]
+Approach title: Teacher-student OCR
+Validation state: `approach-1` has 1 keep run(s); pending: needs at least 2 keep run(s) before it can be marked winner
+Status message: Autoresearch started.
+Approach approach-1: Teacher-student OCR [distillation] status=active best=4.6000

@@ -43,6 +43,7 @@ pub enum SlashCommand {
     Theme,
     Mcp,
     Apps,
+    Accounts,
     Plugins,
     Logout,
     Quit,
@@ -111,6 +112,7 @@ impl SlashCommand {
             SlashCommand::Experimental => "toggle experimental features",
             SlashCommand::Mcp => "list configured MCP tools",
             SlashCommand::Apps => "manage apps",
+            SlashCommand::Accounts => "manage saved accounts and auth flows",
             SlashCommand::Plugins => "browse plugins",
             SlashCommand::Logout => "log out of Codex",
             SlashCommand::Rollout => "print the rollout file path",
@@ -121,7 +123,10 @@ impl SlashCommand {
     /// Command string without the leading '/'. Provided for compatibility with
     /// existing code that expects a method named `command()`.
     pub fn command(self) -> &'static str {
-        self.into()
+        match self {
+            SlashCommand::Accounts => "accounts",
+            _ => self.into(),
+        }
     }
 
     /// Whether this command supports inline args (for example `/review ...`).
@@ -156,6 +161,7 @@ impl SlashCommand {
             | SlashCommand::Review
             | SlashCommand::Plan
             | SlashCommand::Clear
+            | SlashCommand::Accounts
             | SlashCommand::Logout
             | SlashCommand::MemoryDrop
             | SlashCommand::MemoryUpdate => false,
@@ -219,5 +225,15 @@ mod tests {
     #[test]
     fn clean_alias_parses_to_stop_command() {
         assert_eq!(SlashCommand::from_str("clean"), Ok(SlashCommand::Stop));
+    }
+
+    #[test]
+    fn accounts_is_the_only_supported_command_name() {
+        assert_eq!(SlashCommand::Accounts.command(), "accounts");
+        assert_eq!(
+            SlashCommand::from_str("accounts"),
+            Ok(SlashCommand::Accounts)
+        );
+        assert!(SlashCommand::from_str("login").is_err());
     }
 }

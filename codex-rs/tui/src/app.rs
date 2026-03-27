@@ -3114,6 +3114,17 @@ impl App {
             AppEvent::OpenUrlInBrowser { url } => {
                 self.open_url_in_browser(url);
             }
+            AppEvent::AuthStateChanged {
+                message,
+                is_error,
+                is_warning,
+            } => {
+                self.chat_widget
+                    .on_auth_state_changed(message, is_error, is_warning);
+            }
+            AppEvent::SlopFork(event) => {
+                self.chat_widget.handle_slop_fork_event(event);
+            }
             AppEvent::RefreshConnectors { force_refetch } => {
                 self.chat_widget.refresh_connectors(force_refetch);
             }
@@ -5602,13 +5613,14 @@ mod tests {
         let (mut replacement, _app_event_tx, _rx, _new_op_rx) =
             make_chatwidget_manual_with_sender().await;
         replacement.setup_terminal_title(vec![TerminalTitleItem::AppName]);
-        replacement.last_terminal_title = Some("codex".to_string());
+        replacement.last_terminal_title =
+            Some(codex_core::slop_fork::FORK_DISPLAY_NAME.to_string());
 
         app.replace_chat_widget(replacement);
 
         assert_eq!(
             app.chat_widget.last_terminal_title,
-            Some("codex".to_string())
+            Some(codex_core::slop_fork::FORK_DISPLAY_NAME.to_string())
         );
     }
 

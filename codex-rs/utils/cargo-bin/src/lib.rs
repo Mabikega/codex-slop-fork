@@ -1,12 +1,19 @@
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Command;
+use std::process::ExitStatus;
+use std::sync::Mutex;
+use std::sync::OnceLock;
 
 pub use runfiles;
 
 /// Bazel sets this when runfiles directories are disabled, which we do on all platforms for consistency.
 const RUNFILES_MANIFEST_ONLY_ENV: &str = "RUNFILES_MANIFEST_ONLY";
+
+static BUILT_PACKAGE_BINS: OnceLock<Mutex<HashSet<(String, String)>>> = OnceLock::new();
 
 #[derive(Debug, thiserror::Error)]
 pub enum CargoBinError {
@@ -19,6 +26,25 @@ pub enum CargoBinError {
     CurrentDir {
         #[source]
         source: std::io::Error,
+    },
+    #[error("failed to determine repo root")]
+    RepoRoot {
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to run `cargo build -p {package} --bin {name}`")]
+    BuildCommand {
+        package: String,
+        name: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("`cargo build -p {package} --bin {name}` failed with {status}: {output}")]
+    BuildFailed {
+        package: String,
+        name: String,
+        status: ExitStatus,
+        output: String,
     },
     #[error("CARGO_BIN_EXE env var {key} resolved to {path:?}, but it does not exist")]
     ResolvedPathDoesNotExist { key: String, path: PathBuf },
@@ -68,6 +94,28 @@ pub fn cargo_bin(name: &str) -> Result<PathBuf, CargoBinError> {
     }
 }
 
+pub fn cargo_bin_from_package(package: &str, name: &str) -> Result<PathBuf, CargoBinError> {
+    let lookup_err = match cargo_bin(name) {
+        Ok(path) => return Ok(path),
+        Err(err) => err,
+    };
+
+    if runfiles_available() {
+        return Err(lookup_err);
+    }
+
+    build_package_bin_once(package, name)?;
+    let path = fallback_built_bin_path(name)?;
+    if path.exists() {
+        Ok(path)
+    } else {
+        Err(CargoBinError::ResolvedPathDoesNotExist {
+            key: format!("cargo build -p {package} --bin {name}"),
+            path,
+        })
+    }
+}
+
 fn cargo_bin_env_keys(name: &str) -> Vec<String> {
     let mut keys = Vec::with_capacity(2);
     keys.push(format!("CARGO_BIN_EXE_{name}"));
@@ -104,6 +152,87 @@ fn resolve_bin_from_env(key: &str, value: OsString) -> Result<PathBuf, CargoBinE
         key: key.to_owned(),
         path: raw,
     })
+}
+
+fn build_package_bin_once(package: &str, name: &str) -> Result<(), CargoBinError> {
+    let built_bins = BUILT_PACKAGE_BINS.get_or_init(|| Mutex::new(HashSet::new()));
+    let key = (package.to_owned(), name.to_owned());
+
+    let mut built_bins = match built_bins.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if built_bins.contains(&key) {
+        return Ok(());
+    }
+
+    let workspace_root = repo_root()
+        .map_err(|source| CargoBinError::RepoRoot { source })?
+        .join("codex-rs");
+    let manifest_path = workspace_root.join("Cargo.toml");
+    let output = Command::new("cargo")
+        .current_dir(&workspace_root)
+        .arg("build")
+        .arg("--manifest-path")
+        .arg(&manifest_path)
+        .arg("-p")
+        .arg(package)
+        .arg("--bin")
+        .arg(name)
+        .output()
+        .map_err(|source| CargoBinError::BuildCommand {
+            package: package.to_owned(),
+            name: name.to_owned(),
+            source,
+        })?;
+    if !output.status.success() {
+        return Err(CargoBinError::BuildFailed {
+            package: package.to_owned(),
+            name: name.to_owned(),
+            status: output.status,
+            output: cargo_build_output_text(&output),
+        });
+    }
+
+    built_bins.insert(key);
+    Ok(())
+}
+
+fn cargo_build_output_text(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return stderr;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stdout.is_empty() {
+        return stdout;
+    }
+
+    output.status.to_string()
+}
+
+fn fallback_built_bin_path(name: &str) -> Result<PathBuf, CargoBinError> {
+    let workspace_root = repo_root()
+        .map_err(|source| CargoBinError::RepoRoot { source })?
+        .join("codex-rs");
+    Ok(cargo_target_dir(&workspace_root)
+        .join("debug")
+        .join(format!("{name}{}", std::env::consts::EXE_SUFFIX)))
+}
+
+fn cargo_target_dir(workspace_root: &Path) -> PathBuf {
+    match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(target_dir) => {
+            let target_dir = PathBuf::from(target_dir);
+            if target_dir.is_absolute() {
+                target_dir
+            } else {
+                workspace_root.join(target_dir)
+            }
+        }
+        None => workspace_root.join("target"),
+    }
 }
 
 /// Macro that derives the path to a test resource at runtime, the value of

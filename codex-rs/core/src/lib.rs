@@ -16,6 +16,7 @@ mod client_common;
 pub mod codex;
 mod realtime_context;
 mod realtime_conversation;
+pub mod slop_fork;
 pub use codex::SteerInputError;
 mod codex_thread;
 mod compact_remote;

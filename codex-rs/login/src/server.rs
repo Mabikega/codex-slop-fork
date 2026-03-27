@@ -25,10 +25,10 @@ use std::time::Duration;
 
 use crate::auth::AuthCredentialsStoreMode;
 use crate::auth::AuthDotJson;
-use crate::auth::save_auth;
 use crate::default_client::originator;
 use crate::pkce::PkceCodes;
 use crate::pkce::generate_pkce;
+use crate::slop_fork::persist_login_auth;
 use crate::token_data::TokenData;
 use crate::token_data::parse_chatgpt_jwt_claims;
 use base64::Engine;
@@ -776,7 +776,7 @@ pub(crate) async fn persist_tokens_async(
             tokens: Some(tokens),
             last_refresh: Some(Utc::now()),
         };
-        save_auth(&codex_home, &auth, auth_credentials_store_mode)
+        persist_login_auth(&codex_home, &auth, auth_credentials_store_mode)
     })
     .await
     .map_err(|e| io::Error::other(format!("persist task failed: {e}")))?
@@ -1084,13 +1084,91 @@ pub(crate) async fn obtain_api_key(
 }
 #[cfg(test)]
 mod tests {
+    use anyhow::Result;
+    use base64::Engine;
+    use chrono::Utc;
+    use codex_app_server_protocol::AuthMode;
     use pretty_assertions::assert_eq;
+    use tempfile::tempdir;
+
+    use crate::auth::AuthCredentialsStoreMode;
+    use crate::auth::AuthDotJson;
+    use crate::auth::save_auth;
+    use crate::slop_fork::auth_accounts;
+    use crate::token_data::TokenData;
+    use crate::token_data::parse_chatgpt_jwt_claims;
 
     use super::TokenEndpointErrorDetail;
     use super::parse_token_endpoint_error;
+    use super::persist_tokens_async;
     use super::redact_sensitive_query_value;
     use super::redact_sensitive_url_parts;
     use super::sanitize_url_for_logging;
+
+    fn make_jwt(email: &str, account_id: &str) -> String {
+        let header = serde_json::json!({ "alg": "none", "typ": "JWT" });
+        let payload = serde_json::json!({
+            "email": email,
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": account_id,
+            }
+        });
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        format!(
+            "{}.{}.{}",
+            b64(&serde_json::to_vec(&header).expect("header")),
+            b64(&serde_json::to_vec(&payload).expect("payload")),
+            b64(b"sig")
+        )
+    }
+
+    fn chatgpt_auth(email: &str, account_id: &str) -> AuthDotJson {
+        let raw_jwt = make_jwt(email, account_id);
+        AuthDotJson {
+            auth_mode: Some(AuthMode::Chatgpt),
+            openai_api_key: None,
+            tokens: Some(TokenData {
+                id_token: parse_chatgpt_jwt_claims(&raw_jwt).expect("valid jwt"),
+                access_token: format!("access-{account_id}"),
+                refresh_token: format!("refresh-{account_id}"),
+                account_id: Some(account_id.to_string()),
+            }),
+            last_refresh: Some(Utc::now()),
+        }
+    }
+
+    #[tokio::test]
+    async fn persist_tokens_async_preserves_previous_active_account() -> Result<()> {
+        let dir = tempdir()?;
+        let previous_auth = chatgpt_auth("previous@example.com", "acct-previous");
+        let previous_saved_id =
+            auth_accounts::stored_account_id(&previous_auth).expect("previous saved account id");
+        save_auth(dir.path(), &previous_auth, AuthCredentialsStoreMode::File)?;
+
+        persist_tokens_async(
+            dir.path(),
+            Some("access-acct-next".to_string()),
+            make_jwt("next@example.com", "acct-next"),
+            "access-acct-next".to_string(),
+            "refresh-acct-next".to_string(),
+            AuthCredentialsStoreMode::File,
+        )
+        .await?;
+
+        let next_auth = chatgpt_auth("next@example.com", "acct-next");
+        let next_saved_id =
+            auth_accounts::stored_account_id(&next_auth).expect("next saved account id");
+        let accounts = auth_accounts::list_accounts(dir.path())?;
+        let saved_ids = accounts
+            .iter()
+            .map(|account| account.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(saved_ids.len(), 2);
+        assert!(saved_ids.contains(&previous_saved_id.as_str()));
+        assert!(saved_ids.contains(&next_saved_id.as_str()));
+        Ok(())
+    }
 
     #[test]
     fn parse_token_endpoint_error_prefers_error_description() {

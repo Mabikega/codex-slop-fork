@@ -34,7 +34,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
 use std::time::Instant;
 
 use url::Url;
@@ -48,7 +47,19 @@ use crate::bottom_pane::StatusLinePreviewData;
 use crate::bottom_pane::StatusLineSetupView;
 use crate::bottom_pane::TerminalTitleItem;
 use crate::bottom_pane::TerminalTitleSetupView;
-use crate::status::RateLimitWindowDisplay;
+use crate::slop_fork::LOGIN_POPUP_VIEW_ID;
+#[cfg(test)]
+use crate::slop_fork::LoginFlowKind;
+use crate::slop_fork::LoginPopupKind;
+#[cfg(test)]
+use crate::slop_fork::PendingChatgptLogin;
+use crate::slop_fork::SlopForkEvent;
+use crate::slop_fork::SlopForkUi;
+use crate::slop_fork::SlopForkUiContext;
+use crate::slop_fork::SlopForkUiEffect;
+use crate::slop_fork::should_spawn_rate_limit_poller;
+use crate::slop_fork::spawn_external_auth_sync_poller;
+use crate::slop_fork::spawn_rate_limit_poller;
 use crate::status::format_directory_display;
 use crate::status::format_tokens_compact;
 use crate::status::rate_limit_snapshot_display_for_limit;
@@ -59,7 +70,6 @@ use crate::text_formatting::proper_join;
 use crate::version::CODEX_CLI_VERSION;
 use codex_app_server_protocol::AppSummary;
 use codex_app_server_protocol::ConfigLayerSource;
-use codex_backend_client::Client as BackendClient;
 use codex_chatgpt::connectors;
 use codex_core::config::Config;
 use codex_core::config::Constrained;
@@ -74,7 +84,9 @@ use codex_core::models_manager::manager::ModelsManager;
 use codex_core::plugins::PluginsManager;
 use codex_core::project_doc::DEFAULT_PROJECT_DOC_FILENAME;
 use codex_core::skills::model::SkillMetadata;
-#[cfg(target_os = "windows")]
+use codex_core::slop_fork::automation::AutomationTurnSuppression;
+use codex_core::slop_fork::automation::discard_queued_automation_turn_suppression;
+use codex_core::slop_fork::automation::enqueue_automation_turn_suppression;
 use codex_core::windows_sandbox::WindowsSandboxLevelExt;
 use codex_features::FEATURES;
 use codex_features::Feature;
@@ -95,7 +107,6 @@ use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::Settings;
-#[cfg(target_os = "windows")]
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
@@ -250,6 +261,7 @@ use crate::bottom_pane::DOUBLE_PRESS_QUIT_SHORTCUT_ENABLED;
 use crate::bottom_pane::ExperimentalFeatureItem;
 use crate::bottom_pane::ExperimentalFeaturesView;
 use crate::bottom_pane::FeedbackAudience;
+use crate::bottom_pane::InlineCommand;
 use crate::bottom_pane::InputResult;
 use crate::bottom_pane::LocalImageAttachment;
 use crate::bottom_pane::McpServerElicitationFormRequest;
@@ -708,6 +720,7 @@ pub(crate) struct ChatWidget {
     rate_limit_warnings: RateLimitWarningState,
     rate_limit_switch_prompt: RateLimitSwitchPromptState,
     rate_limit_poller: Option<JoinHandle<()>>,
+    external_auth_sync_poller: Option<JoinHandle<()>>,
     adaptive_chunking: AdaptiveChunkingPolicy,
     // Stream lifecycle controller
     stream_controller: Option<StreamController>,
@@ -778,6 +791,9 @@ pub(crate) struct ChatWidget {
     suppress_session_configured_redraw: bool,
     // User messages queued while a turn is in progress
     queued_user_messages: VecDeque<UserMessage>,
+    queued_user_message_metadata: VecDeque<QueuedUserMessageMetadata>,
+    current_turn_user_message_metadata: QueuedUserMessageMetadata,
+    slop_fork_ui: SlopForkUi,
     // User messages that tried to steer a non-regular turn and must be retried first.
     rejected_steers_queue: VecDeque<UserMessage>,
     // Steers already submitted to core but not yet committed into history.
@@ -936,16 +952,24 @@ impl ThreadComposerState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct QueuedUserMessageMetadata {
+    suppress_terminal_notification: bool,
+    suppress_legacy_notify: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ThreadInputState {
     composer: Option<ThreadComposerState>,
     pending_steers: VecDeque<UserMessage>,
     rejected_steers_queue: VecDeque<UserMessage>,
     queued_user_messages: VecDeque<UserMessage>,
+    queued_user_message_metadata: VecDeque<QueuedUserMessageMetadata>,
     current_collaboration_mode: CollaborationMode,
     active_collaboration_mask: Option<CollaborationModeMask>,
     task_running: bool,
     agent_turn_running: bool,
+    current_turn_user_message_metadata: QueuedUserMessageMetadata,
 }
 
 impl From<String> for UserMessage {
@@ -1304,6 +1328,19 @@ impl ChatWidget {
         self.bottom_pane.set_active_agent_label(active_agent_label);
     }
 
+    /// Recomputes footer status-line content from config and current runtime state.
+    ///
+    /// This method is the status-line orchestrator: it parses configured item identifiers,
+    /// warns once per session about invalid items, updates whether status-line mode is enabled,
+    /// schedules async git-branch lookup when needed, and renders only values that are currently
+    /// available.
+    ///
+    /// The omission behavior is intentional. If selected items are unavailable (for example before
+    /// a session id exists or before branch lookup completes), those items are skipped without
+    /// placeholders so the line remains compact and stable.
+    pub(crate) fn refresh_status_line(&mut self) {
+        self.refresh_status_surfaces();
+    }
     /// Records that status-line setup was canceled.
     ///
     /// Cancellation is intentionally side-effect free for config state; the existing configuration
@@ -1478,6 +1515,10 @@ impl ChatWidget {
             show_fast_status,
         );
         self.apply_session_info_cell(session_info_cell);
+        let slop_fork_effects = self
+            .slop_fork_ui
+            .on_session_configured(&self.slop_fork_context());
+        self.apply_slop_fork_effects(slop_fork_effects);
 
         if let Some(messages) = initial_messages {
             self.replay_initial_messages(messages);
@@ -1778,7 +1819,17 @@ impl ChatWidget {
         self.request_redraw();
     }
 
+    #[cfg(test)]
     fn on_task_complete(&mut self, last_agent_message: Option<String>, from_replay: bool) {
+        self.on_task_complete_for_turn(None, last_agent_message, from_replay);
+    }
+
+    fn on_task_complete_for_turn(
+        &mut self,
+        turn_id: Option<&str>,
+        last_agent_message: Option<String>,
+        from_replay: bool,
+    ) {
         self.submit_pending_steers_after_interrupt = false;
         if let Some(message) = last_agent_message.as_ref()
             && !message.trim().is_empty()
@@ -1831,6 +1882,8 @@ impl ChatWidget {
 
         let had_pending_steers = !self.pending_steers.is_empty();
         self.refresh_pending_input_preview();
+        let completed_turn_metadata = self.current_turn_user_message_metadata;
+        self.current_turn_user_message_metadata = QueuedUserMessageMetadata::default();
 
         if !from_replay && !self.has_queued_follow_up_messages() && !had_pending_steers {
             self.maybe_prompt_plan_implementation();
@@ -1840,12 +1893,65 @@ impl ChatWidget {
         if !from_replay {
             self.saw_plan_item_this_turn = false;
         }
+        let slop_fork_context = self.slop_fork_context();
+        let was_pilot_turn = turn_id.is_some_and(|turn_id| {
+            self.slop_fork_ui
+                .pilot_has_active_turn(&slop_fork_context, turn_id)
+        });
+        let was_autoresearch_turn = turn_id.is_some_and(|turn_id| {
+            self.slop_fork_ui
+                .autoresearch_has_active_turn(&slop_fork_context, turn_id)
+        });
+        let pilot_effects = turn_id
+            .filter(|_| was_pilot_turn)
+            .map(|turn_id| {
+                self.slop_fork_ui.on_pilot_turn_completed(
+                    &slop_fork_context,
+                    turn_id,
+                    last_agent_message.as_deref().unwrap_or_default(),
+                    from_replay,
+                )
+            })
+            .unwrap_or_default();
+        self.apply_slop_fork_effects(pilot_effects);
+        let autoresearch_effects = turn_id
+            .filter(|_| was_autoresearch_turn)
+            .map(|turn_id| {
+                self.slop_fork_ui.on_autoresearch_turn_completed(
+                    &slop_fork_context,
+                    turn_id,
+                    last_agent_message.as_deref().unwrap_or_default(),
+                    from_replay,
+                )
+            })
+            .unwrap_or_default();
+        self.apply_slop_fork_effects(autoresearch_effects);
+        if !was_pilot_turn && !was_autoresearch_turn {
+            let auto_effects = self.slop_fork_ui.on_turn_completed(
+                &slop_fork_context,
+                last_agent_message.as_deref().unwrap_or_default(),
+                from_replay,
+            );
+            self.apply_slop_fork_effects(auto_effects);
+            if self.queued_user_messages.is_empty() && !had_pending_steers {
+                let pilot_idle_effects = self
+                    .slop_fork_ui
+                    .on_pilot_idle(&slop_fork_context, from_replay);
+                self.apply_slop_fork_effects(pilot_idle_effects);
+                let autoresearch_idle_effects = self
+                    .slop_fork_ui
+                    .on_autoresearch_idle(&slop_fork_context, from_replay);
+                self.apply_slop_fork_effects(autoresearch_idle_effects);
+            }
+        }
         // If there is a queued user message, send exactly one now to begin the next turn.
         self.maybe_send_next_queued_input();
         // Emit a notification when the turn completes (suppressed if focused).
-        self.notify(Notification::AgentTurnComplete {
-            response: last_agent_message.unwrap_or_default(),
-        });
+        if !completed_turn_metadata.suppress_terminal_notification {
+            self.notify(Notification::AgentTurnComplete {
+                response: last_agent_message.unwrap_or_default(),
+            });
+        }
 
         self.maybe_show_pending_rate_limit_prompt();
     }
@@ -1928,22 +2034,6 @@ impl ChatWidget {
 
     fn has_queued_follow_up_messages(&self) -> bool {
         !self.rejected_steers_queue.is_empty() || !self.queued_user_messages.is_empty()
-    }
-
-    fn pop_next_queued_user_message(&mut self) -> Option<UserMessage> {
-        if self.rejected_steers_queue.is_empty() {
-            self.queued_user_messages.pop_front()
-        } else {
-            Some(merge_user_messages(
-                self.rejected_steers_queue.drain(..).collect(),
-            ))
-        }
-    }
-
-    fn pop_latest_queued_user_message(&mut self) -> Option<UserMessage> {
-        self.queued_user_messages
-            .pop_back()
-            .or_else(|| self.rejected_steers_queue.pop_back())
     }
 
     pub(crate) fn enqueue_rejected_steer(&mut self) -> bool {
@@ -2182,6 +2272,7 @@ impl ChatWidget {
         self.adaptive_chunking.reset();
         self.stream_controller = None;
         self.plan_stream_controller = None;
+        self.current_turn_user_message_metadata = QueuedUserMessageMetadata::default();
         self.pending_status_indicator_restore = false;
         self.request_status_line_branch_refresh();
         self.maybe_show_pending_rate_limit_prompt();
@@ -2360,6 +2451,7 @@ impl ChatWidget {
                 .map(|steer| steer.user_message),
         );
         to_merge.extend(self.queued_user_messages.drain(..));
+        self.queued_user_message_metadata.clear();
         if !existing_message.text.is_empty()
             || !existing_message.local_images.is_empty()
             || !existing_message.remote_image_urls.is_empty()
@@ -2406,10 +2498,12 @@ impl ChatWidget {
                 .collect(),
             rejected_steers_queue: self.rejected_steers_queue.clone(),
             queued_user_messages: self.queued_user_messages.clone(),
+            queued_user_message_metadata: self.queued_user_message_metadata.clone(),
             current_collaboration_mode: self.current_collaboration_mode.clone(),
             active_collaboration_mask: self.active_collaboration_mask.clone(),
             task_running: self.bottom_pane.is_task_running(),
             agent_turn_running: self.agent_turn_running,
+            current_turn_user_message_metadata: self.current_turn_user_message_metadata,
         })
     }
 
@@ -2460,6 +2554,9 @@ impl ChatWidget {
                 .collect();
             self.rejected_steers_queue = input_state.rejected_steers_queue;
             self.queued_user_messages = input_state.queued_user_messages;
+            self.queued_user_message_metadata = input_state.queued_user_message_metadata;
+            self.current_turn_user_message_metadata =
+                input_state.current_turn_user_message_metadata;
         } else {
             self.agent_turn_running = false;
             self.pending_steers.clear();
@@ -2473,6 +2570,8 @@ impl ChatWidget {
             );
             self.bottom_pane.set_composer_pending_pastes(Vec::new());
             self.queued_user_messages.clear();
+            self.queued_user_message_metadata.clear();
+            self.current_turn_user_message_metadata = QueuedUserMessageMetadata::default();
         }
         self.turn_sleep_inhibitor
             .set_turn_running(self.agent_turn_running);
@@ -3158,6 +3257,8 @@ impl ChatWidget {
 
     pub(crate) fn pre_draw_tick(&mut self) {
         self.bottom_pane.pre_draw_tick();
+        self.poll_timer_automations();
+        self.schedule_slop_fork_frames();
         if self.should_animate_terminal_title_spinner() {
             self.refresh_terminal_title();
         }
@@ -3751,6 +3852,7 @@ impl ChatWidget {
             rate_limit_warnings: RateLimitWarningState::default(),
             rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
             rate_limit_poller: None,
+            external_auth_sync_poller: None,
             adaptive_chunking: AdaptiveChunkingPolicy::default(),
             stream_controller: None,
             plan_stream_controller: None,
@@ -3787,6 +3889,9 @@ impl ChatWidget {
             thread_name: None,
             forked_from: None,
             queued_user_messages: VecDeque::new(),
+            queued_user_message_metadata: VecDeque::new(),
+            current_turn_user_message_metadata: QueuedUserMessageMetadata::default(),
+            slop_fork_ui: SlopForkUi::default(),
             rejected_steers_queue: VecDeque::new(),
             pending_steers: VecDeque::new(),
             submit_pending_steers_after_interrupt: false,
@@ -3829,6 +3934,7 @@ impl ChatWidget {
             last_rendered_user_message_event: None,
         };
 
+        widget.start_external_auth_sync_poller();
         widget.prefetch_rate_limits();
         widget.bottom_pane.set_voice_transcription_enabled(
             widget.config.features.enabled(Feature::VoiceTranscription),
@@ -3955,6 +4061,7 @@ impl ChatWidget {
             rate_limit_warnings: RateLimitWarningState::default(),
             rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
             rate_limit_poller: None,
+            external_auth_sync_poller: None,
             adaptive_chunking: AdaptiveChunkingPolicy::default(),
             stream_controller: None,
             plan_stream_controller: None,
@@ -3996,6 +4103,9 @@ impl ChatWidget {
             plan_delta_buffer: String::new(),
             plan_item_active: false,
             queued_user_messages: VecDeque::new(),
+            queued_user_message_metadata: VecDeque::new(),
+            current_turn_user_message_metadata: QueuedUserMessageMetadata::default(),
+            slop_fork_ui: SlopForkUi::default(),
             rejected_steers_queue: VecDeque::new(),
             pending_steers: VecDeque::new(),
             submit_pending_steers_after_interrupt: false,
@@ -4033,6 +4143,7 @@ impl ChatWidget {
             last_rendered_user_message_event: None,
         };
 
+        widget.start_external_auth_sync_poller();
         widget.prefetch_rate_limits();
         widget.bottom_pane.set_voice_transcription_enabled(
             widget.config.features.enabled(Feature::VoiceTranscription),
@@ -4151,6 +4262,7 @@ impl ChatWidget {
             rate_limit_warnings: RateLimitWarningState::default(),
             rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
             rate_limit_poller: None,
+            external_auth_sync_poller: None,
             adaptive_chunking: AdaptiveChunkingPolicy::default(),
             stream_controller: None,
             plan_stream_controller: None,
@@ -4187,6 +4299,9 @@ impl ChatWidget {
             thread_name: None,
             forked_from: None,
             queued_user_messages: VecDeque::new(),
+            queued_user_message_metadata: VecDeque::new(),
+            current_turn_user_message_metadata: QueuedUserMessageMetadata::default(),
+            slop_fork_ui: SlopForkUi::default(),
             rejected_steers_queue: VecDeque::new(),
             pending_steers: VecDeque::new(),
             submit_pending_steers_after_interrupt: false,
@@ -4229,6 +4344,7 @@ impl ChatWidget {
             last_rendered_user_message_event: None,
         };
 
+        widget.start_external_auth_sync_poller();
         widget.prefetch_rate_limits();
         widget.bottom_pane.set_voice_transcription_enabled(
             widget.config.features.enabled(Feature::VoiceTranscription),
@@ -4332,7 +4448,12 @@ impl ChatWidget {
             && self.queued_message_edit_binding.is_press(key_event)
             && self.has_queued_follow_up_messages()
         {
-            if let Some(user_message) = self.pop_latest_queued_user_message() {
+            if let Some(user_message) = self.queued_user_messages.pop_back() {
+                let _ = self.queued_user_message_metadata.pop_back();
+                self.restore_user_message_to_composer(user_message);
+                self.refresh_pending_input_preview();
+                self.request_redraw();
+            } else if let Some(user_message) = self.rejected_steers_queue.pop_back() {
                 self.restore_user_message_to_composer(user_message);
                 self.refresh_pending_input_preview();
                 self.request_redraw();
@@ -4388,6 +4509,8 @@ impl ChatWidget {
                     {
                         return;
                     }
+                    self.slop_fork_ui
+                        .note_manual_user_message(&user_message.text);
                     let Some(user_message) =
                         self.maybe_defer_user_message_for_realtime(user_message)
                     else {
@@ -4423,6 +4546,8 @@ impl ChatWidget {
                             .bottom_pane
                             .take_recent_submission_mention_bindings(),
                     };
+                    self.slop_fork_ui
+                        .note_manual_user_message(&user_message.text);
                     let Some(user_message) =
                         self.maybe_defer_user_message_for_realtime(user_message)
                     else {
@@ -4800,6 +4925,9 @@ impl ChatWidget {
             SlashCommand::Apps => {
                 self.add_connectors_output();
             }
+            SlashCommand::Accounts => {
+                self.open_login_popup(LoginPopupKind::Root);
+            }
             SlashCommand::Plugins => {
                 self.add_plugins_output();
             }
@@ -4859,29 +4987,31 @@ impl ChatWidget {
 
     fn dispatch_command_with_args(
         &mut self,
-        cmd: SlashCommand,
+        cmd: InlineCommand,
         args: String,
         _text_elements: Vec<TextElement>,
     ) {
-        if !cmd.supports_inline_args() {
-            self.dispatch_command(cmd);
-            return;
-        }
-        if !cmd.available_during_task() && self.bottom_pane.is_task_running() {
-            let message = format!(
-                "'/{}' is disabled while a task is in progress.",
-                cmd.command()
-            );
-            self.add_to_history(history_cell::new_error_event(message));
-            self.request_redraw();
-            return;
+        if let InlineCommand::Slash(cmd) = cmd {
+            if !cmd.supports_inline_args() {
+                self.dispatch_command(cmd);
+                return;
+            }
+            if !cmd.available_during_task() && self.bottom_pane.is_task_running() {
+                let message = format!(
+                    "'/{}' is disabled while a task is in progress.",
+                    cmd.command()
+                );
+                self.add_to_history(history_cell::new_error_event(message));
+                self.request_redraw();
+                return;
+            }
         }
 
         let trimmed = args.trim();
         match cmd {
-            SlashCommand::Fast => {
+            InlineCommand::Slash(SlashCommand::Fast) => {
                 if trimmed.is_empty() {
-                    self.dispatch_command(cmd);
+                    self.dispatch_command(SlashCommand::Fast);
                     return;
                 }
                 match trimmed.to_ascii_lowercase().as_str() {
@@ -4904,7 +5034,7 @@ impl ChatWidget {
                     }
                 }
             }
-            SlashCommand::Rename if !trimmed.is_empty() => {
+            InlineCommand::Slash(SlashCommand::Rename) if !trimmed.is_empty() => {
                 self.session_telemetry
                     .counter("codex.thread.rename", /*inc*/ 1, &[]);
                 let Some((prepared_args, _prepared_elements)) = self
@@ -4924,8 +5054,8 @@ impl ChatWidget {
                     .send(AppEvent::CodexOp(Op::SetThreadName { name }));
                 self.bottom_pane.drain_pending_submission_state();
             }
-            SlashCommand::Plan if !trimmed.is_empty() => {
-                self.dispatch_command(cmd);
+            InlineCommand::Slash(SlashCommand::Plan) if !trimmed.is_empty() => {
+                self.dispatch_command(SlashCommand::Plan);
                 if self.active_mode_kind() != ModeKind::Plan {
                     return;
                 }
@@ -4946,6 +5076,8 @@ impl ChatWidget {
                     text_elements: prepared_elements,
                     mention_bindings: self.bottom_pane.take_recent_submission_mention_bindings(),
                 };
+                self.slop_fork_ui
+                    .note_manual_user_message(&user_message.text);
                 if self.is_session_configured() {
                     self.reasoning_buffer.clear();
                     self.full_reasoning_buffer.clear();
@@ -4955,7 +5087,7 @@ impl ChatWidget {
                     self.queue_user_message(user_message);
                 }
             }
-            SlashCommand::Review if !trimmed.is_empty() => {
+            InlineCommand::Slash(SlashCommand::Review) if !trimmed.is_empty() => {
                 let Some((prepared_args, _prepared_elements)) = self
                     .bottom_pane
                     .prepare_inline_args_submission(/*record_history*/ false)
@@ -4972,7 +5104,7 @@ impl ChatWidget {
                 });
                 self.bottom_pane.drain_pending_submission_state();
             }
-            SlashCommand::SandboxReadRoot if !trimmed.is_empty() => {
+            InlineCommand::Slash(SlashCommand::SandboxReadRoot) if !trimmed.is_empty() => {
                 let Some((prepared_args, _prepared_elements)) = self
                     .bottom_pane
                     .prepare_inline_args_submission(/*record_history*/ false)
@@ -4985,7 +5117,34 @@ impl ChatWidget {
                     });
                 self.bottom_pane.drain_pending_submission_state();
             }
-            _ => self.dispatch_command(cmd),
+            InlineCommand::Auto => {
+                let last_user_message = self
+                    .slop_fork_ui
+                    .last_manual_user_message()
+                    .map(str::to_string);
+                let effects = self.slop_fork_ui.handle_auto_command(
+                    &self.slop_fork_context(),
+                    trimmed,
+                    last_user_message.as_deref(),
+                );
+                self.apply_slop_fork_effects(effects);
+                self.bottom_pane.drain_pending_submission_state();
+            }
+            InlineCommand::Autoresearch => {
+                let effects = self
+                    .slop_fork_ui
+                    .handle_autoresearch_command(&self.slop_fork_context(), trimmed);
+                self.apply_slop_fork_effects(effects);
+                self.bottom_pane.drain_pending_submission_state();
+            }
+            InlineCommand::Pilot => {
+                let effects = self
+                    .slop_fork_ui
+                    .handle_pilot_command(&self.slop_fork_context(), trimmed);
+                self.apply_slop_fork_effects(effects);
+                self.bottom_pane.drain_pending_submission_state();
+            }
+            InlineCommand::Slash(cmd) => self.dispatch_command(cmd),
         }
     }
 
@@ -5072,18 +5231,231 @@ impl ChatWidget {
     }
 
     fn queue_user_message(&mut self, user_message: UserMessage) {
-        if !self.is_session_configured() || self.bottom_pane.is_task_running() {
+        self.queue_user_message_with_metadata(user_message, QueuedUserMessageMetadata::default());
+    }
+
+    fn queue_user_message_with_metadata(
+        &mut self,
+        user_message: UserMessage,
+        metadata: QueuedUserMessageMetadata,
+    ) {
+        if !self.is_session_configured()
+            || self.bottom_pane.is_task_running()
+            || !self.queued_user_messages.is_empty()
+        {
             self.queued_user_messages.push_back(user_message);
+            self.queued_user_message_metadata.push_back(metadata);
             self.refresh_pending_input_preview();
         } else {
-            self.submit_user_message(user_message);
+            self.submit_user_message_with_metadata(user_message, metadata);
+        }
+    }
+
+    fn slop_fork_context(&self) -> SlopForkUiContext {
+        SlopForkUiContext {
+            codex_home: self.config.codex_home.clone(),
+            cwd: self.config.cwd.to_path_buf(),
+            thread_id: self.thread_id.map(|thread_id| thread_id.to_string()),
+            task_running: self.bottom_pane.is_task_running(),
+            chatgpt_base_url: self.config.chatgpt_base_url.clone(),
+            auth_credentials_store_mode: self.config.cli_auth_credentials_store_mode,
+            forced_chatgpt_workspace_id: self.config.forced_chatgpt_workspace_id.clone(),
+            animations: self.config.animations,
+            auth_manager: Arc::clone(&self.auth_manager),
+            sandbox_policy: self.config.permissions.sandbox_policy.get().clone(),
+            file_system_sandbox_policy: self.config.permissions.file_system_sandbox_policy.clone(),
+            network_sandbox_policy: self.config.permissions.network_sandbox_policy,
+            codex_linux_sandbox_exe: self.config.codex_linux_sandbox_exe.clone(),
+            windows_sandbox_level: WindowsSandboxLevel::from_config(&self.config),
+            windows_sandbox_private_desktop: self
+                .config
+                .permissions
+                .windows_sandbox_private_desktop,
+            app_event_tx: self.app_event_tx.clone(),
+            frame_requester: self.frame_requester.clone(),
+        }
+    }
+
+    fn apply_slop_fork_effects(&mut self, effects: Vec<SlopForkUiEffect>) {
+        for effect in effects {
+            match effect {
+                SlopForkUiEffect::ShowOrReplaceSelection(params) => {
+                    if self.bottom_pane.is_view_active(LOGIN_POPUP_VIEW_ID) {
+                        self.bottom_pane.dismiss_view_if_active(LOGIN_POPUP_VIEW_ID);
+                    }
+                    self.bottom_pane.show_selection_view(*params);
+                }
+                SlopForkUiEffect::ShowLoginView(view) => {
+                    let _ = self.bottom_pane.dismiss_view_if_active(LOGIN_POPUP_VIEW_ID);
+                    self.bottom_pane.show_view(view);
+                }
+                SlopForkUiEffect::DismissLoginView => {
+                    self.bottom_pane.dismiss_view_if_active(LOGIN_POPUP_VIEW_ID);
+                    self.refresh_status_line();
+                }
+                SlopForkUiEffect::AddInfoMessage { message, hint } => {
+                    self.add_info_message(message, hint);
+                }
+                SlopForkUiEffect::AddErrorMessage(message) => {
+                    self.add_error_message(message);
+                }
+                SlopForkUiEffect::AddPlainHistoryLines(lines) => {
+                    self.add_plain_history_lines(lines);
+                }
+                SlopForkUiEffect::AuthStateChanged {
+                    message,
+                    is_error,
+                    is_warning,
+                } => {
+                    self.on_auth_state_changed(message, is_error, is_warning);
+                }
+                SlopForkUiEffect::QueueAutomationPrompt {
+                    prompt,
+                    suppress_legacy_notify,
+                    suppress_terminal_notification,
+                } => {
+                    self.queue_user_message_with_metadata(
+                        UserMessage {
+                            text: prompt,
+                            local_images: Vec::new(),
+                            remote_image_urls: Vec::new(),
+                            text_elements: Vec::new(),
+                            mention_bindings: Vec::new(),
+                        },
+                        QueuedUserMessageMetadata {
+                            suppress_terminal_notification,
+                            suppress_legacy_notify,
+                        },
+                    );
+                }
+                SlopForkUiEffect::SubmitPilotTurn {
+                    prompt,
+                    cycle_kind,
+                    notify_on_completion,
+                } => {
+                    if !notify_on_completion {
+                        self.current_turn_user_message_metadata
+                            .suppress_terminal_notification = true;
+                    }
+                    let was_task_running = self.bottom_pane.is_task_running();
+                    if !was_task_running {
+                        self.bottom_pane.set_task_running(/*running*/ true);
+                    }
+                    if self.submit_op(Op::SlopForkPilotTurn { prompt }) {
+                        let effects = self.slop_fork_ui.on_pilot_turn_submission_started(
+                            &self.slop_fork_context(),
+                            cycle_kind,
+                        );
+                        self.apply_slop_fork_effects(effects);
+                    } else {
+                        if !was_task_running {
+                            self.bottom_pane.set_task_running(/*running*/ false);
+                        }
+                        let effects = self
+                            .slop_fork_ui
+                            .on_pilot_turn_submission_failed(&self.slop_fork_context());
+                        self.apply_slop_fork_effects(effects);
+                    }
+                }
+                SlopForkUiEffect::SubmitAutoresearchTurn {
+                    prompt,
+                    cycle_kind,
+                    notify_on_completion,
+                } => {
+                    if !notify_on_completion {
+                        self.current_turn_user_message_metadata
+                            .suppress_terminal_notification = true;
+                    }
+                    let was_task_running = self.bottom_pane.is_task_running();
+                    if !was_task_running {
+                        self.bottom_pane.set_task_running(/*running*/ true);
+                    }
+                    if self.submit_op(Op::SlopForkAutoresearchTurn { prompt }) {
+                        let effects = self.slop_fork_ui.on_autoresearch_turn_submission_started(
+                            &self.slop_fork_context(),
+                            cycle_kind,
+                        );
+                        self.apply_slop_fork_effects(effects);
+                    } else {
+                        if !was_task_running {
+                            self.bottom_pane.set_task_running(/*running*/ false);
+                        }
+                        let effects = self
+                            .slop_fork_ui
+                            .on_autoresearch_turn_submission_failed(&self.slop_fork_context());
+                        self.apply_slop_fork_effects(effects);
+                    }
+                }
+                SlopForkUiEffect::SubmitAutoresearchSetupTurn { prompt } => {
+                    let was_task_running = self.bottom_pane.is_task_running();
+                    if !was_task_running {
+                        self.bottom_pane.set_task_running(/*running*/ true);
+                    }
+                    if !self.submit_op(Op::SlopForkAutoresearchTurn { prompt }) {
+                        if !was_task_running {
+                            self.bottom_pane.set_task_running(/*running*/ false);
+                        }
+                        self.apply_slop_fork_effects(vec![SlopForkUiEffect::AddErrorMessage(
+                            "Autoresearch setup submission failed before the turn could start."
+                                .to_string(),
+                        )]);
+                    }
+                }
+                SlopForkUiEffect::ScheduleFrameIn(delay) => {
+                    self.frame_requester.schedule_frame_in(delay);
+                }
+            }
+        }
+    }
+
+    fn timer_automations_can_autosend(&self) -> bool {
+        self.is_session_configured()
+            && !self.suppress_queue_autosend
+            && !self.bottom_pane.is_task_running()
+            && !self.is_review_mode
+            && self.queued_user_messages.is_empty()
+            && self.bottom_pane.composer_is_empty()
+            && self.bottom_pane.no_modal_or_popup_active()
+    }
+
+    fn poll_timer_automations(&mut self) {
+        if !self.timer_automations_can_autosend() {
+            return;
+        }
+
+        let effects = self
+            .slop_fork_ui
+            .poll_timer_automations(&self.slop_fork_context(), Local::now());
+        self.apply_slop_fork_effects(effects);
+    }
+
+    fn schedule_slop_fork_frames(&mut self) {
+        if !self.timer_automations_can_autosend() {
+            return;
+        }
+        for effect in self
+            .slop_fork_ui
+            .automation_frame_effects(&self.slop_fork_context(), Local::now())
+        {
+            if let SlopForkUiEffect::ScheduleFrameIn(delay) = effect {
+                self.frame_requester.schedule_frame_in(delay);
+            }
         }
     }
 
     fn submit_user_message(&mut self, user_message: UserMessage) {
+        self.submit_user_message_with_metadata(user_message, QueuedUserMessageMetadata::default());
+    }
+
+    fn submit_user_message_with_metadata(
+        &mut self,
+        user_message: UserMessage,
+        metadata: QueuedUserMessageMetadata,
+    ) {
         if !self.is_session_configured() {
             tracing::warn!("cannot submit user message before session is configured; queueing");
             self.queued_user_messages.push_front(user_message);
+            self.queued_user_message_metadata.push_front(metadata);
             self.refresh_pending_input_preview();
             return;
         }
@@ -5295,9 +5667,28 @@ impl ChatWidget {
             personality,
         };
 
+        let suppression_enqueued = metadata.suppress_legacy_notify
+            && self
+                .thread_id
+                .as_ref()
+                .map(|thread_id| {
+                    enqueue_automation_turn_suppression(
+                        &thread_id.to_string(),
+                        AutomationTurnSuppression {
+                            suppress_legacy_notify: true,
+                        },
+                    );
+                    true
+                })
+                .unwrap_or(false);
+
         if !self.submit_op(op) {
+            if suppression_enqueued && let Some(thread_id) = self.thread_id.as_ref() {
+                discard_queued_automation_turn_suppression(&thread_id.to_string());
+            }
             return;
         }
+        self.current_turn_user_message_metadata = metadata;
 
         // Persist the text to cross-session message history.
         if !text.is_empty() {
@@ -5487,14 +5878,26 @@ impl ChatWidget {
             EventMsg::TurnStarted(event) => {
                 if !is_resume_initial_replay {
                     self.apply_turn_started_context_window(event.model_context_window);
+                    let effects = self.slop_fork_ui.on_pilot_turn_started(
+                        &self.slop_fork_context(),
+                        &event.turn_id,
+                        from_replay,
+                    );
+                    self.apply_slop_fork_effects(effects);
+                    let effects = self.slop_fork_ui.on_autoresearch_turn_started(
+                        &self.slop_fork_context(),
+                        &event.turn_id,
+                        from_replay,
+                    );
+                    self.apply_slop_fork_effects(effects);
                     self.on_task_started();
                 }
             }
             EventMsg::TurnComplete(TurnCompleteEvent {
-                last_agent_message, ..
-            }) => {
-                self.on_task_complete(last_agent_message, from_replay);
-            }
+                turn_id,
+                last_agent_message,
+                ..
+            }) => self.on_task_complete_for_turn(Some(&turn_id), last_agent_message, from_replay),
             EventMsg::TokenCount(ev) => {
                 self.set_token_info(ev.info);
                 self.on_rate_limit_snapshot(ev.rate_limits);
@@ -5529,15 +5932,57 @@ impl ChatWidget {
             EventMsg::TurnAborted(ev) => match ev.reason {
                 TurnAbortReason::Interrupted => {
                     self.on_interrupted_turn(ev.reason);
+                    let effects = self.slop_fork_ui.on_pilot_turn_aborted(
+                        &self.slop_fork_context(),
+                        ev.turn_id.as_deref(),
+                        "Pilot turn interrupted by the user.",
+                        from_replay,
+                    );
+                    self.apply_slop_fork_effects(effects);
+                    let effects = self.slop_fork_ui.on_autoresearch_turn_aborted(
+                        &self.slop_fork_context(),
+                        ev.turn_id.as_deref(),
+                        "Autoresearch turn interrupted by the user.",
+                        from_replay,
+                    );
+                    self.apply_slop_fork_effects(effects);
                 }
                 TurnAbortReason::Replaced => {
                     self.submit_pending_steers_after_interrupt = false;
                     self.pending_steers.clear();
                     self.refresh_pending_input_preview();
-                    self.on_error("Turn aborted: replaced by a new task".to_owned())
+                    self.on_error("Turn aborted: replaced by a new task".to_owned());
+                    let effects = self.slop_fork_ui.on_pilot_turn_aborted(
+                        &self.slop_fork_context(),
+                        ev.turn_id.as_deref(),
+                        "Pilot turn was replaced by another task.",
+                        from_replay,
+                    );
+                    self.apply_slop_fork_effects(effects);
+                    let effects = self.slop_fork_ui.on_autoresearch_turn_aborted(
+                        &self.slop_fork_context(),
+                        ev.turn_id.as_deref(),
+                        "Autoresearch turn was replaced by another task.",
+                        from_replay,
+                    );
+                    self.apply_slop_fork_effects(effects);
                 }
                 TurnAbortReason::ReviewEnded => {
                     self.on_interrupted_turn(ev.reason);
+                    let effects = self.slop_fork_ui.on_pilot_turn_aborted(
+                        &self.slop_fork_context(),
+                        ev.turn_id.as_deref(),
+                        "Pilot turn ended because review mode finished.",
+                        from_replay,
+                    );
+                    self.apply_slop_fork_effects(effects);
+                    let effects = self.slop_fork_ui.on_autoresearch_turn_aborted(
+                        &self.slop_fork_context(),
+                        ev.turn_id.as_deref(),
+                        "Autoresearch turn ended because review mode finished.",
+                        from_replay,
+                    );
+                    self.apply_slop_fork_effects(effects);
                 }
             },
             EventMsg::PlanUpdate(update) => self.on_plan_update(update),
@@ -5869,8 +6314,15 @@ impl ChatWidget {
         if self.bottom_pane.is_task_running() {
             return;
         }
-        if let Some(user_message) = self.pop_next_queued_user_message() {
+        if !self.rejected_steers_queue.is_empty() {
+            let user_message = merge_user_messages(self.rejected_steers_queue.drain(..).collect());
             self.submit_user_message(user_message);
+        } else if let Some(user_message) = self.queued_user_messages.pop_front() {
+            let metadata = self
+                .queued_user_message_metadata
+                .pop_front()
+                .unwrap_or_default();
+            self.submit_user_message_with_metadata(user_message, metadata);
         }
         // Update the list to reflect the remaining queued messages (if any).
         self.refresh_pending_input_preview();
@@ -5951,10 +6403,15 @@ impl ChatWidget {
 
     fn open_status_line_setup(&mut self) {
         let configured_status_line_items = self.configured_status_line_items();
+        let preview_items = StatusLineItem::iter().collect::<Vec<_>>();
+        let saved_account_limit_formatter = crate::slop_fork::SavedAccountStatusLineFormatter::load(
+            &self.config.codex_home,
+            &preview_items,
+        );
         let view = StatusLineSetupView::new(
             Some(configured_status_line_items.as_slice()),
-            StatusLinePreviewData::from_iter(StatusLineItem::iter().filter_map(|item| {
-                self.status_line_value_for_item(&item)
+            StatusLinePreviewData::from_iter(preview_items.into_iter().filter_map(|item| {
+                self.status_line_value_for_item(&item, &saved_account_limit_formatter)
                     .map(|value| (item, value))
             })),
             self.app_event_tx.clone(),
@@ -6022,16 +6479,6 @@ impl ChatWidget {
             .unwrap_or_default()
     }
 
-    fn status_line_limit_display(
-        &self,
-        window: Option<&RateLimitWindowDisplay>,
-        label: &str,
-    ) -> Option<String> {
-        let window = window?;
-        let remaining = (100.0f64 - window.used_percent).clamp(0.0f64, 100.0f64);
-        Some(format!("{label} {remaining:.0}%"))
-    }
-
     fn status_line_reasoning_effort_label(effort: Option<ReasoningEffortConfig>) -> &'static str {
         match effort {
             Some(ReasoningEffortConfig::Minimal) => "minimal",
@@ -6065,6 +6512,20 @@ impl ChatWidget {
 
     fn stop_rate_limit_poller(&mut self) {
         if let Some(handle) = self.rate_limit_poller.take() {
+            handle.abort();
+        }
+    }
+
+    fn start_external_auth_sync_poller(&mut self) {
+        self.stop_external_auth_sync_poller();
+        self.external_auth_sync_poller = Some(spawn_external_auth_sync_poller(
+            Arc::clone(&self.auth_manager),
+            self.app_event_tx.clone(),
+        ));
+    }
+
+    fn stop_external_auth_sync_poller(&mut self) {
+        if let Some(handle) = self.external_auth_sync_poller.take() {
             handle.abort();
         }
     }
@@ -6152,37 +6613,21 @@ impl ChatWidget {
             return;
         }
 
-        let base_url = self.config.chatgpt_base_url.clone();
-        let app_event_tx = self.app_event_tx.clone();
-        let auth_manager = Arc::clone(&self.auth_manager);
-
-        let handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(60));
-
-            loop {
-                if let Some(auth) = auth_manager.auth().await
-                    && auth.is_chatgpt_auth()
-                {
-                    for snapshot in fetch_rate_limits(base_url.clone(), auth).await {
-                        app_event_tx.send(AppEvent::RateLimitSnapshotFetched(snapshot));
-                    }
-                }
-                interval.tick().await;
-            }
-        });
-
-        self.rate_limit_poller = Some(handle);
+        self.rate_limit_poller = Some(spawn_rate_limit_poller(
+            self.config.chatgpt_base_url.clone(),
+            self.app_event_tx.clone(),
+            Arc::clone(&self.auth_manager),
+            self.config.codex_home.clone(),
+            self.config.cli_auth_credentials_store_mode,
+        ));
     }
 
     fn should_prefetch_rate_limits(&self) -> bool {
-        if !self.config.model_provider.requires_openai_auth {
-            return false;
-        }
-
-        self.auth_manager
-            .auth_cached()
-            .as_ref()
-            .is_some_and(CodexAuth::is_chatgpt_auth)
+        should_spawn_rate_limit_poller(
+            self.config.model_provider.requires_openai_auth,
+            self.auth_manager.as_ref(),
+            &self.config.codex_home,
+        )
     }
 
     fn lower_cost_preset(&self) -> Option<ModelPreset> {
@@ -8471,6 +8916,110 @@ impl ChatWidget {
         self.request_redraw();
     }
 
+    pub(crate) fn on_auth_state_changed(
+        &mut self,
+        message: String,
+        is_error: bool,
+        is_warning: bool,
+    ) {
+        let effects = self.slop_fork_ui.on_auth_state_changed();
+        self.apply_slop_fork_effects(effects);
+        if is_error {
+            self.add_error_message(message);
+        } else if is_warning {
+            self.on_warning(message);
+        } else {
+            self.add_info_message(message, /*hint*/ None);
+        }
+        self.prefetch_rate_limits();
+        self.request_redraw();
+    }
+
+    pub(crate) fn open_login_popup(&mut self, kind: LoginPopupKind) {
+        let context = self.slop_fork_context();
+        let effects = self.slop_fork_ui.open_login_popup(&context, kind);
+        self.apply_slop_fork_effects(effects);
+    }
+
+    pub(crate) fn handle_slop_fork_event(&mut self, event: SlopForkEvent) {
+        match event {
+            SlopForkEvent::SavedAccountRateLimitsRefreshCompleted {
+                updated_account_ids,
+            } => {
+                self.on_saved_account_rate_limits_refresh_completed(updated_account_ids);
+            }
+            SlopForkEvent::SavedAccountQuotaTouchCompleted {
+                updated_account_ids,
+                message,
+            } => {
+                self.on_saved_account_quota_touch_completed(updated_account_ids, message);
+            }
+            event => {
+                let context = self.slop_fork_context();
+                let effects = self.slop_fork_ui.handle_event(&context, event);
+                self.apply_slop_fork_effects(effects);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_login_api_key_prompt(&mut self) {
+        self.handle_slop_fork_event(SlopForkEvent::OpenLoginApiKeyPrompt);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_login_flow(&mut self, kind: LoginFlowKind) {
+        self.handle_slop_fork_event(SlopForkEvent::StartLoginFlow { kind });
+    }
+
+    #[cfg(test)]
+    fn enter_pending_chatgpt_login(&mut self, pending_login: PendingChatgptLogin) {
+        self.slop_fork_ui
+            .set_pending_chatgpt_login_for_test(pending_login);
+        let context = self.slop_fork_context();
+        let effects = self.slop_fork_ui.open_login_root(&context);
+        self.apply_slop_fork_effects(effects);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cancel_pending_chatgpt_login(&mut self) {
+        self.handle_slop_fork_event(SlopForkEvent::CancelPendingLogin);
+    }
+
+    pub(crate) fn on_saved_account_rate_limits_refresh_completed(
+        &mut self,
+        updated_account_ids: Vec<String>,
+    ) {
+        let context = self.slop_fork_context();
+        let is_login_view_active = self.bottom_pane.is_view_active(LOGIN_POPUP_VIEW_ID);
+        let effects = self
+            .slop_fork_ui
+            .on_saved_account_rate_limits_refresh_completed(
+                &context,
+                updated_account_ids,
+                is_login_view_active,
+            );
+        self.apply_slop_fork_effects(effects);
+        self.refresh_status_line();
+    }
+
+    pub(crate) fn on_saved_account_quota_touch_completed(
+        &mut self,
+        updated_account_ids: Vec<String>,
+        message: String,
+    ) {
+        let context = self.slop_fork_context();
+        let is_login_view_active = self.bottom_pane.is_view_active(LOGIN_POPUP_VIEW_ID);
+        let effects = self.slop_fork_ui.on_saved_account_quota_touch_completed(
+            &context,
+            updated_account_ids,
+            message,
+            is_login_view_active,
+        );
+        self.apply_slop_fork_effects(effects);
+        self.refresh_status_line();
+    }
+
     fn rename_confirmation_cell(name: &str, thread_id: Option<ThreadId>) -> PlainHistoryCell {
         let resume_cmd = codex_core::util::resume_command(Some(name), thread_id)
             .unwrap_or_else(|| format!("codex resume {name}"));
@@ -8875,6 +9424,8 @@ impl ChatWidget {
             text_elements: Vec::new(),
             mention_bindings: Vec::new(),
         };
+        self.slop_fork_ui
+            .note_manual_user_message(&user_message.text);
         if should_queue {
             self.queue_user_message(user_message);
         } else {
@@ -8954,10 +9505,11 @@ impl ChatWidget {
         if matches!(&op, Op::Review { .. }) && !self.bottom_pane.is_task_running() {
             self.bottom_pane.set_task_running(/*running*/ true);
         }
-        if let Err(e) = self.codex_op_tx.send(op) {
+        if let Err(e) = self.codex_op_tx.send(op.clone()) {
             tracing::error!("failed to submit op: {e}");
             return false;
         }
+        self.slop_fork_ui.note_successful_outbound_op(&op);
         true
     }
 
@@ -9448,6 +10000,7 @@ fn has_websocket_timing_metrics(summary: RuntimeMetricsSummary) -> bool {
 impl Drop for ChatWidget {
     fn drop(&mut self) {
         self.stop_rate_limit_poller();
+        self.stop_external_auth_sync_poller();
         self.reset_realtime_conversation_state();
     }
 }
@@ -9644,22 +10197,6 @@ fn hook_event_label(event_name: codex_protocol::protocol::HookEventName) -> &'st
         codex_protocol::protocol::HookEventName::SessionStart => "SessionStart",
         codex_protocol::protocol::HookEventName::UserPromptSubmit => "UserPromptSubmit",
         codex_protocol::protocol::HookEventName::Stop => "Stop",
-    }
-}
-
-async fn fetch_rate_limits(base_url: String, auth: CodexAuth) -> Vec<RateLimitSnapshot> {
-    match BackendClient::from_auth(base_url, &auth) {
-        Ok(client) => match client.get_rate_limits_many().await {
-            Ok(snapshots) => snapshots,
-            Err(err) => {
-                debug!(error = ?err, "failed to fetch rate limits from /usage");
-                Vec::new()
-            }
-        },
-        Err(err) => {
-            debug!(error = ?err, "failed to construct backend client for rate limits");
-            Vec::new()
-        }
     }
 }
 

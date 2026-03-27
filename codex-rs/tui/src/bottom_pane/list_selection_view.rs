@@ -115,7 +115,9 @@ pub(crate) struct SelectionItem {
     pub name_prefix_spans: Vec<Span<'static>>,
     pub display_shortcut: Option<KeyBinding>,
     pub description: Option<String>,
+    pub description_spans: Option<Vec<Span<'static>>>,
     pub selected_description: Option<String>,
+    pub selected_description_spans: Option<Vec<Span<'static>>>,
     pub is_current: bool,
     pub is_default: bool,
     pub is_disabled: bool,
@@ -390,13 +392,26 @@ impl ListSelectionView {
                         .then(|| item.selected_description.clone())
                         .flatten()
                         .or_else(|| item.description.clone());
-                    let wrap_indent = description.is_none().then_some(wrap_prefix_width);
+                    let description_spans = if is_selected {
+                        item.selected_description_spans.clone().or_else(|| {
+                            item.selected_description
+                                .is_none()
+                                .then(|| item.description_spans.clone())
+                                .flatten()
+                        })
+                    } else {
+                        item.description_spans.clone()
+                    };
+                    let wrap_indent = (description.is_none() && description_spans.is_none())
+                        .then_some(wrap_prefix_width);
+                    let is_disabled = item.is_disabled || item.disabled_reason.is_some();
                     GenericDisplayRow {
                         name: name_with_marker,
                         name_prefix_spans,
                         display_shortcut: item.display_shortcut,
                         match_indices: None,
                         description,
+                        description_spans,
                         category_tag: None,
                         wrap_indent,
                         is_disabled,

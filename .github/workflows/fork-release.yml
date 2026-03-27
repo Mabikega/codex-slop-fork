@@ -1,0 +1,515 @@
+name: fork-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: Optional upstream release tag to merge (for example rust-v0.114.0).
+        required: false
+        type: string
+      retry_failed_release:
+        description: Retry an upstream release that already failed to merge once.
+        required: false
+        default: false
+        type: boolean
+  schedule:
+    - cron: "17 */6 * * *"
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.plan.outputs.should_release }}
+      automatic_release: ${{ steps.plan.outputs.automatic_release }}
+      upstream_tag: ${{ steps.plan.outputs.upstream_tag }}
+      upstream_url: ${{ steps.plan.outputs.upstream_url }}
+      version: ${{ steps.plan.outputs.version }}
+      release_tag: ${{ steps.plan.outputs.release_tag }}
+      failure_tag: ${{ steps.plan.outputs.failure_tag }}
+      staging_ref: ${{ steps.plan.outputs.staging_ref }}
+      release_exists: ${{ steps.plan.outputs.release_exists }}
+      merge_sha: ${{ steps.merge.outputs.merge_sha }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "codex-slop-fork-bot"
+          git config user.email "codex-slop-fork-bot@users.noreply.github.com"
+          git config merge.ours.driver true
+
+      - name: Determine upstream release
+        id: plan
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          RETRY_FAILED_RELEASE: ${{ inputs.retry_failed_release }}
+        run: |
+          set -euo pipefail
+
+          metadata_args=(upstream-release-metadata)
+          if [[ -n "${INPUT_UPSTREAM_TAG}" ]]; then
+            metadata_args+=(--upstream-tag "${INPUT_UPSTREAM_TAG}")
+          fi
+          metadata="$(python3 scripts/fork_release.py "${metadata_args[@]}")"
+
+          upstream_tag="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["upstream_tag"])' <<<"$metadata")"
+          upstream_url="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["upstream_url"])' <<<"$metadata")"
+          version="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])' <<<"$metadata")"
+          release_tag="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["release_tag"])' <<<"$metadata")"
+          failure_tag="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["failure_tag"])' <<<"$metadata")"
+          staging_ref="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["staging_ref"])' <<<"$metadata")"
+
+          automatic_release="$([[ "${GITHUB_EVENT_NAME}" == "schedule" ]] && echo true || echo false)"
+          should_release=true
+          release_exists=false
+          expected_assets=(
+            codex-slop-fork-npm-linux-x64.tgz
+            codex-slop-fork-npm-linux-arm64.tgz
+            codex-slop-fork-npm-darwin-x64.tgz
+            codex-slop-fork-npm-darwin-arm64.tgz
+            codex-slop-fork-npm-win32-x64.tgz
+            codex-slop-fork-npm-win32-arm64.tgz
+          )
+
+          git fetch origin main
+
+          if release_json="$(gh release view "${release_tag}" --json assets 2>/dev/null)"; then
+            release_exists=true
+            release_complete=true
+            for asset_name in "${expected_assets[@]}"; do
+              if ! python3 -c 'import json,sys; data=json.load(sys.stdin); asset=sys.argv[1]; raise SystemExit(0 if any(item["name"] == asset for item in data["assets"]) else 1)' \
+                "${asset_name}" <<<"${release_json}"; then
+                release_complete=false
+                break
+              fi
+            done
+
+            if [[ "${release_complete}" == "true" ]]; then
+              echo "Release ${release_tag} already exists with all expected assets; skipping."
+              should_release=false
+            else
+              echo "Release ${release_tag} exists but is missing one or more assets; continuing."
+            fi
+          elif [[ "${RETRY_FAILED_RELEASE}" != "true" ]] && git ls-remote --exit-code --tags origin "refs/tags/${failure_tag}" >/dev/null 2>&1; then
+            echo "Upstream release ${upstream_tag} already failed to merge once; skipping."
+            should_release=false
+          fi
+
+
+          {
+            echo "automatic_release=${automatic_release}"
+            echo "should_release=${should_release}"
+            echo "upstream_tag=${upstream_tag}"
+            echo "upstream_url=${upstream_url}"
+            echo "version=${version}"
+            echo "release_tag=${release_tag}"
+            echo "failure_tag=${failure_tag}"
+            echo "staging_ref=${staging_ref}"
+            echo "release_exists=${release_exists}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Fetch upstream tag
+        if: ${{ steps.plan.outputs.should_release == 'true' }}
+        run: |
+          set -euo pipefail
+          git remote remove openai-upstream >/dev/null 2>&1 || true
+          git remote add openai-upstream https://github.com/openai/codex.git
+          git fetch --force --no-tags openai-upstream \
+            "refs/tags/${{ steps.plan.outputs.upstream_tag }}:refs/tags/${{ steps.plan.outputs.upstream_tag }}"
+
+      - name: Merge upstream release
+        id: merge
+        if: ${{ steps.plan.outputs.should_release == 'true' }}
+        env:
+          FAILURE_TAG: ${{ steps.plan.outputs.failure_tag }}
+          STAGING_REF: ${{ steps.plan.outputs.staging_ref }}
+          UPSTREAM_TAG: ${{ steps.plan.outputs.upstream_tag }}
+          UPSTREAM_URL: ${{ steps.plan.outputs.upstream_url }}
+        run: |
+          set -euo pipefail
+
+          set +e
+          merge_output="$(
+            python3 scripts/fork_release.py merge-upstream \
+              --upstream-ref "${UPSTREAM_TAG}" \
+              --base-ref HEAD \
+              --upstream-url "${UPSTREAM_URL}"
+          )"
+          merge_status=$?
+          set -e
+
+          if [[ ${merge_status} -eq 2 ]]; then
+            if ! git ls-remote --exit-code --tags origin "refs/tags/${FAILURE_TAG}" >/dev/null 2>&1; then
+              git tag "${FAILURE_TAG}"
+              git push origin "refs/tags/${FAILURE_TAG}"
+            fi
+            echo "::error::Upstream release ${UPSTREAM_TAG} did not merge cleanly."
+            exit 1
+          fi
+
+          if [[ ${merge_status} -ne 0 ]]; then
+            echo "${merge_output}"
+            exit "${merge_status}"
+          fi
+
+          merge_sha="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["merge_sha"])' <<<"${merge_output}")"
+          git push --force origin "HEAD:refs/heads/${STAGING_REF}"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${FAILURE_TAG}" >/dev/null 2>&1; then
+            git push origin ":refs/tags/${FAILURE_TAG}" || true
+          fi
+
+          echo "merge_sha=${merge_sha}" >> "$GITHUB_OUTPUT"
+
+  build-unix:
+    needs: prepare
+    if: ${{ needs.prepare.outputs.should_release == 'true' }}
+    name: Build - ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            asset_name: codex-slop-fork-npm-linux-x64.tgz
+            npm_os: linux
+            npm_cpu: x64
+            binary_name: codex-slop-fork
+            cargo_jobs: 4
+            use_musl: true
+          - label: linux-arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            asset_name: codex-slop-fork-npm-linux-arm64.tgz
+            npm_os: linux
+            npm_cpu: arm64
+            binary_name: codex-slop-fork
+            cargo_jobs: 1
+            use_musl: true
+          - label: macos-x64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            asset_name: codex-slop-fork-npm-darwin-x64.tgz
+            npm_os: darwin
+            npm_cpu: x64
+            binary_name: codex-slop-fork
+            cargo_jobs: 4
+            use_musl: false
+          - label: macos-arm64
+            runner: macos-15
+            target: aarch64-apple-darwin
+            asset_name: codex-slop-fork-npm-darwin-arm64.tgz
+            npm_os: darwin
+            npm_cpu: arm64
+            binary_name: codex-slop-fork
+            cargo_jobs: 4
+            use_musl: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.staging_ref }}
+
+      - name: Install Linux build dependencies
+        if: ${{ runner.os == 'Linux' }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev libubsan1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('codex-rs/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Setup Zig
+        if: ${{ matrix.use_musl }}
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.0
+
+      - name: Install musl build tools
+        if: ${{ matrix.use_musl }}
+        env:
+          TARGET: ${{ matrix.target }}
+        run: bash .github/scripts/install-musl-build-tools.sh
+
+      - name: Configure rustc UBSan wrapper
+        if: ${{ matrix.use_musl }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ubsan=""
+          if command -v ldconfig >/dev/null 2>&1; then
+            ubsan="$(ldconfig -p | grep -m1 'libubsan\.so\.1' | sed -E 's/.*=> (.*)$/\1/')"
+          fi
+          wrapper_root="${RUNNER_TEMP:-/tmp}"
+          wrapper="${wrapper_root}/rustc-ubsan-wrapper"
+          cat > "${wrapper}" <<EOF
+          #!/usr/bin/env bash
+          set -euo pipefail
+          if [[ -n "${ubsan}" ]]; then
+            export LD_PRELOAD="${ubsan}\${LD_PRELOAD:+:\${LD_PRELOAD}}"
+          fi
+          exec "\$1" "\${@:2}"
+          EOF
+          chmod +x "${wrapper}"
+          echo "RUSTC_WRAPPER=${wrapper}" >> "$GITHUB_ENV"
+          echo "RUSTC_WORKSPACE_WRAPPER=" >> "$GITHUB_ENV"
+
+      - name: Clear sanitizer flags
+        if: ${{ matrix.use_musl }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "AWS_LC_SYS_NO_JITTER_ENTROPY=1" >> "$GITHUB_ENV"
+          target_no_jitter="AWS_LC_SYS_NO_JITTER_ENTROPY_${{ matrix.target }}"
+          target_no_jitter="${target_no_jitter//-/_}"
+          echo "${target_no_jitter}=1" >> "$GITHUB_ENV"
+
+          echo "RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_ENCODED_RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "RUSTDOCFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_BUILD_RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=" >> "$GITHUB_ENV"
+
+          sanitize_flags() {
+            local input="$1"
+            input="${input//-fsanitize=undefined/}"
+            input="${input//-fno-sanitize-recover=undefined/}"
+            input="${input//-fno-sanitize-trap=undefined/}"
+            echo "$input"
+          }
+
+          cflags="$(sanitize_flags "${CFLAGS-}")"
+          cxxflags="$(sanitize_flags "${CXXFLAGS-}")"
+          echo "CFLAGS=${cflags}" >> "$GITHUB_ENV"
+          echo "CXXFLAGS=${cxxflags}" >> "$GITHUB_ENV"
+
+      - name: Build executable
+        working-directory: codex-rs
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.use_musl }}" == "true" ]]; then
+            # Keep the cross target configuration from install-musl-build-tools.sh,
+            # but do not leak those host-wide compiler settings into proc-macro and
+            # other host builds.
+            unset CC CXX CFLAGS CXXFLAGS CMAKE_C_COMPILER CMAKE_CXX_COMPILER CMAKE_ARGS
+          fi
+          if [[ "${{ matrix.label }}" == "linux-arm64" ]]; then
+            # The workspace release profile uses fat LTO and one codegen unit, which
+            # pushes the 16 GB ARM runner over the edge during final optimization.
+            export CARGO_PROFILE_RELEASE_LTO=thin
+            export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=4
+            export CARGO_PROFILE_RELEASE_DEBUG=0
+          elif [[ "${{ matrix.label }}" == "macos-arm64" ]]; then
+            # The default release profile favors maximum optimization over build
+            # throughput. Thin LTO and more codegen units materially reduce build
+            # time on the standard macOS ARM runner.
+            export CARGO_PROFILE_RELEASE_LTO=thin
+            export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=4
+            export CARGO_PROFILE_RELEASE_DEBUG=0
+          fi
+          cargo build --release --target ${{ matrix.target }} --bin codex -j ${{ matrix.cargo_jobs }}
+
+      - name: Stage npm package
+        run: |
+          set -euo pipefail
+          python3 scripts/fork_release.py package-npm \
+            --version "${{ needs.prepare.outputs.version }}" \
+            --os "${{ matrix.npm_os }}" \
+            --cpu "${{ matrix.npm_cpu }}" \
+            --binary-path "codex-rs/target/${{ matrix.target }}/release/codex" \
+            --binary-name "${{ matrix.binary_name }}" \
+            --output-path "${RUNNER_TEMP}/${{ matrix.asset_name }}"
+
+      - name: Upload npm package
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ runner.temp }}/${{ matrix.asset_name }}
+
+  build-windows:
+    needs: prepare
+    if: ${{ needs.prepare.outputs.should_release == 'true' }}
+    name: Build - ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: windows-x64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            asset_name: codex-slop-fork-npm-win32-x64.tgz
+            npm_os: win32
+            npm_cpu: x64
+            binary_name: codex-slop-fork.exe
+          - label: windows-arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            asset_name: codex-slop-fork-npm-win32-arm64.tgz
+            npm_os: win32
+            npm_cpu: arm64
+            binary_name: codex-slop-fork.exe
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.staging_ref }}
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('codex-rs/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Build executable
+        working-directory: codex-rs
+        shell: bash
+        run: cargo build --release --target ${{ matrix.target }} --bin codex
+
+      - name: Stage npm package
+        shell: bash
+        run: |
+          python3 scripts/fork_release.py package-npm \
+            --version "${{ needs.prepare.outputs.version }}" \
+            --os "${{ matrix.npm_os }}" \
+            --cpu "${{ matrix.npm_cpu }}" \
+            --binary-path "codex-rs/target/${{ matrix.target }}/release/codex.exe" \
+            --binary-name "${{ matrix.binary_name }}" \
+            --output-path "${RUNNER_TEMP}/${{ matrix.asset_name }}"
+
+      - name: Upload npm package
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ runner.temp }}/${{ matrix.asset_name }}
+
+  release:
+    needs:
+      - prepare
+      - build-unix
+      - build-windows
+    if: ${{ needs.prepare.outputs.should_release == 'true' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+
+      - name: Create release notes
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          UPSTREAM_TAG: ${{ needs.prepare.outputs.upstream_tag }}
+          UPSTREAM_URL: ${{ needs.prepare.outputs.upstream_url }}
+          AUTOMATIC_RELEASE: ${{ needs.prepare.outputs.automatic_release }}
+        run: |
+          set -euo pipefail
+          notes_path="${RUNNER_TEMP}/release-notes.md"
+          {
+            echo "codex-slop-fork ${VERSION}"
+            echo
+            echo "Upstream release: [${UPSTREAM_TAG}](${UPSTREAM_URL})"
+            echo
+            if [[ "${AUTOMATIC_RELEASE}" == "true" ]]; then
+              echo "This release was created automatically and is untested."
+            else
+              echo "This release was created manually."
+            fi
+          } > "${notes_path}"
+          echo "NOTES_PATH=${notes_path}" >> "$GITHUB_ENV"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          RELEASE_EXISTS: ${{ needs.prepare.outputs.release_exists }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          MERGE_SHA: ${{ needs.prepare.outputs.merge_sha }}
+        run: |
+          set -euo pipefail
+          mapfile -t release_files < <(find dist -type f | sort)
+          if [[ "${RELEASE_EXISTS}" == "true" ]]; then
+            gh release upload "${RELEASE_TAG}" "${release_files[@]}" --clobber --repo "${GH_REPO}"
+            gh release edit "${RELEASE_TAG}" \
+              --repo "${GH_REPO}" \
+              --title "codex-slop-fork ${VERSION}" \
+              --notes-file "${NOTES_PATH}"
+          else
+            gh release create "${RELEASE_TAG}" "${release_files[@]}" \
+              --repo "${GH_REPO}" \
+              --title "codex-slop-fork ${VERSION}" \
+              --notes-file "${NOTES_PATH}" \
+              --target "${MERGE_SHA}"
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.staging_ref }}
+          fetch-depth: 0
+
+      - name: Promote staging commit
+        env:
+          MERGE_SHA: ${{ needs.prepare.outputs.merge_sha }}
+          STAGING_REF: ${{ needs.prepare.outputs.staging_ref }}
+        run: |
+          set -euo pipefail
+          git push origin "${MERGE_SHA}:refs/heads/main"
+          git push origin ":refs/heads/${STAGING_REF}" || true

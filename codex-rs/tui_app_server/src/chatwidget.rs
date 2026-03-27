@@ -37,6 +37,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 
+use tokio::task::JoinHandle;
 use url::Url;
 
 use self::realtime::PendingSteerCompareKey;
@@ -54,7 +55,6 @@ use crate::mention_codec::LinkedMention;
 use crate::mention_codec::encode_history_mentions;
 use crate::model_catalog::ModelCatalog;
 use crate::multi_agents;
-use crate::status::RateLimitWindowDisplay;
 use crate::status::StatusAccountDisplay;
 use crate::status::format_directory_display;
 use crate::status::format_tokens_compact;
@@ -354,7 +354,9 @@ mod plugins;
 use self::plugins::PluginsCacheState;
 mod realtime;
 use self::realtime::RealtimeConversationUiState;
+mod saved_account_status_line;
 use self::realtime::RenderedUserMessageEvent;
+mod slop_fork;
 mod status_surfaces;
 use self::status_surfaces::CachedProjectRootName;
 use self::status_surfaces::TerminalTitleStatusKind;
@@ -763,6 +765,8 @@ pub(crate) struct ChatWidget {
     plan_type: Option<PlanType>,
     rate_limit_warnings: RateLimitWarningState,
     rate_limit_switch_prompt: RateLimitSwitchPromptState,
+    rate_limit_poller: Option<JoinHandle<()>>,
+    saved_account_limits_refresh: Option<crate::slop_fork::SavedAccountRateLimitsRefreshState>,
     adaptive_chunking: AdaptiveChunkingPolicy,
     // Stream lifecycle controller
     stream_controller: Option<StreamController>,
@@ -776,6 +780,7 @@ pub(crate) struct ChatWidget {
     suppressed_exec_calls: HashSet<String>,
     skills_all: Vec<ProtocolSkillMetadata>,
     skills_initial_state: Option<HashMap<PathBuf, bool>>,
+    auto_command_skill_conflict_warned: bool,
     last_unified_wait: Option<UnifiedExecWaitState>,
     unified_exec_wait_streak: Option<UnifiedExecWaitStreak>,
     turn_sleep_inhibitor: SleepInhibitor,
@@ -4464,6 +4469,7 @@ impl ChatWidget {
             config,
             skills_all: Vec::new(),
             skills_initial_state: None,
+            auto_command_skill_conflict_warned: false,
             current_collaboration_mode,
             active_collaboration_mask,
             has_chatgpt_account,
@@ -4477,6 +4483,8 @@ impl ChatWidget {
             plan_type: initial_plan_type,
             rate_limit_warnings: RateLimitWarningState::default(),
             rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
+            rate_limit_poller: None,
+            saved_account_limits_refresh: None,
             adaptive_chunking: AdaptiveChunkingPolicy::default(),
             stream_controller: None,
             plan_stream_controller: None,
@@ -4592,6 +4600,7 @@ impl ChatWidget {
             .bottom_pane
             .set_connectors_enabled(widget.connectors_enabled());
         widget.refresh_status_surfaces();
+        widget.prefetch_rate_limits();
 
         widget
     }
@@ -4715,6 +4724,9 @@ impl ChatWidget {
                     {
                         return;
                     }
+                    if self.maybe_dispatch_slop_fork_command(&user_message) {
+                        return;
+                    }
                     let Some(user_message) =
                         self.maybe_defer_user_message_for_realtime(user_message)
                     else {
@@ -4750,6 +4762,9 @@ impl ChatWidget {
                             .bottom_pane
                             .take_recent_submission_mention_bindings(),
                     };
+                    if self.maybe_dispatch_slop_fork_command(&user_message) {
+                        return;
+                    }
                     let Some(user_message) =
                         self.maybe_defer_user_message_for_realtime(user_message)
                     else {
@@ -5129,6 +5144,11 @@ impl ChatWidget {
             }
             SlashCommand::Plugins => {
                 self.add_plugins_output();
+            }
+            SlashCommand::Accounts => {
+                self.app_event_tx.send(AppEvent::SlopFork(
+                    crate::slop_fork::SlopForkEvent::OpenAccountsRoot,
+                ));
             }
             SlashCommand::Rollout => {
                 if let Some(path) = self.rollout_path() {
@@ -6358,6 +6378,8 @@ impl ChatWidget {
             | ServerNotification::ContextCompacted(_)
             | ServerNotification::FuzzyFileSearchSessionUpdated(_)
             | ServerNotification::FuzzyFileSearchSessionCompleted(_)
+            | ServerNotification::AutomationUpdated(_)
+            | ServerNotification::PilotUpdated(_)
             | ServerNotification::ThreadRealtimeTranscriptUpdated(_)
             | ServerNotification::WindowsWorldWritableWarning(_)
             | ServerNotification::WindowsSandboxSetupCompleted(_)
@@ -7161,10 +7183,16 @@ impl ChatWidget {
 
     fn open_status_line_setup(&mut self) {
         let configured_status_line_items = self.configured_status_line_items();
+        let preview_items = StatusLineItem::iter().collect::<Vec<_>>();
+        let saved_account_limit_formatter =
+            self::saved_account_status_line::SavedAccountStatusLineFormatter::load(
+                &self.config.codex_home,
+                &preview_items,
+            );
         let view = StatusLineSetupView::new(
             Some(configured_status_line_items.as_slice()),
-            StatusLinePreviewData::from_iter(StatusLineItem::iter().filter_map(|item| {
-                self.status_line_value_for_item(&item)
+            StatusLinePreviewData::from_iter(preview_items.into_iter().filter_map(|item| {
+                self.status_line_value_for_item(&item, &saved_account_limit_formatter)
                     .map(|value| (item, value))
             })),
             self.app_event_tx.clone(),
@@ -7232,16 +7260,6 @@ impl ChatWidget {
             .unwrap_or_default()
     }
 
-    fn status_line_limit_display(
-        &self,
-        window: Option<&RateLimitWindowDisplay>,
-        label: &str,
-    ) -> Option<String> {
-        let window = window?;
-        let remaining = (100.0f64 - window.used_percent).clamp(0.0f64, 100.0f64);
-        Some(format!("{label} {remaining:.0}%"))
-    }
-
     fn status_line_reasoning_effort_label(effort: Option<ReasoningEffortConfig>) -> &'static str {
         match effort {
             Some(ReasoningEffortConfig::Minimal) => "minimal",
@@ -7273,7 +7291,11 @@ impl ChatWidget {
         );
     }
 
-    fn stop_rate_limit_poller(&mut self) {}
+    fn stop_rate_limit_poller(&mut self) {
+        if let Some(handle) = self.rate_limit_poller.take() {
+            handle.abort();
+        }
+    }
 
     pub(crate) fn refresh_connectors(&mut self, force_refetch: bool) {
         self.prefetch_connectors_with_options(force_refetch);
@@ -7358,11 +7380,26 @@ impl ChatWidget {
     #[cfg_attr(not(test), allow(dead_code))]
     fn prefetch_rate_limits(&mut self) {
         self.stop_rate_limit_poller();
+
+        if !self.should_prefetch_rate_limits() {
+            return;
+        }
+
+        self.rate_limit_poller = Some(crate::slop_fork::spawn_rate_limit_poller(
+            self.config.chatgpt_base_url.clone(),
+            self.app_event_tx.clone(),
+            self.config.codex_home.clone(),
+            self.config.cli_auth_credentials_store_mode,
+        ));
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
     fn should_prefetch_rate_limits(&self) -> bool {
-        self.config.model_provider.requires_openai_auth && self.has_chatgpt_account
+        crate::slop_fork::should_spawn_rate_limit_poller(
+            self.config.model_provider.requires_openai_auth,
+            self.has_chatgpt_account,
+            &self.config.codex_home,
+        )
     }
 
     fn lower_cost_preset(&self) -> Option<ModelPreset> {
@@ -9268,6 +9305,8 @@ impl ChatWidget {
         self.has_chatgpt_account = has_chatgpt_account;
         self.bottom_pane
             .set_connectors_enabled(self.connectors_enabled());
+        self.prefetch_rate_limits();
+        self.refresh_status_surfaces();
     }
 
     pub(crate) fn should_show_fast_status(
@@ -10230,6 +10269,17 @@ impl ChatWidget {
     fn on_list_skills(&mut self, ev: ListSkillsResponseEvent) {
         self.set_skills_from_response(&ev);
         self.refresh_plugin_mentions();
+        let has_conflict = self.skills_all.iter().any(|skill| {
+            skill.enabled && skill.name == crate::slop_fork::auto_command::AUTO_COMMAND_NAME
+        });
+        let should_warn = has_conflict && !self.auto_command_skill_conflict_warned;
+        self.auto_command_skill_conflict_warned = has_conflict;
+        if should_warn {
+            self.add_info_message(
+                crate::slop_fork::auto_command::auto_command_skill_conflict_warning(),
+                /*hint*/ None,
+            );
+        }
     }
 
     pub(crate) fn on_connectors_loaded(

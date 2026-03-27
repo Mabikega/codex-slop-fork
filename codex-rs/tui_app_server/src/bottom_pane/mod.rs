@@ -26,7 +26,7 @@ use crate::render::renderable::FlexRenderable;
 use crate::render::renderable::Renderable;
 use crate::render::renderable::RenderableItem;
 use crate::tui::FrameRequester;
-use bottom_pane_view::BottomPaneView;
+pub(crate) use bottom_pane_view::BottomPaneView;
 use codex_core::plugins::PluginCapabilitySummary;
 use codex_core::skills::model::SkillMetadata;
 use codex_features::Features;
@@ -112,6 +112,10 @@ mod selection_popup_common;
 mod textarea;
 mod unified_exec_footer;
 pub(crate) use feedback_view::FeedbackNoteView;
+pub(crate) use scroll_state::ScrollState;
+pub(crate) use selection_popup_common::GenericDisplayRow;
+pub(crate) use selection_popup_common::measure_rows_height;
+pub(crate) use selection_popup_common::render_rows;
 
 /// How long the "press again to quit" hint stays visible.
 ///
@@ -151,6 +155,7 @@ pub(crate) use experimental_features_view::ExperimentalFeatureItem;
 pub(crate) use experimental_features_view::ExperimentalFeaturesView;
 pub(crate) use list_selection_view::SelectionAction;
 pub(crate) use list_selection_view::SelectionItem;
+pub(crate) use skill_popup::MentionItem;
 
 /// Pane displayed in the lower half of the chat UI.
 ///
@@ -817,6 +822,21 @@ impl BottomPane {
             .last()
             .filter(|view| view.view_id() == Some(view_id))
             .and_then(|view| view.selected_index())
+    }
+
+    pub(crate) fn dismiss_active_view_if_matches(&mut self, view_id: &'static str) -> bool {
+        let is_match = self
+            .view_stack
+            .last()
+            .is_some_and(|view| view.view_id() == Some(view_id));
+        if !is_match {
+            return false;
+        }
+
+        self.view_stack.pop();
+        self.on_active_view_complete();
+        self.request_redraw();
+        true
     }
 
     /// Update the pending-input preview shown above the composer.

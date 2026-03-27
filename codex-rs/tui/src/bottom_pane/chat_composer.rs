@@ -192,6 +192,22 @@ use crate::render::Insets;
 use crate::render::RectExt;
 use crate::render::renderable::Renderable;
 use crate::slash_command::SlashCommand;
+use crate::slop_fork::auto_command_first_token;
+use crate::slop_fork::auto_command_mention_item;
+use crate::slop_fork::auto_command_requires_idle_session;
+use crate::slop_fork::autoresearch_command_first_token;
+use crate::slop_fork::autoresearch_command_mention_item;
+use crate::slop_fork::parse_auto_command_args;
+use crate::slop_fork::parse_autoresearch_command_args;
+use crate::slop_fork::parse_pilot_command_args;
+use crate::slop_fork::pilot_command_first_token;
+use crate::slop_fork::pilot_command_mention_item;
+use crate::slop_fork::should_dispatch_auto_command;
+use crate::slop_fork::should_dispatch_autoresearch_command;
+use crate::slop_fork::should_dispatch_pilot_command;
+use crate::slop_fork::should_record_auto_command_in_history;
+use crate::slop_fork::should_record_autoresearch_command_in_history;
+use crate::slop_fork::should_record_pilot_command_in_history;
 use crate::style::user_message_style;
 use codex_protocol::custom_prompts::CustomPrompt;
 use codex_protocol::custom_prompts::PROMPTS_CMD_PREFIX;
@@ -246,6 +262,15 @@ fn user_input_too_large_message(actual_chars: usize) -> String {
 }
 
 /// Result returned when the user interacts with the text area.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InlineCommand {
+    Slash(SlashCommand),
+    Auto,
+    Autoresearch,
+    Pilot,
+}
+
+/// Result returned when the user interacts with the text area.
 #[derive(Debug, PartialEq)]
 pub enum InputResult {
     Submitted {
@@ -257,7 +282,7 @@ pub enum InputResult {
         text_elements: Vec<TextElement>,
     },
     Command(SlashCommand),
-    CommandWithArgs(SlashCommand, String, Vec<TextElement>),
+    CommandWithArgs(InlineCommand, String, Vec<TextElement>),
     None,
 }
 
@@ -1975,10 +2000,12 @@ impl ChatComposer {
             .as_ref()
             .is_some_and(|plugins| !plugins.is_empty());
         let connectors_ready = self.connectors_enabled
-            && self
-                .connectors_snapshot
-                .as_ref()
-                .is_some_and(|snapshot| !snapshot.connectors.is_empty());
+            && self.connectors_snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot
+                    .connectors
+                    .iter()
+                    .any(|connector| connector.is_accessible && connector.is_enabled)
+            });
         skills_ready || plugins_ready || connectors_ready
     }
 
@@ -2230,6 +2257,42 @@ impl ChatComposer {
                     .map(|mention| (snapshot.id, mention))
             })
             .collect()
+    }
+
+    fn mention_binding_path_for_range(&self, range: std::ops::Range<usize>) -> Option<&str> {
+        let id = self
+            .textarea
+            .text_element_snapshots()
+            .into_iter()
+            .find(|snapshot| snapshot.range == range)
+            .map(|snapshot| snapshot.id)?;
+        self.mention_bindings
+            .get(&id)
+            .map(|binding| binding.path.as_str())
+    }
+
+    fn should_dispatch_auto_dollar_command(&self, text: &str) -> bool {
+        let Some((first_token, range)) = auto_command_first_token(text) else {
+            return false;
+        };
+        should_dispatch_auto_command(first_token, self.mention_binding_path_for_range(range))
+    }
+
+    fn should_dispatch_pilot_dollar_command(&self, text: &str) -> bool {
+        let Some((first_token, range)) = pilot_command_first_token(text) else {
+            return false;
+        };
+        should_dispatch_pilot_command(first_token, self.mention_binding_path_for_range(range))
+    }
+
+    fn should_dispatch_autoresearch_dollar_command(&self, text: &str) -> bool {
+        let Some((first_token, range)) = autoresearch_command_first_token(text) else {
+            return false;
+        };
+        should_dispatch_autoresearch_command(
+            first_token,
+            self.mention_binding_path_for_range(range),
+        )
     }
 
     fn snapshot_mention_bindings(&self) -> Vec<MentionBinding> {
@@ -2492,6 +2555,89 @@ impl ChatComposer {
         if let Some(result) = self.try_dispatch_slash_command_with_args() {
             return (result, true);
         }
+        if self.should_dispatch_auto_dollar_command(&original_input) {
+            let auto_args = parse_auto_command_args(&original_input).unwrap_or_default();
+            let record_history = should_record_auto_command_in_history(auto_args);
+            if self.is_task_running && auto_command_requires_idle_session(auto_args) {
+                self.app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+                    history_cell::new_error_event(
+                        "'$auto' is disabled while a task is in progress.".to_string(),
+                    ),
+                )));
+                return (InputResult::None, true);
+            }
+
+            if let Some((prepared_text, _prepared_elements)) =
+                self.prepare_submission_text(record_history)
+            {
+                let args = parse_auto_command_args(&prepared_text)
+                    .unwrap_or_default()
+                    .to_string();
+                return (
+                    InputResult::CommandWithArgs(InlineCommand::Auto, args, Vec::new()),
+                    true,
+                );
+            }
+
+            self.set_text_content_with_mention_bindings(
+                original_input,
+                original_text_elements,
+                original_local_image_paths,
+                original_mention_bindings,
+            );
+            self.pending_pastes = original_pending_pastes;
+            return (InputResult::None, true);
+        }
+
+        if self.should_dispatch_pilot_dollar_command(&original_input) {
+            let record_history = parse_pilot_command_args(&original_input)
+                .is_some_and(should_record_pilot_command_in_history);
+            if let Some((prepared_text, _prepared_elements)) =
+                self.prepare_submission_text(record_history)
+            {
+                let args = parse_pilot_command_args(&prepared_text)
+                    .unwrap_or_default()
+                    .to_string();
+                return (
+                    InputResult::CommandWithArgs(InlineCommand::Pilot, args, Vec::new()),
+                    true,
+                );
+            }
+
+            self.set_text_content_with_mention_bindings(
+                original_input,
+                original_text_elements,
+                original_local_image_paths,
+                original_mention_bindings,
+            );
+            self.pending_pastes = original_pending_pastes;
+            return (InputResult::None, true);
+        }
+
+        if self.should_dispatch_autoresearch_dollar_command(&original_input) {
+            let record_history = parse_autoresearch_command_args(&original_input)
+                .is_some_and(should_record_autoresearch_command_in_history);
+            if let Some((prepared_text, _prepared_elements)) =
+                self.prepare_submission_text(record_history)
+            {
+                let args = parse_autoresearch_command_args(&prepared_text)
+                    .unwrap_or_default()
+                    .to_string();
+                return (
+                    InputResult::CommandWithArgs(InlineCommand::Autoresearch, args, Vec::new()),
+                    true,
+                );
+            }
+
+            self.set_text_content_with_mention_bindings(
+                original_input,
+                original_text_elements,
+                original_local_image_paths,
+                original_mention_bindings,
+            );
+            self.pending_pastes = original_pending_pastes;
+            return (InputResult::None, true);
+        }
 
         if let Some((text, text_elements)) =
             self.prepare_submission_text(/*record_history*/ true)
@@ -2579,7 +2725,7 @@ impl ChatComposer {
         let trimmed_rest = rest.trim();
         args_elements = Self::trim_text_elements(rest, trimmed_rest, args_elements);
         Some(InputResult::CommandWithArgs(
-            cmd,
+            InlineCommand::Slash(cmd),
             trimmed_rest.to_string(),
             args_elements,
         ))
@@ -3584,6 +3730,10 @@ impl ChatComposer {
 
     fn mention_items(&self) -> Vec<MentionItem> {
         let mut mentions = Vec::new();
+
+        mentions.push(auto_command_mention_item());
+        mentions.push(autoresearch_command_mention_item());
+        mentions.push(pilot_command_mention_item());
         if let Some(skills) = self.skills.as_ref() {
             for skill in skills {
                 let display_name = skill_display_name(skill).to_string();
@@ -4512,6 +4662,9 @@ impl Drop for ChatComposer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::slop_fork::AUTO_COMMAND_MENTION_PATH;
+    use crate::slop_fork::AUTORESEARCH_COMMAND_MENTION_PATH;
+    use crate::slop_fork::PILOT_COMMAND_MENTION_PATH;
     use image::ImageBuffer;
     use image::Rgba;
     use pretty_assertions::assert_eq;
@@ -5281,7 +5434,7 @@ mod tests {
             false,
         );
         composer.set_connectors_enabled(true);
-        composer.set_text_content("$".to_string(), Vec::new(), Vec::new());
+        composer.set_text_content("$connector_1".to_string(), Vec::new(), Vec::new());
         assert!(matches!(composer.active_popup, ActivePopup::None));
 
         let connectors = vec![AppInfo {
@@ -5360,7 +5513,7 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_text_content("$".to_string(), Vec::new(), Vec::new());
+        composer.set_text_content("$sa".to_string(), Vec::new(), Vec::new());
         assert!(matches!(composer.active_popup, ActivePopup::None));
 
         composer.set_plugin_mentions(Some(vec![PluginCapabilitySummary {
@@ -5445,7 +5598,16 @@ mod tests {
             }],
         }));
 
-        let mentions = composer.mention_items();
+        let mentions: Vec<_> = composer
+            .mention_items()
+            .into_iter()
+            .filter(|mention| {
+                mention
+                    .path
+                    .as_ref()
+                    .is_some_and(|path| !path.starts_with("slop-fork://command/"))
+            })
+            .collect();
         assert_eq!(mentions.len(), 3);
         assert_eq!(mentions[0].category_tag, Some("[Skill]".to_string()));
         assert_eq!(
@@ -5538,6 +5700,30 @@ mod tests {
     }
 
     #[test]
+    fn mention_popup_auto_command_conflict_snapshot() {
+        snapshot_composer_state_with_width(
+            "mention_popup_auto_command_conflict",
+            72,
+            false,
+            |composer| {
+                composer.set_skill_mentions(Some(vec![SkillMetadata {
+                    name: "auto".to_string(),
+                    description: "Skill with the same name as the dollar command".to_string(),
+                    short_description: None,
+                    interface: None,
+                    dependencies: None,
+                    policy: None,
+                    permission_profile: None,
+                    managed_network_override: None,
+                    path_to_skills_md: PathBuf::from("/tmp/repo/auto/SKILL.md"),
+                    scope: codex_protocol::protocol::SkillScope::Repo,
+                }]));
+                composer.set_text_content("$auto".to_string(), Vec::new(), Vec::new());
+            },
+        );
+    }
+
+    #[test]
     fn set_connector_mentions_excludes_disabled_apps_from_mention_popup() {
         let (tx, _rx) = unbounded_channel::<AppEvent>();
         let sender = AppEventSender::new(tx);
@@ -5549,7 +5735,7 @@ mod tests {
             false,
         );
         composer.set_connectors_enabled(true);
-        composer.set_text_content("$".to_string(), Vec::new(), Vec::new());
+        composer.set_text_content("$connector_1".to_string(), Vec::new(), Vec::new());
 
         let connectors = vec![AppInfo {
             id: "connector_1".to_string(),
@@ -6819,6 +7005,77 @@ mod tests {
     }
 
     #[test]
+    fn auto_control_command_is_allowed_while_task_running() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+        composer.set_task_running(true);
+        composer.set_text_content("$auto list".to_string(), Vec::new(), Vec::new());
+
+        let (result, _needs_redraw) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(
+            result,
+            InputResult::CommandWithArgs(InlineCommand::Auto, "list".to_string(), Vec::new())
+        );
+        assert!(composer.current_text().is_empty());
+    }
+
+    #[test]
+    fn auto_create_command_remains_disabled_while_task_running() {
+        let (tx, mut rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+        composer.set_task_running(true);
+        composer.set_text_content(
+            "$auto on-complete continue working".to_string(),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let (result, _needs_redraw) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(result, InputResult::None);
+        assert_eq!(
+            composer.current_text(),
+            "$auto on-complete continue working"
+        );
+
+        let mut found_error = false;
+        while let Ok(event) = rx.try_recv() {
+            if let AppEvent::InsertHistoryCell(cell) = event {
+                let message = cell
+                    .display_lines(80)
+                    .into_iter()
+                    .map(|line| line.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(message.contains("'$auto' is disabled while a task is in progress."));
+                found_error = true;
+                break;
+            }
+        }
+        assert!(
+            found_error,
+            "expected auto-create error history cell to be sent"
+        );
+    }
+
+    #[test]
     fn voice_transcription_disabled_treats_space_as_normal_input() {
         use crossterm::event::KeyCode;
         use crossterm::event::KeyEvent;
@@ -7302,7 +7559,7 @@ mod tests {
             composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         match result {
-            InputResult::CommandWithArgs(cmd, args, text_elements) => {
+            InputResult::CommandWithArgs(InlineCommand::Slash(cmd), args, text_elements) => {
                 assert_eq!(cmd.command(), "plan");
                 assert_eq!(args, placeholder);
                 assert_eq!(text_elements.len(), 1);
@@ -7726,6 +7983,390 @@ mod tests {
             mention_bindings
         );
         assert!(composer.take_mention_bindings().is_empty());
+    }
+
+    #[test]
+    fn manual_auto_dollar_command_dispatches_with_args() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        composer.set_text_content("$auto list".to_string(), Vec::new(), Vec::new());
+
+        let (result, _) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            result,
+            InputResult::CommandWithArgs(InlineCommand::Auto, "list".to_string(), Vec::new())
+        );
+    }
+
+    #[test]
+    fn bound_auto_skill_does_not_dispatch_auto_dollar_command() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        composer.set_text_content_with_mention_bindings(
+            "$auto please".to_string(),
+            Vec::new(),
+            Vec::new(),
+            vec![MentionBinding {
+                mention: "auto".to_string(),
+                path: "/tmp/repo/auto/SKILL.md".to_string(),
+            }],
+        );
+
+        let (result, _) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(result, InputResult::Submitted { .. }));
+    }
+
+    #[test]
+    fn bound_auto_command_dispatches_auto_dollar_command() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        composer.set_text_content_with_mention_bindings(
+            "$auto list".to_string(),
+            Vec::new(),
+            Vec::new(),
+            vec![MentionBinding {
+                mention: "auto".to_string(),
+                path: AUTO_COMMAND_MENTION_PATH.to_string(),
+            }],
+        );
+
+        let (result, _) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            result,
+            InputResult::CommandWithArgs(InlineCommand::Auto, "list".to_string(), Vec::new())
+        );
+    }
+
+    #[test]
+    fn bound_pilot_command_dispatches_pilot_dollar_command() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        composer.set_text_content_with_mention_bindings(
+            "$pilot status".to_string(),
+            Vec::new(),
+            Vec::new(),
+            vec![MentionBinding {
+                mention: "pilot".to_string(),
+                path: PILOT_COMMAND_MENTION_PATH.to_string(),
+            }],
+        );
+
+        let (result, _) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            result,
+            InputResult::CommandWithArgs(InlineCommand::Pilot, "status".to_string(), Vec::new())
+        );
+    }
+
+    #[test]
+    fn bound_autoresearch_command_dispatches_autoresearch_dollar_command() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        composer.set_text_content_with_mention_bindings(
+            "$autoresearch status".to_string(),
+            Vec::new(),
+            Vec::new(),
+            vec![MentionBinding {
+                mention: "autoresearch".to_string(),
+                path: AUTORESEARCH_COMMAND_MENTION_PATH.to_string(),
+            }],
+        );
+
+        let (result, _) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            result,
+            InputResult::CommandWithArgs(
+                InlineCommand::Autoresearch,
+                "status".to_string(),
+                Vec::new(),
+            )
+        );
+    }
+
+    #[test]
+    fn model_driving_auto_dollar_command_is_recalled_by_history_navigation() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        let command = "$auto on-complete continue working".to_string();
+        composer.set_text_content(command.clone(), Vec::new(), Vec::new());
+
+        let (result, _) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            result,
+            InputResult::CommandWithArgs(
+                InlineCommand::Auto,
+                "on-complete continue working".to_string(),
+                Vec::new(),
+            )
+        );
+        assert!(composer.current_text().is_empty());
+
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(composer.current_text(), command);
+    }
+
+    #[test]
+    fn non_model_driving_auto_dollar_command_is_not_recalled_by_history_navigation() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        composer.set_text_content("$auto list".to_string(), Vec::new(), Vec::new());
+
+        let (result, _) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            result,
+            InputResult::CommandWithArgs(InlineCommand::Auto, "list".to_string(), Vec::new())
+        );
+        assert!(composer.current_text().is_empty());
+
+        let (result, _) = composer.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(result, InputResult::None);
+        assert!(composer.current_text().is_empty());
+    }
+
+    #[test]
+    fn invalid_auto_create_dollar_command_is_not_recalled_by_history_navigation() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        let command = "$auto on-complete".to_string();
+        composer.set_text_content(command, Vec::new(), Vec::new());
+
+        let (result, _) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            result,
+            InputResult::CommandWithArgs(
+                InlineCommand::Auto,
+                "on-complete".to_string(),
+                Vec::new(),
+            )
+        );
+        assert!(composer.current_text().is_empty());
+
+        let (result, _) = composer.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(result, InputResult::None);
+        assert!(composer.current_text().is_empty());
+    }
+
+    #[test]
+    fn model_driving_pilot_dollar_command_is_recalled_by_history_navigation() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        let command = "$pilot start improve benchmark accuracy".to_string();
+        composer.set_text_content(command.clone(), Vec::new(), Vec::new());
+
+        let (result, _) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            result,
+            InputResult::CommandWithArgs(
+                InlineCommand::Pilot,
+                "start improve benchmark accuracy".to_string(),
+                Vec::new(),
+            )
+        );
+        assert!(composer.current_text().is_empty());
+
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(composer.current_text(), command);
+    }
+
+    #[test]
+    fn model_driving_autoresearch_dollar_command_is_recalled_by_history_navigation() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        let command = "$autoresearch start --max-runs 5 improve benchmark accuracy".to_string();
+        composer.set_text_content(command.clone(), Vec::new(), Vec::new());
+
+        let (result, _) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            result,
+            InputResult::CommandWithArgs(
+                InlineCommand::Autoresearch,
+                "start --max-runs 5 improve benchmark accuracy".to_string(),
+                Vec::new(),
+            )
+        );
+        assert!(composer.current_text().is_empty());
+
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(composer.current_text(), command);
+    }
+
+    #[test]
+    fn autoresearch_init_dollar_command_is_recalled_by_history_navigation() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        let command = "$autoresearch init create an OCR project".to_string();
+        composer.set_text_content(command.clone(), Vec::new(), Vec::new());
+
+        let (result, _) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            result,
+            InputResult::CommandWithArgs(
+                InlineCommand::Autoresearch,
+                "init create an OCR project".to_string(),
+                Vec::new(),
+            )
+        );
+        assert!(composer.current_text().is_empty());
+
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(composer.current_text(), command);
+    }
+
+    #[test]
+    fn non_model_driving_autoresearch_dollar_command_is_not_recalled_by_history_navigation() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        composer.set_text_content("$autoresearch status".to_string(), Vec::new(), Vec::new());
+
+        let (result, _) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            result,
+            InputResult::CommandWithArgs(
+                InlineCommand::Autoresearch,
+                "status".to_string(),
+                Vec::new(),
+            )
+        );
+        assert!(composer.current_text().is_empty());
+
+        let (result, _) = composer.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(result, InputResult::None);
+        assert!(composer.current_text().is_empty());
+    }
+
+    #[test]
+    fn non_model_driving_pilot_dollar_command_is_not_recalled_by_history_navigation() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        composer.set_text_content("$pilot status".to_string(), Vec::new(), Vec::new());
+
+        let (result, _) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            result,
+            InputResult::CommandWithArgs(InlineCommand::Pilot, "status".to_string(), Vec::new())
+        );
+        assert!(composer.current_text().is_empty());
+
+        let (result, _) = composer.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(result, InputResult::None);
+        assert!(composer.current_text().is_empty());
     }
 
     #[test]

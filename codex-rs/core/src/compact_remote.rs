@@ -20,7 +20,6 @@ use codex_protocol::items::ContextCompactionItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ResponseItem;
-use futures::TryFutureExt;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
 use tracing::info;
@@ -114,29 +113,45 @@ async fn run_remote_compact_task_inner_impl(
         output_schema: None,
     };
 
-    let mut new_history = sess
-        .services
-        .model_client
-        .compact_conversation_history(
-            &prompt,
-            &turn_context.model_info,
-            turn_context.reasoning_effort,
-            turn_context.reasoning_summary,
-            &turn_context.session_telemetry,
-        )
-        .or_else(|err| async {
-            let total_usage_breakdown = sess.get_total_token_usage_breakdown().await;
-            let compact_request_log_data =
-                build_compact_request_log_data(&prompt.input, &prompt.base_instructions.text);
-            log_remote_compact_failure(
-                turn_context,
-                &compact_request_log_data,
-                total_usage_breakdown,
-                &err,
-            );
-            Err(err)
-        })
-        .await?;
+    let compact_request_log_data =
+        build_compact_request_log_data(&prompt.input, &prompt.base_instructions.text);
+    let mut client_session = sess.services.model_client.new_session();
+    let mut rate_limit_switch_state = crate::slop_fork::RateLimitSwitchState::default();
+    let mut new_history = loop {
+        match client_session
+            .compact_conversation_history(
+                &prompt,
+                &turn_context.model_info,
+                turn_context.reasoning_effort,
+                turn_context.reasoning_summary,
+                &turn_context.session_telemetry,
+            )
+            .await
+        {
+            Ok(new_history) => break new_history,
+            Err(err) => {
+                if crate::slop_fork::maybe_switch_account_for_retryable_limit_error(
+                    sess.as_ref(),
+                    turn_context.as_ref(),
+                    &mut client_session,
+                    &mut rate_limit_switch_state,
+                    &err,
+                )
+                .await
+                {
+                    continue;
+                }
+                let total_usage_breakdown = sess.get_total_token_usage_breakdown().await;
+                log_remote_compact_failure(
+                    turn_context,
+                    &compact_request_log_data,
+                    total_usage_breakdown,
+                    &err,
+                );
+                return Err(err);
+            }
+        }
+    };
     new_history = process_compacted_history(
         sess.as_ref(),
         turn_context.as_ref(),

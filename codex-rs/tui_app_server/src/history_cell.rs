@@ -46,6 +46,7 @@ use codex_core::config::types::McpServerTransportConfig;
 use codex_core::mcp::McpManager;
 #[cfg(test)]
 use codex_core::plugins::PluginsManager;
+use codex_core::slop_fork::FORK_DISPLAY_NAME;
 use codex_core::web_search::web_search_detail;
 use codex_otel::RuntimeMetricsSummary;
 use codex_protocol::account::PlanType;
@@ -1318,10 +1319,10 @@ impl HistoryCell for SessionHeaderHistoryCell {
 
         let make_row = |spans: Vec<Span<'static>>| Line::from(spans);
 
-        // Title line rendered inside the box: ">_ OpenAI Codex (vX)"
+        // Title line rendered inside the box: ">_ Codex Slop Fork (vX)"
         let title_spans: Vec<Span<'static>> = vec![
             Span::from(">_ ").dim(),
-            Span::from("OpenAI Codex").bold(),
+            Span::from(FORK_DISPLAY_NAME).bold(),
             Span::from(" ").dim(),
             Span::from(format!("(v{})", self.version)).dim(),
         ];

@@ -2,6 +2,9 @@
 
 use std::os::unix::fs::PermissionsExt;
 
+use codex_core::slop_fork::automation::AutomationTurnSuppression;
+use codex_core::slop_fork::automation::enqueue_automation_turn_suppression;
+use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::user_input::UserInput;
@@ -74,6 +77,75 @@ mv "${tmp_path}" "${payload_path}""#,
     assert_eq!(payload["type"], json!("agent-turn-complete"));
     assert_eq!(payload["input-messages"], json!(["hello world"]));
     assert_eq!(payload["last-assistant-message"], json!("Done"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automation_turn_can_suppress_legacy_notify_script() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let sse1 = sse(vec![ev_assistant_message("m1", "Done"), ev_completed("r1")]);
+    responses::mount_sse_once(&server, sse1).await;
+
+    let notify_dir = TempDir::new()?;
+    let notify_script = notify_dir.path().join("notify.sh");
+    std::fs::write(
+        &notify_script,
+        r#"#!/bin/bash
+set -e
+payload_path="$(dirname "${0}")/notify.txt"
+tmp_path="${payload_path}.tmp"
+echo -n "${@: -1}" > "${tmp_path}"
+mv "${tmp_path}" "${payload_path}""#,
+    )?;
+    std::fs::set_permissions(&notify_script, std::fs::Permissions::from_mode(0o755))?;
+
+    let notify_file = notify_dir.path().join("notify.txt");
+    let notify_script_str = notify_script.to_str().unwrap().to_string();
+
+    let TestCodex {
+        codex,
+        session_configured,
+        ..
+    } = test_codex()
+        .with_config(move |cfg| cfg.notify = Some(vec![notify_script_str]))
+        .build(&server)
+        .await?;
+
+    enqueue_automation_turn_suppression(
+        &session_configured.session_id.to_string(),
+        AutomationTurnSuppression {
+            suppress_legacy_notify: true,
+        },
+    );
+    codex
+        .submit(Op::UserTurn {
+            items: vec![UserInput::Text {
+                text: "hello world".into(),
+                text_elements: Vec::new(),
+            }],
+            cwd: std::env::current_dir()?,
+            approval_policy: AskForApproval::Never,
+            approvals_reviewer: None,
+            sandbox_policy: codex_protocol::protocol::SandboxPolicy::DangerFullAccess,
+            model: "gpt-5".to_string(),
+            effort: None,
+            summary: None,
+            service_tier: None,
+            final_output_json_schema: None,
+            collaboration_mode: None,
+            personality: None,
+        })
+        .await?;
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !notify_file.exists(),
+        "legacy notify script should be skipped for suppressed automation turns"
+    );
 
     Ok(())
 }

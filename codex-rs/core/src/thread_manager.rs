@@ -295,7 +295,7 @@ impl ThreadManager {
         environment_manager: Arc<EnvironmentManager>,
     ) -> Self {
         set_thread_manager_test_mode_for_tests(/*enabled*/ true);
-        let auth_manager = AuthManager::from_auth_for_testing(auth);
+        let auth_manager = AuthManager::from_auth_for_testing_with_home(auth, codex_home.clone());
         let (thread_created_tx, _) = broadcast::channel(THREAD_CREATED_CHANNEL_CAPACITY);
         let restriction_product = SessionSource::Exec.restriction_product();
         let plugins_manager = Arc::new(PluginsManager::new_with_restriction_product(

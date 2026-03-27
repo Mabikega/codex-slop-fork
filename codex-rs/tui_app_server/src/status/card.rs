@@ -7,6 +7,7 @@ use chrono::DateTime;
 use chrono::Local;
 use codex_core::WireApi;
 use codex_core::config::Config;
+use codex_core::slop_fork::FORK_DISPLAY_NAME;
 use codex_protocol::ThreadId;
 use codex_protocol::account::PlanType;
 use codex_protocol::openai_models::ReasoningEffort;
@@ -413,7 +414,7 @@ impl HistoryCell for StatusHistoryCell {
         let mut lines: Vec<Line<'static>> = Vec::new();
         lines.push(Line::from(vec![
             Span::from(format!("{}>_ ", FieldFormatter::INDENT)).dim(),
-            Span::from("OpenAI Codex").bold(),
+            Span::from(FORK_DISPLAY_NAME).bold(),
             Span::from(" ").dim(),
             Span::from(format!("(v{CODEX_CLI_VERSION})")).dim(),
         ]));

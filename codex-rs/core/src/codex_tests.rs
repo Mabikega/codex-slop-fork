@@ -13,6 +13,9 @@ use crate::function_tool::FunctionCallError;
 use crate::mcp_connection_manager::ToolInfo;
 use crate::models_manager::model_info;
 use crate::shell::default_user_shell;
+use crate::slop_fork::automation::AutomationTurnSuppression;
+use crate::slop_fork::automation::enqueue_automation_turn_suppression;
+use crate::slop_fork::automation::take_automation_turn_suppression;
 use crate::tools::format_exec_output_str;
 
 use codex_features::Features;
@@ -2735,6 +2738,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         "turn_id".to_string(),
         Arc::clone(&js_repl),
         skills_outcome,
+        AutomationTurnSuppression::default(),
     );
 
     let session = Session {
@@ -3572,6 +3576,7 @@ pub(crate) async fn make_session_and_context_with_dynamic_tools_and_rx(
         "turn_id".to_string(),
         Arc::clone(&js_repl),
         skills_outcome,
+        AutomationTurnSuppression::default(),
     ));
 
     let session = Arc::new(Session {
@@ -4680,6 +4685,65 @@ async fn steer_input_returns_active_turn_id() {
 }
 
 #[tokio::test]
+async fn automation_turn_suppression_is_applied_to_active_turn_when_input_is_steered() {
+    let (sess, tc, _rx) = make_session_and_context_with_rx().await;
+    let input = vec![UserInput::Text {
+        text: "hello".to_string(),
+        text_elements: Vec::new(),
+    }];
+    sess.spawn_task(
+        Arc::clone(&tc),
+        input,
+        NeverEndingTask {
+            kind: TaskKind::Regular,
+            listen_to_cancellation_token: false,
+        },
+    )
+    .await;
+
+    enqueue_automation_turn_suppression(
+        &sess.conversation_id.to_string(),
+        AutomationTurnSuppression {
+            suppress_legacy_notify: true,
+        },
+    );
+
+    handlers::user_input_or_turn(
+        &sess,
+        "sub-automation".to_string(),
+        Op::UserTurn {
+            items: vec![UserInput::Text {
+                text: "steer".to_string(),
+                text_elements: Vec::new(),
+            }],
+            cwd: tc.cwd.clone().to_path_buf(),
+            approval_policy: AskForApproval::Never,
+            approvals_reviewer: None,
+            sandbox_policy: SandboxPolicy::DangerFullAccess,
+            model: tc.model_info.slug.clone(),
+            effort: tc.reasoning_effort,
+            summary: None,
+            service_tier: None,
+            final_output_json_schema: None,
+            collaboration_mode: None,
+            personality: None,
+        },
+    )
+    .await;
+
+    assert_eq!(
+        tc.slop_fork_automation_turn_suppression(),
+        AutomationTurnSuppression {
+            suppress_legacy_notify: true,
+        }
+    );
+    assert_eq!(
+        take_automation_turn_suppression(&sess.conversation_id.to_string()),
+        AutomationTurnSuppression::default()
+    );
+}
+
+#[tokio::test]
 async fn prepend_pending_input_keeps_older_tail_ahead_of_newer_input() {
     let (sess, tc, _rx) = make_session_and_context_with_rx().await;
     let input = vec![UserInput::Text {
@@ -4954,7 +5018,7 @@ async fn sample_rollout(
         std::iter::once(&user1),
         reconstruction_turn.truncation_policy,
     );
-    rollout_items.push(RolloutItem::ResponseItem(user1.clone()));
+    rollout_items.push(RolloutItem::ResponseItem(user1));
 
     let assistant1 = ResponseItem::Message {
         id: None,
@@ -4969,7 +5033,7 @@ async fn sample_rollout(
         std::iter::once(&assistant1),
         reconstruction_turn.truncation_policy,
     );
-    rollout_items.push(RolloutItem::ResponseItem(assistant1.clone()));
+    rollout_items.push(RolloutItem::ResponseItem(assistant1));
 
     let summary1 = "summary one";
     let snapshot1 = live_history
@@ -4996,7 +5060,7 @@ async fn sample_rollout(
         std::iter::once(&user2),
         reconstruction_turn.truncation_policy,
     );
-    rollout_items.push(RolloutItem::ResponseItem(user2.clone()));
+    rollout_items.push(RolloutItem::ResponseItem(user2));
 
     let assistant2 = ResponseItem::Message {
         id: None,
@@ -5011,7 +5075,7 @@ async fn sample_rollout(
         std::iter::once(&assistant2),
         reconstruction_turn.truncation_policy,
     );
-    rollout_items.push(RolloutItem::ResponseItem(assistant2.clone()));
+    rollout_items.push(RolloutItem::ResponseItem(assistant2));
 
     let summary2 = "summary two";
     let snapshot2 = live_history
