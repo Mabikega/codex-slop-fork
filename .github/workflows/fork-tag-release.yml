@@ -499,11 +499,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@v8
-        with:
-          path: dist
-
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
@@ -514,6 +509,11 @@ jobs:
         run: |
           git config user.name "codex-slop-fork-bot"
           git config user.email "codex-slop-fork-bot@users.noreply.github.com"
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
 
       - name: Create release notes
         env:
