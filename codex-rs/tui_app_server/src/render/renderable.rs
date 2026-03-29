@@ -10,6 +10,16 @@ use ratatui::widgets::WidgetRef;
 use crate::render::Insets;
 use crate::render::RectExt as _;
 
+pub(crate) const MAX_RATATUI_PARAGRAPH_WIDTH: u16 = u16::MAX - 1;
+
+pub(crate) const fn clamp_ratatui_paragraph_width(width: u16) -> u16 {
+    if width == u16::MAX {
+        MAX_RATATUI_PARAGRAPH_WIDTH
+    } else {
+        width
+    }
+}
+
 pub trait Renderable {
     fn render(&self, area: Rect, buf: &mut Buffer);
     fn desired_height(&self, width: u16) -> u16;
@@ -109,7 +119,7 @@ impl<'a> Renderable for Paragraph<'a> {
         self.render_ref(area, buf);
     }
     fn desired_height(&self, width: u16) -> u16 {
-        self.line_count(width) as u16
+        self.line_count(clamp_ratatui_paragraph_width(width)) as u16
     }
 }
 
@@ -426,5 +436,28 @@ where
         let child: RenderableItem<'a> =
             RenderableItem::Owned(Box::new(self) as Box<dyn Renderable + 'a>);
         RenderableItem::Owned(Box::new(InsetRenderable { child, insets }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::text::Line;
+    use std::panic::AssertUnwindSafe;
+
+    #[test]
+    fn paragraph_desired_height_clamps_max_ratatui_width() {
+        let oversized = "x".repeat(usize::from(MAX_RATATUI_PARAGRAPH_WIDTH) + 128);
+        let paragraph = Paragraph::new(Line::from(oversized));
+
+        let height = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            Renderable::desired_height(&paragraph, u16::MAX)
+        }));
+
+        assert!(
+            height.is_ok(),
+            "desired_height should not panic at u16::MAX width"
+        );
+        assert!(height.expect("height result") > 0);
     }
 }

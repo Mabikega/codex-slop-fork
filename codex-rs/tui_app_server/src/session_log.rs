@@ -12,6 +12,7 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::app_event::AppEvent;
+use crate::render::renderable::MAX_RATATUI_PARAGRAPH_WIDTH;
 
 static LOGGER: LazyLock<SessionLogger> = LazyLock::new(SessionLogger::new);
 
@@ -146,7 +147,7 @@ pub(crate) fn log_inbound_app_event(event: &AppEvent) {
                 "ts": now_ts(),
                 "dir": "to_tui",
                 "kind": "insert_history_cell",
-                "lines": cell.transcript_lines(u16::MAX).len(),
+                "lines": cell.transcript_lines(MAX_RATATUI_PARAGRAPH_WIDTH).len(),
             });
             LOGGER.write_json_line(value);
         }

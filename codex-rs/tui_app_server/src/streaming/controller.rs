@@ -1,6 +1,8 @@
 use crate::history_cell::HistoryCell;
 use crate::history_cell::{self};
 use crate::render::line_utils::prefix_lines;
+#[cfg(test)]
+use crate::render::renderable::MAX_RATATUI_PARAGRAPH_WIDTH;
 use crate::style::proposed_plan_style;
 use ratatui::prelude::Stylize;
 use ratatui::text::Line;
@@ -349,7 +351,7 @@ mod tests {
         for d in deltas.iter() {
             ctrl.push(d);
             while let (Some(cell), idle) = ctrl.on_commit_tick() {
-                lines.extend(cell.transcript_lines(u16::MAX));
+                lines.extend(cell.transcript_lines(MAX_RATATUI_PARAGRAPH_WIDTH));
                 if idle {
                     break;
                 }
@@ -357,7 +359,7 @@ mod tests {
         }
         // Finalize and flush remaining lines now.
         if let Some(cell) = ctrl.finalize() {
-            lines.extend(cell.transcript_lines(u16::MAX));
+            lines.extend(cell.transcript_lines(MAX_RATATUI_PARAGRAPH_WIDTH));
         }
 
         let streamed: Vec<_> = lines_to_plain_strings(&lines)

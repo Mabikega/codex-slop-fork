@@ -24,7 +24,9 @@ use crate::markdown::append_markdown;
 use crate::render::line_utils::line_to_static;
 use crate::render::line_utils::prefix_lines;
 use crate::render::line_utils::push_owned_lines;
+use crate::render::renderable::MAX_RATATUI_PARAGRAPH_WIDTH;
 use crate::render::renderable::Renderable;
+use crate::render::renderable::clamp_ratatui_paragraph_width;
 use crate::style::proposed_plan_style;
 use crate::style::user_message_style;
 #[cfg(test)]
@@ -82,6 +84,8 @@ use ratatui::widgets::Wrap;
 use std::any::Any;
 use std::collections::HashMap;
 use std::io::Cursor;
+#[cfg(test)]
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::path::PathBuf;
 #[cfg(test)]
@@ -91,6 +95,22 @@ use std::time::Instant;
 use tracing::error;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
+
+const RATATUI_SAFE_LINE_WIDTH: usize = MAX_RATATUI_PARAGRAPH_WIDTH as usize;
+
+fn normalize_lines_for_paragraph(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
+    let wrap_width = usize::from(clamp_ratatui_paragraph_width(width).max(1));
+    let opts = RtOptions::new(wrap_width);
+    let mut normalized = Vec::new();
+    for line in lines {
+        if line.width() >= RATATUI_SAFE_LINE_WIDTH {
+            push_owned_lines(&adaptive_wrap_line(&line, opts.clone()), &mut normalized);
+        } else {
+            normalized.push(line);
+        }
+    }
+    normalized
+}
 
 /// Represents an event to display in the conversation history. Returns its
 /// `Vec<Line<'static>>` representation to make it easier to display in a
@@ -116,9 +136,11 @@ pub(crate) trait HistoryCell: std::fmt::Debug + Send + Sync + Any {
     /// for lines containing URL-like tokens that are wider than the
     /// terminal — the logical line count would undercount.
     fn desired_height(&self, width: u16) -> u16 {
-        Paragraph::new(Text::from(self.display_lines(width)))
+        let safe_width = clamp_ratatui_paragraph_width(width);
+        let lines = normalize_lines_for_paragraph(self.display_lines(width), width);
+        Paragraph::new(Text::from(lines))
             .wrap(Wrap { trim: false })
-            .line_count(width)
+            .line_count(safe_width)
             .try_into()
             .unwrap_or(0)
     }
@@ -150,9 +172,11 @@ pub(crate) trait HistoryCell: std::fmt::Debug + Send + Sync + Any {
             return 1;
         }
 
+        let safe_width = clamp_ratatui_paragraph_width(width);
+        let lines = normalize_lines_for_paragraph(lines, width);
         Paragraph::new(Text::from(lines))
             .wrap(Wrap { trim: false })
-            .line_count(width)
+            .line_count(safe_width)
             .try_into()
             .unwrap_or(0)
     }
@@ -178,13 +202,14 @@ pub(crate) trait HistoryCell: std::fmt::Debug + Send + Sync + Any {
 
 impl Renderable for Box<dyn HistoryCell> {
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        let lines = self.display_lines(area.width);
+        let lines = normalize_lines_for_paragraph(self.display_lines(area.width), area.width);
         let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+        let safe_width = clamp_ratatui_paragraph_width(area.width);
         let y = if area.height == 0 {
             0
         } else {
             let overflow = paragraph
-                .line_count(area.width)
+                .line_count(safe_width)
                 .saturating_sub(usize::from(area.height));
             u16::try_from(overflow).unwrap_or(u16::MAX)
         };
@@ -2825,7 +2850,7 @@ mod tests {
     }
 
     fn render_transcript(cell: &dyn HistoryCell) -> Vec<String> {
-        render_lines(&cell.transcript_lines(u16::MAX))
+        render_lines(&cell.transcript_lines(MAX_RATATUI_PARAGRAPH_WIDTH))
     }
 
     fn image_block(data: &str) -> serde_json::Value {
@@ -4486,6 +4511,26 @@ mod tests {
             first_row.contains("•"),
             "expected first rendered row to keep summary bullet visible, got: {first_row:?}"
         );
+    }
+
+    #[test]
+    fn oversized_history_line_does_not_panic_during_measure_or_render() {
+        let oversized = "x".repeat(usize::from(u16::MAX) + 128);
+        let cell: Box<dyn HistoryCell> = Box::new(PlainHistoryCell::new(vec![oversized.into()]));
+
+        let height = std::panic::catch_unwind(AssertUnwindSafe(|| cell.desired_height(80)));
+        assert!(
+            height.is_ok(),
+            "desired_height should not panic on oversized lines"
+        );
+        assert!(height.expect("height result") > 0);
+
+        let render = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let area = Rect::new(0, 0, 80, 6);
+            let mut buf = Buffer::empty(area);
+            Renderable::render(&cell, area, &mut buf);
+        }));
+        assert!(render.is_ok(), "render should not panic on oversized lines");
     }
 
     #[test]

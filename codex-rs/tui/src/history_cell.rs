@@ -24,7 +24,9 @@ use crate::markdown::append_markdown;
 use crate::render::line_utils::line_to_static;
 use crate::render::line_utils::prefix_lines;
 use crate::render::line_utils::push_owned_lines;
+use crate::render::renderable::MAX_RATATUI_PARAGRAPH_WIDTH;
 use crate::render::renderable::Renderable;
+use crate::render::renderable::clamp_ratatui_paragraph_width;
 use crate::style::proposed_plan_style;
 use crate::style::user_message_style;
 #[cfg(test)]
@@ -86,10 +88,10 @@ use tracing::error;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const RATATUI_SAFE_LINE_WIDTH: usize = u16::MAX as usize - 1;
+const RATATUI_SAFE_LINE_WIDTH: usize = MAX_RATATUI_PARAGRAPH_WIDTH as usize;
 
 fn normalize_lines_for_paragraph(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
-    let wrap_width = usize::from(width.max(1));
+    let wrap_width = usize::from(clamp_ratatui_paragraph_width(width).max(1));
     let opts = RtOptions::new(wrap_width);
     let mut normalized = Vec::new();
     for line in lines {
@@ -126,10 +128,11 @@ pub(crate) trait HistoryCell: std::fmt::Debug + Send + Sync + Any {
     /// for lines containing URL-like tokens that are wider than the
     /// terminal — the logical line count would undercount.
     fn desired_height(&self, width: u16) -> u16 {
+        let safe_width = clamp_ratatui_paragraph_width(width);
         let lines = normalize_lines_for_paragraph(self.display_lines(width), width);
         Paragraph::new(Text::from(lines))
             .wrap(Wrap { trim: false })
-            .line_count(width)
+            .line_count(safe_width)
             .try_into()
             .unwrap_or(0)
     }
@@ -161,10 +164,11 @@ pub(crate) trait HistoryCell: std::fmt::Debug + Send + Sync + Any {
             return 1;
         }
 
+        let safe_width = clamp_ratatui_paragraph_width(width);
         let lines = normalize_lines_for_paragraph(lines, width);
         Paragraph::new(Text::from(lines))
             .wrap(Wrap { trim: false })
-            .line_count(width)
+            .line_count(safe_width)
             .try_into()
             .unwrap_or(0)
     }
@@ -192,11 +196,12 @@ impl Renderable for Box<dyn HistoryCell> {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         let lines = normalize_lines_for_paragraph(self.display_lines(area.width), area.width);
         let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+        let safe_width = clamp_ratatui_paragraph_width(area.width);
         let y = if area.height == 0 {
             0
         } else {
             let overflow = paragraph
-                .line_count(area.width)
+                .line_count(safe_width)
                 .saturating_sub(usize::from(area.height));
             u16::try_from(overflow).unwrap_or(u16::MAX)
         };
@@ -2618,7 +2623,7 @@ mod tests {
     }
 
     fn render_transcript(cell: &dyn HistoryCell) -> Vec<String> {
-        render_lines(&cell.transcript_lines(u16::MAX))
+        render_lines(&cell.transcript_lines(MAX_RATATUI_PARAGRAPH_WIDTH))
     }
 
     fn image_block(data: &str) -> serde_json::Value {
