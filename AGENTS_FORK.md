@@ -33,6 +33,7 @@ This section describes the actual structure of this fork, not generic upstream C
   - `autoresearch/`
   - `config.rs`
   - `pilot.rs`
+  - `saved_account_limit_averages.rs`
   - `mod.rs`
 - TUI fork logic lives under `codex-rs/tui/src/slop_fork/`.
 - Current TUI fork modules are:
@@ -57,6 +58,7 @@ This section describes the actual structure of this fork, not generic upstream C
   `ui_rate_limits.rs`, `ui_automation.rs`, `ui_autoresearch.rs`, and `ui_pilot.rs` as internal
   submodules so upstream-facing hooks stay thin.
 - App-server fork logic currently lives in:
+  - `codex-rs/app-server/src/slop_fork_account_rate_limits.rs`
   - `codex-rs/app-server/src/slop_fork_automation.rs`
   - `codex-rs/app-server/src/slop_fork_pilot.rs`
 - Upstream-facing hotspots should stay thin and delegate into these fork-owned modules instead of accumulating fork policy locally.
