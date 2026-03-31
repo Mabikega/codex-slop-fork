@@ -79,15 +79,34 @@ impl ApplyPatchRuntime {
     #[cfg(not(target_os = "windows"))]
     fn build_sandbox_command(
         req: &ApplyPatchRequest,
+        codex_linux_sandbox_exe: Option<&PathBuf>,
         codex_self_exe: Option<&PathBuf>,
     ) -> Result<SandboxCommand, ToolError> {
-        let exe = Self::resolve_apply_patch_program(codex_self_exe)?;
+        if let Some(helper) = Self::resolve_apply_patch_helper(codex_linux_sandbox_exe) {
+            return Ok(Self::build_sandbox_command_for_apply_patch_helper(
+                req, helper,
+            ));
+        }
+
+        let exe = Self::resolve_apply_patch_program(codex_linux_sandbox_exe, codex_self_exe)?;
         Ok(Self::build_sandbox_command_with_program(req, exe))
     }
 
     #[cfg(not(target_os = "windows"))]
-    fn resolve_apply_patch_program(codex_self_exe: Option<&PathBuf>) -> Result<PathBuf, ToolError> {
-        if let Some(path) = codex_self_exe {
+    fn resolve_apply_patch_helper(codex_linux_sandbox_exe: Option<&PathBuf>) -> Option<PathBuf> {
+        codex_linux_sandbox_exe
+            .and_then(|path| path.parent().map(|parent| parent.join("apply_patch")))
+            .filter(|path| path.exists())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn resolve_apply_patch_program(
+        _codex_linux_sandbox_exe: Option<&PathBuf>,
+        codex_self_exe: Option<&PathBuf>,
+    ) -> Result<PathBuf, ToolError> {
+        if let Some(path) = codex_self_exe
+            && path.exists()
+        {
             return Ok(path.clone());
         }
 
@@ -102,6 +121,21 @@ impl ApplyPatchRuntime {
                 CODEX_CORE_APPLY_PATCH_ARG1.to_string(),
                 req.action.patch.clone(),
             ],
+            cwd: req.action.cwd.clone(),
+            // Run apply_patch with a minimal environment for determinism and to avoid leaks.
+            env: HashMap::new(),
+            additional_permissions: req.additional_permissions.clone(),
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn build_sandbox_command_for_apply_patch_helper(
+        req: &ApplyPatchRequest,
+        apply_patch_exe: PathBuf,
+    ) -> SandboxCommand {
+        SandboxCommand {
+            program: apply_patch_exe.to_string_lossy().to_string(),
+            args: vec![req.action.patch.clone()],
             cwd: req.action.cwd.clone(),
             // Run apply_patch with a minimal environment for determinism and to avoid leaks.
             env: HashMap::new(),
@@ -215,7 +249,11 @@ impl ToolRuntime<ApplyPatchRequest, ExecToolCallOutput> for ApplyPatchRuntime {
         #[cfg(target_os = "windows")]
         let command = Self::build_sandbox_command(req, &ctx.turn.config.codex_home)?;
         #[cfg(not(target_os = "windows"))]
-        let command = Self::build_sandbox_command(req, ctx.turn.codex_self_exe.as_ref())?;
+        let command = Self::build_sandbox_command(
+            req,
+            ctx.turn.codex_linux_sandbox_exe.as_ref(),
+            ctx.turn.codex_self_exe.as_ref(),
+        )?;
         let options = ExecOptions {
             expiration: req.timeout_ms.into(),
             capture_policy: ExecCapturePolicy::ShellTool,
