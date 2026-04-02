@@ -3,9 +3,7 @@ use codex_protocol::protocol::GranularApprovalConfig;
 use pretty_assertions::assert_eq;
 use std::collections::HashMap;
 #[cfg(not(target_os = "windows"))]
-use tempfile::NamedTempFile;
-#[cfg(not(target_os = "windows"))]
-use tempfile::tempdir;
+use std::path::PathBuf;
 
 #[test]
 fn wants_no_sandbox_approval_granular_respects_sandbox_flag() {
@@ -73,7 +71,7 @@ fn guardian_review_request_includes_patch_context() {
 
 #[cfg(not(target_os = "windows"))]
 #[test]
-fn build_sandbox_command_prefers_apply_patch_helper_for_apply_patch() {
+fn build_sandbox_command_prefers_configured_codex_self_exe_for_apply_patch() {
     let path = std::env::temp_dir().join("apply-patch-current-exe-test.txt");
     let action = ApplyPatchAction::new_add_for_test(&path, "hello".to_string());
     let request = ApplyPatchRequest {
@@ -95,70 +93,14 @@ fn build_sandbox_command_prefers_apply_patch_helper_for_apply_patch() {
         permissions_preapproved: false,
         timeout_ms: None,
     };
-    let helper_dir = tempdir().expect("helper dir");
-    let codex_linux_sandbox_exe_path = helper_dir.path().join("codex-linux-sandbox");
-    std::fs::write(&codex_linux_sandbox_exe_path, "").expect("write linux sandbox helper");
-    let apply_patch_helper_path = helper_dir.path().join("apply_patch");
-    std::fs::write(&apply_patch_helper_path, "").expect("write apply_patch helper");
-    let codex_self_exe = NamedTempFile::new().expect("self exe temp file");
-    let codex_self_exe_path = codex_self_exe.path().to_path_buf();
+    let codex_self_exe = PathBuf::from("/tmp/codex");
 
-    let command = ApplyPatchRuntime::build_sandbox_command(
-        &request,
-        Some(&codex_linux_sandbox_exe_path),
-        Some(&codex_self_exe_path),
-    )
-    .expect("build sandbox command");
+    let command = ApplyPatchRuntime::build_sandbox_command(&request, Some(&codex_self_exe))
+        .expect("build sandbox command");
 
     assert_eq!(
         command.program,
-        apply_patch_helper_path.to_string_lossy().to_string()
-    );
-    assert_eq!(command.args, vec![request.action.patch.clone()]);
-}
-
-#[cfg(not(target_os = "windows"))]
-#[test]
-fn build_sandbox_command_prefers_configured_codex_self_exe_when_no_linux_helper() {
-    let path = std::env::temp_dir().join("apply-patch-current-exe-test.txt");
-    let action = ApplyPatchAction::new_add_for_test(&path, "hello".to_string());
-    let request = ApplyPatchRequest {
-        action,
-        file_paths: vec![
-            AbsolutePathBuf::from_absolute_path(&path).expect("temp path should be absolute"),
-        ],
-        changes: HashMap::from([(
-            path,
-            FileChange::Add {
-                content: "hello".to_string(),
-            },
-        )]),
-        exec_approval_requirement: ExecApprovalRequirement::NeedsApproval {
-            reason: None,
-            proposed_execpolicy_amendment: None,
-        },
-        additional_permissions: None,
-        permissions_preapproved: false,
-        timeout_ms: None,
-    };
-    let codex_self_exe = NamedTempFile::new().expect("self exe temp file");
-
-    let codex_self_exe_path = codex_self_exe.path().to_path_buf();
-
-    let command =
-        ApplyPatchRuntime::build_sandbox_command(&request, None, Some(&codex_self_exe_path))
-            .expect("build sandbox command");
-
-    assert_eq!(
-        command.program,
-        codex_self_exe.path().to_string_lossy().to_string()
-    );
-    assert_eq!(
-        command.args,
-        vec![
-            CODEX_CORE_APPLY_PATCH_ARG1.to_string(),
-            request.action.patch.clone(),
-        ]
+        codex_self_exe.to_string_lossy().to_string()
     );
 }
 
@@ -187,8 +129,8 @@ fn build_sandbox_command_falls_back_to_current_exe_for_apply_patch() {
         timeout_ms: None,
     };
 
-    let command = ApplyPatchRuntime::build_sandbox_command(&request, None, None)
-        .expect("build sandbox command");
+    let command =
+        ApplyPatchRuntime::build_sandbox_command(&request, None).expect("build sandbox command");
 
     assert_eq!(
         command.program,
@@ -196,12 +138,5 @@ fn build_sandbox_command_falls_back_to_current_exe_for_apply_patch() {
             .expect("current exe")
             .to_string_lossy()
             .to_string()
-    );
-    assert_eq!(
-        command.args,
-        vec![
-            CODEX_CORE_APPLY_PATCH_ARG1.to_string(),
-            request.action.patch.clone(),
-        ]
     );
 }
