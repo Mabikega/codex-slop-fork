@@ -705,7 +705,7 @@ mod tests {
             "on-complete --last-user-message",
             AutomationScope::Session,
             Local::now(),
-            None,
+            /*last_user_message*/ None,
         )
         .expect_err("missing last message should fail");
 
@@ -734,7 +734,7 @@ mod tests {
             "on-complete first line\nsecond line",
             AutomationScope::Session,
             Local::now(),
-            None,
+            /*last_user_message*/ None,
         )
         .expect("command");
 
@@ -755,7 +755,7 @@ mod tests {
             "every 10m first line\nsecond line",
             AutomationScope::Session,
             Local::now(),
-            None,
+            /*last_user_message*/ None,
         )
         .expect("command");
 

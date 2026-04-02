@@ -663,7 +663,8 @@ mod tests {
 
     #[test]
     fn parses_prefixed_interval_schedule() {
-        let request = parse_timer_schedule_request("5m /review", None).expect("schedule");
+        let request = parse_timer_schedule_request("5m /review", /*default_schedule*/ None)
+            .expect("schedule");
         assert_eq!(request.prompt, "/review");
         assert_eq!(
             request.schedule,
@@ -673,8 +674,11 @@ mod tests {
 
     #[test]
     fn parses_trailing_every_interval_schedule() {
-        let request =
-            parse_timer_schedule_request("run tests every 5 minutes", None).expect("schedule");
+        let request = parse_timer_schedule_request(
+            "run tests every 5 minutes",
+            /*default_schedule*/ None,
+        )
+        .expect("schedule");
         assert_eq!(request.prompt, "run tests");
         assert_eq!(
             request.schedule,
@@ -684,8 +688,11 @@ mod tests {
 
     #[test]
     fn parses_trailing_every_interval_schedule_with_multiline_prompt() {
-        let request = parse_timer_schedule_request("run tests\nthen report every 5 minutes", None)
-            .expect("schedule");
+        let request = parse_timer_schedule_request(
+            "run tests\nthen report every 5 minutes",
+            /*default_schedule*/ None,
+        )
+        .expect("schedule");
         assert_eq!(request.prompt, "run tests\nthen report");
         assert_eq!(
             request.schedule,
@@ -695,8 +702,11 @@ mod tests {
 
     #[test]
     fn parses_prefixed_cron_schedule() {
-        let request =
-            parse_timer_schedule_request("*/15 * * * * check deploy", None).expect("schedule");
+        let request = parse_timer_schedule_request(
+            "*/15 * * * * check deploy",
+            /*default_schedule*/ None,
+        )
+        .expect("schedule");
         assert_eq!(request.prompt, "check deploy");
         let TimerSchedule::Cron(cron) = request.schedule else {
             panic!("expected cron schedule");
@@ -706,8 +716,11 @@ mod tests {
 
     #[test]
     fn parses_trailing_every_cron_schedule() {
-        let request = parse_timer_schedule_request("check deploy every \"0 14 * * 1-5\"", None)
-            .expect("schedule");
+        let request = parse_timer_schedule_request(
+            "check deploy every \"0 14 * * 1-5\"",
+            /*default_schedule*/ None,
+        )
+        .expect("schedule");
         assert_eq!(request.prompt, "check deploy");
         let TimerSchedule::Cron(cron) = request.schedule else {
             panic!("expected cron schedule");
@@ -718,7 +731,8 @@ mod tests {
     #[test]
     fn parses_prefixed_numeric_cron_schedule() {
         let request =
-            parse_timer_schedule_request("0 14 1 1 1 check deploy", None).expect("schedule");
+            parse_timer_schedule_request("0 14 1 1 1 check deploy", /*default_schedule*/ None)
+                .expect("schedule");
         assert_eq!(request.prompt, "check deploy");
         let TimerSchedule::Cron(cron) = request.schedule else {
             panic!("expected cron schedule");
@@ -728,7 +742,9 @@ mod tests {
 
     #[test]
     fn parses_prefixed_cron_schedule_with_numeric_prompt_token() {
-        let request = parse_timer_schedule_request("0 14 * * 1-5 404", None).expect("schedule");
+        let request =
+            parse_timer_schedule_request("0 14 * * 1-5 404", /*default_schedule*/ None)
+                .expect("schedule");
         assert_eq!(request.prompt, "404");
         let TimerSchedule::Cron(cron) = request.schedule else {
             panic!("expected cron schedule");
@@ -738,7 +754,9 @@ mod tests {
 
     #[test]
     fn parses_prefixed_cron_schedule_with_cron_like_prompt_token() {
-        let request = parse_timer_schedule_request("*/15 * * * * 1-5", None).expect("schedule");
+        let request =
+            parse_timer_schedule_request("*/15 * * * * 1-5", /*default_schedule*/ None)
+                .expect("schedule");
         assert_eq!(request.prompt, "1-5");
         let TimerSchedule::Cron(cron) = request.schedule else {
             panic!("expected cron schedule");
@@ -748,8 +766,11 @@ mod tests {
 
     #[test]
     fn parses_explicit_cron_prefix_schedule() {
-        let request = parse_timer_schedule_request("cron: */15 * * * * check deploy", None)
-            .expect("schedule");
+        let request = parse_timer_schedule_request(
+            "cron: */15 * * * * check deploy",
+            /*default_schedule*/ None,
+        )
+        .expect("schedule");
         assert_eq!(request.prompt, "check deploy");
         let TimerSchedule::Cron(cron) = request.schedule else {
             panic!("expected cron schedule");
@@ -759,8 +780,11 @@ mod tests {
 
     #[test]
     fn rejects_six_field_cron_schedule() {
-        let err = parse_timer_schedule_request("check deploy every 0 12 * * * *", None)
-            .expect_err("invalid cron");
+        let err = parse_timer_schedule_request(
+            "check deploy every 0 12 * * * *",
+            /*default_schedule*/ None,
+        )
+        .expect_err("invalid cron");
         assert_eq!(
             err,
             "Cron schedules must have five fields: minute hour day-of-month month day-of-week."
@@ -769,7 +793,9 @@ mod tests {
 
     #[test]
     fn rounds_seconds_up_to_minutes() {
-        let request = parse_timer_schedule_request("30s check deploy", None).expect("schedule");
+        let request =
+            parse_timer_schedule_request("30s check deploy", /*default_schedule*/ None)
+                .expect("schedule");
         assert_eq!(
             request.schedule,
             TimerSchedule::Interval(Duration::from_secs(60))

@@ -4,8 +4,7 @@ expression: popup
 ---
   View Account Limits
   Choose a saved account to review or refresh its latest usage and reset times.
-  This session: API key (...test)
-  Shared active account: none
+  This session: none
   3 misnamed account file(s) are ignored until renamed in /accounts.
 
 › 1. Account 2 (Pro)             No snapshot yet. Press enter to refresh this account now.

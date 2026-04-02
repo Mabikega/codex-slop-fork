@@ -38,11 +38,11 @@ mod tests {
     use crate::auth::CodexAuth;
     use crate::auth::load_auth_dot_json;
     use crate::auth::login_with_api_key;
-    use crate::token_data::IdTokenInfo;
-    use crate::token_data::KnownPlan as InternalKnownPlan;
-    use crate::token_data::PlanType as InternalPlanType;
-    use crate::token_data::TokenData;
     use base64::Engine;
+    use codex_login::token_data::IdTokenInfo;
+    use codex_login::token_data::KnownPlan as InternalKnownPlan;
+    use codex_login::token_data::PlanType as InternalPlanType;
+    use codex_login::token_data::TokenData;
     use pretty_assertions::assert_eq;
     use tempfile::tempdir;
 

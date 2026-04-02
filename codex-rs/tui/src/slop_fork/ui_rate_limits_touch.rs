@@ -124,7 +124,7 @@ impl QuotaTouchClient {
             Self::Active(client) => client
                 .list_models_detailed()
                 .await
-                .map(|models| touch_model_choices_from_model_infos(&models))
+                .map(|models: Vec<ModelInfo>| touch_model_choices_from_model_infos(&models))
                 .unwrap_or_else(|err| {
                     tracing::debug!(
                         account_id,
@@ -223,7 +223,7 @@ impl SavedAccountBackendSession {
     ) -> anyhow::Result<Vec<TouchModelChoice>> {
         self.run_request_with_auth_retry(|client| Box::pin(client.list_models_detailed()))
             .await
-            .map(|models| touch_model_choices_from_model_infos(&models))
+            .map(|models: Vec<ModelInfo>| touch_model_choices_from_model_infos(&models))
     }
 
     pub(super) async fn create_response(
@@ -487,7 +487,8 @@ mod tests {
 
     #[test]
     fn minimal_touch_request_omits_reasoning_when_no_supported_effort_is_known() {
-        let request = minimal_touch_response_request("gpt-5.1-codex-mini", None);
+        let request =
+            minimal_touch_response_request("gpt-5.1-codex-mini", /*reasoning_effort*/ None);
         assert_eq!(request["stream"], serde_json::Value::Bool(true));
         assert_eq!(request["store"], serde_json::Value::Bool(false));
         assert!(request.get("reasoning").is_none());
@@ -603,7 +604,7 @@ mod tests {
             default_verbosity: None,
             apply_patch_tool_type: None,
             web_search_tool_type: Default::default(),
-            truncation_policy: TruncationPolicyConfig::bytes(10_000),
+            truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
             supports_parallel_tool_calls: false,
             supports_image_detail_original: false,
             context_window: None,

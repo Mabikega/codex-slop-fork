@@ -204,8 +204,8 @@ mod tests {
     use codex_app_server_protocol::AuthMode;
     use codex_core::auth::AuthDotJson;
     use codex_core::slop_fork::account_rate_limits;
-    use codex_core::token_data::IdTokenInfo;
-    use codex_core::token_data::TokenData;
+    use codex_login::token_data::IdTokenInfo;
+    use codex_login::token_data::TokenData;
     use codex_protocol::protocol::RateLimitSnapshot;
     use codex_protocol::protocol::RateLimitWindow;
     use pretty_assertions::assert_eq;
@@ -298,13 +298,19 @@ mod tests {
             dir.path(),
             "acct-1",
             Some("pro"),
-            &rate_limit_snapshot(5.0, 1.0),
+            &rate_limit_snapshot(
+                /*primary_used_percent*/ 5.0, /*secondary_used_percent*/ 1.0,
+            ),
             Utc::now(),
         )
         .expect("record rate limits");
 
         assert_eq!(
-            saved_account_limit_averages_for_status_line(dir.path(), true, true),
+            saved_account_limit_averages_for_status_line(
+                dir.path(),
+                /*include_five_hour*/ true,
+                /*include_weekly*/ true
+            ),
             None
         );
     }
@@ -326,7 +332,9 @@ mod tests {
             dir.path(),
             "acct-1",
             Some("pro"),
-            &rate_limit_snapshot(40.0, 80.0),
+            &rate_limit_snapshot(
+                /*primary_used_percent*/ 40.0, /*secondary_used_percent*/ 80.0,
+            ),
             Utc::now(),
         )
         .expect("record first rate limits");
@@ -334,13 +342,19 @@ mod tests {
             dir.path(),
             "acct-2",
             Some("pro"),
-            &rate_limit_snapshot(20.0, 60.0),
+            &rate_limit_snapshot(
+                /*primary_used_percent*/ 20.0, /*secondary_used_percent*/ 60.0,
+            ),
             Utc::now(),
         )
         .expect("record second rate limits");
 
         assert_eq!(
-            saved_account_limit_averages_for_status_line(dir.path(), true, true),
+            saved_account_limit_averages_for_status_line(
+                dir.path(),
+                /*include_five_hour*/ true,
+                /*include_weekly*/ true
+            ),
             Some(SavedAccountLimitAverages {
                 five_hour_remaining_percent: Some(70),
                 weekly_remaining_percent: Some(30),
@@ -365,7 +379,9 @@ mod tests {
             dir.path(),
             "acct-1",
             Some("pro"),
-            &rate_limit_snapshot(10.0, 30.0),
+            &rate_limit_snapshot(
+                /*primary_used_percent*/ 10.0, /*secondary_used_percent*/ 30.0,
+            ),
             Utc::now(),
         )
         .expect("record first rate limits");
@@ -386,7 +402,11 @@ mod tests {
         .expect("record second rate limits");
 
         assert_eq!(
-            saved_account_limit_averages_for_status_line(dir.path(), true, false),
+            saved_account_limit_averages_for_status_line(
+                dir.path(),
+                /*include_five_hour*/ true,
+                /*include_weekly*/ false
+            ),
             Some(SavedAccountLimitAverages {
                 five_hour_remaining_percent: Some(90),
                 weekly_remaining_percent: None,
@@ -451,7 +471,11 @@ mod tests {
         .expect("record active rate limits");
 
         assert_eq!(
-            saved_account_limit_averages_for_status_line(dir.path(), true, false),
+            saved_account_limit_averages_for_status_line(
+                dir.path(),
+                /*include_five_hour*/ true,
+                /*include_weekly*/ false
+            ),
             Some(SavedAccountLimitAverages {
                 five_hour_remaining_percent: Some(90),
                 weekly_remaining_percent: None,
@@ -476,7 +500,9 @@ mod tests {
             dir.path(),
             "acct-1",
             Some("pro"),
-            &rate_limit_snapshot(40.0, 80.0),
+            &rate_limit_snapshot(
+                /*primary_used_percent*/ 40.0, /*secondary_used_percent*/ 80.0,
+            ),
             Utc::now(),
         )
         .expect("record first rate limits");
@@ -484,7 +510,9 @@ mod tests {
             dir.path(),
             "acct-2",
             Some("pro"),
-            &rate_limit_snapshot(20.0, 60.0),
+            &rate_limit_snapshot(
+                /*primary_used_percent*/ 20.0, /*secondary_used_percent*/ 60.0,
+            ),
             Utc::now(),
         )
         .expect("record second rate limits");

@@ -383,10 +383,12 @@ mod tests {
     use crate::auth::AuthManager;
     use crate::auth::CodexAuth;
     use crate::slop_fork::auth_accounts::upsert_account;
-    use crate::token_data::IdTokenInfo;
-    use crate::token_data::TokenData;
     use codex_app_server_protocol::AuthMode;
-    use codex_protocol::account::PlanType;
+    use codex_login::token_data::IdTokenInfo;
+    use codex_login::token_data::KnownPlan;
+    use codex_login::token_data::PlanType;
+    use codex_login::token_data::TokenData;
+    use codex_protocol::account::PlanType as AccountPlanType;
     use codex_protocol::protocol::RateLimitWindow;
 
     fn fixed_now() -> DateTime<Utc> {
@@ -402,9 +404,7 @@ mod tests {
             tokens: Some(TokenData {
                 id_token: IdTokenInfo {
                     email: Some(email.to_string()),
-                    chatgpt_plan_type: Some(crate::token_data::PlanType::Known(
-                        crate::token_data::KnownPlan::Team,
-                    )),
+                    chatgpt_plan_type: Some(PlanType::Known(KnownPlan::Team)),
                     chatgpt_user_id: None,
                     chatgpt_account_id: Some(account_id.to_string()),
                     raw_jwt: "jwt".to_string(),
@@ -450,7 +450,7 @@ mod tests {
             }),
             secondary: None,
             credits: None,
-            plan_type: Some(PlanType::Team),
+            plan_type: Some(AccountPlanType::Team),
         };
 
         record_active_account_rate_limit_snapshot(dir.path(), auth_manager.as_ref(), &rate_limits);

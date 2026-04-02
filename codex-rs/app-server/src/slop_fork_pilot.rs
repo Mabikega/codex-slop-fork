@@ -353,7 +353,11 @@ mod tests {
         let manager = SlopForkPilotManager;
         let mut runtime = PilotRuntime::load(dir.path(), thread_id.to_string())?;
 
-        assert!(runtime.start("ship it".to_string(), None, Local::now())?);
+        assert!(runtime.start(
+            "ship it".to_string(),
+            /*deadline_at*/ None,
+            Local::now(),
+        )?);
         let _plan = runtime
             .prepare_cycle_submission(Local::now())?
             .expect("pilot cycle should be prepared");

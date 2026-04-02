@@ -4,8 +4,7 @@ expression: popup
 ---
   Rename Account Files
   Misnamed saved auth files are ignored until they use the expected account id.
-  This session: API key (...test)
-  Shared active account: none
+  This session: none
 
 › 1. Rename all usable files  Rename all 1 usable misnamed account file(s).
   2. rename-popup.json        rename-popup@example.com (Pro). Rename to chatgpt-

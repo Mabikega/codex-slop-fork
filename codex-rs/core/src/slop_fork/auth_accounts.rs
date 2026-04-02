@@ -627,11 +627,11 @@ fn api_key_suffix(api_key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::token_data::IdTokenInfo;
-    use crate::token_data::KnownPlan;
-    use crate::token_data::PlanType;
-    use crate::token_data::TokenData;
     use base64::Engine;
+    use codex_login::token_data::IdTokenInfo;
+    use codex_login::token_data::KnownPlan;
+    use codex_login::token_data::PlanType;
+    use codex_login::token_data::TokenData;
     use pretty_assertions::assert_eq;
     use serde::Serialize;
     use tempfile::tempdir;

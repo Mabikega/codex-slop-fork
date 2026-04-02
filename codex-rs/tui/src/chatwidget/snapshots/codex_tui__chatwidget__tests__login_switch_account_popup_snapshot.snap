@@ -1,11 +1,10 @@
 ---
 source: tui/src/chatwidget/tests.rs
-assertion_line: 8631
 expression: popup
 ---
   Switch Account
   Choose which saved account should become ~/.codex/auth.json.
-  This session: API key (...test)
+  This session: none
   Shared active account: switch-popup@example.com (Pro)
 
 › 1. switch-popup@example.com (Pro)  1h  55% until 12:45 on 1 Jan. Press enter to switch to this

@@ -47,9 +47,9 @@ mod multi_select_picker;
 mod request_user_input;
 mod slop_fork_ext;
 mod status_line_setup;
+mod title_setup;
 pub(crate) use app_link_view::AppLinkElicitationTarget;
 pub(crate) use app_link_view::AppLinkSuggestionType;
-mod title_setup;
 pub(crate) use app_link_view::AppLinkView;
 pub(crate) use app_link_view::AppLinkViewParams;
 pub(crate) use approval_overlay::ApprovalOverlay;
@@ -151,7 +151,6 @@ pub(crate) use chat_composer::ChatComposer;
 pub(crate) use chat_composer::ChatComposerConfig;
 pub(crate) use chat_composer::InlineCommand;
 pub(crate) use chat_composer::InputResult;
-use codex_protocol::custom_prompts::CustomPrompt;
 
 use crate::status_indicator_widget::StatusDetailsCapitalization;
 use crate::status_indicator_widget::StatusIndicatorWidget;
@@ -337,11 +336,6 @@ impl BottomPane {
         self.request_redraw();
     }
 
-    pub fn set_voice_transcription_enabled(&mut self, enabled: bool) {
-        self.composer.set_voice_transcription_enabled(enabled);
-        self.request_redraw();
-    }
-
     /// Update the key hint shown next to queued messages so it matches the
     /// binding that `ChatWidget` actually listens for.
     pub(crate) fn set_queued_message_edit_binding(&mut self, binding: KeyBinding) {
@@ -382,17 +376,6 @@ impl BottomPane {
 
     /// Forward a key event to the active view or the composer.
     pub fn handle_key_event(&mut self, key_event: KeyEvent) -> InputResult {
-        // Do not globally intercept space; only composer handles hold-to-talk.
-        // While recording, route all keys to the composer so it can stop on release or next key.
-        #[cfg(not(target_os = "linux"))]
-        if self.composer.is_recording() {
-            let (_ir, needs_redraw) = self.composer.handle_key_event(key_event);
-            if needs_redraw {
-                self.request_redraw();
-            }
-            return InputResult::None;
-        }
-
         // If a modal/view is active, handle it here; otherwise forward to composer.
         if !self.view_stack.is_empty() {
             if key_event.kind == KeyEventKind::Release {
@@ -524,11 +507,7 @@ impl BottomPane {
         self.request_redraw();
     }
 
-    // Space hold timeout is handled inside ChatComposer via an internal timer.
     pub(crate) fn pre_draw_tick(&mut self) {
-        // Allow composer to process any time-based transitions before drawing
-        #[cfg(not(target_os = "linux"))]
-        self.composer.process_space_hold_trigger();
         self.composer.sync_popups();
     }
 
@@ -873,12 +852,6 @@ impl BottomPane {
         }
     }
 
-    /// Update custom prompts available for the slash popup.
-    pub(crate) fn set_custom_prompts(&mut self, prompts: Vec<CustomPrompt>) {
-        self.composer.set_custom_prompts(prompts);
-        self.request_redraw();
-    }
-
     pub(crate) fn composer_is_empty(&self) -> bool {
         self.composer.is_empty()
     }
@@ -1216,21 +1189,15 @@ impl BottomPane {
 
 #[cfg(not(target_os = "linux"))]
 impl BottomPane {
-    pub(crate) fn insert_transcription_placeholder(&mut self, text: &str) -> String {
-        let id = self.composer.insert_transcription_placeholder(text);
+    pub(crate) fn insert_recording_meter_placeholder(&mut self, text: &str) -> String {
+        let id = self.composer.insert_recording_meter_placeholder(text);
         self.composer.sync_popups();
         self.request_redraw();
         id
     }
 
-    pub(crate) fn replace_transcription(&mut self, id: &str, text: &str) {
-        self.composer.replace_transcription(id, text);
-        self.composer.sync_popups();
-        self.request_redraw();
-    }
-
-    pub(crate) fn update_transcription_in_place(&mut self, id: &str, text: &str) -> bool {
-        let updated = self.composer.update_transcription_in_place(id, text);
+    pub(crate) fn update_recording_meter_in_place(&mut self, id: &str, text: &str) -> bool {
+        let updated = self.composer.update_recording_meter_in_place(id, text);
         if updated {
             self.composer.sync_popups();
             self.request_redraw();
@@ -1238,8 +1205,8 @@ impl BottomPane {
         updated
     }
 
-    pub(crate) fn remove_transcription_placeholder(&mut self, id: &str) {
-        self.composer.remove_transcription_placeholder(id);
+    pub(crate) fn remove_recording_meter_placeholder(&mut self, id: &str) {
+        self.composer.remove_recording_meter_placeholder(id);
         self.composer.sync_popups();
         self.request_redraw();
     }
@@ -1385,7 +1352,7 @@ mod tests {
         });
 
         // Start a running task so the status indicator is active above the composer.
-        pane.set_task_running(true);
+        pane.set_task_running(/*running*/ true);
 
         // Push an approval modal (e.g., command approval) which should hide the status view.
         pane.push_approval_request(exec_request(), &features);
@@ -1452,7 +1419,7 @@ mod tests {
         });
 
         // Begin a task: show initial status.
-        pane.set_task_running(true);
+        pane.set_task_running(/*running*/ true);
 
         // Use a height that allows the status line to be visible above the composer.
         let area = Rect::new(0, 0, 40, 6);
@@ -1479,10 +1446,10 @@ mod tests {
         });
 
         // Activate spinner (status view replaces composer) with no live ring.
-        pane.set_task_running(true);
+        pane.set_task_running(/*running*/ true);
 
         // Use height == desired_height; expect spacer + status + composer rows without trailing padding.
-        let height = pane.desired_height(30);
+        let height = pane.desired_height(/*width*/ 30);
         assert!(
             height >= 3,
             "expected at least 3 rows to render spacer, status, and composer; got {height}"
@@ -1509,7 +1476,7 @@ mod tests {
             skills: Some(Vec::new()),
         });
 
-        pane.set_task_running(true);
+        pane.set_task_running(/*running*/ true);
 
         let width = 48;
         let height = pane.desired_height(width);
@@ -1532,7 +1499,7 @@ mod tests {
             skills: Some(Vec::new()),
         });
 
-        pane.set_task_running(true);
+        pane.set_task_running(/*running*/ true);
         let width = 120;
         let before = pane.desired_height(width);
 
@@ -1561,7 +1528,7 @@ mod tests {
             skills: Some(Vec::new()),
         });
 
-        pane.set_task_running(true);
+        pane.set_task_running(/*running*/ true);
         pane.update_status(
             "Working".to_string(),
             Some("First detail line\nSecond detail line".to_string()),
@@ -1598,7 +1565,7 @@ mod tests {
             skills: Some(Vec::new()),
         });
 
-        pane.set_task_running(true);
+        pane.set_task_running(/*running*/ true);
         pane.set_pending_input_preview(
             vec!["Queued follow-up question".to_string()],
             Vec::new(),
@@ -1630,7 +1597,7 @@ mod tests {
             skills: Some(Vec::new()),
         });
 
-        pane.set_task_running(true);
+        pane.set_task_running(/*running*/ true);
         pane.set_pending_input_preview(
             vec!["Queued follow-up question".to_string()],
             Vec::new(),
@@ -1717,14 +1684,12 @@ mod tests {
                 interface: None,
                 dependencies: None,
                 policy: None,
-                permission_profile: None,
-                managed_network_override: None,
                 path_to_skills_md: PathBuf::from("test-skill"),
                 scope: SkillScope::User,
             }]),
         });
 
-        pane.set_task_running(true);
+        pane.set_task_running(/*running*/ true);
 
         // Repro: a running task + skill popup + Esc should dismiss the popup, not interrupt.
         pane.insert_str("$");
@@ -1762,7 +1727,7 @@ mod tests {
             skills: Some(Vec::new()),
         });
 
-        pane.set_task_running(true);
+        pane.set_task_running(/*running*/ true);
 
         // Repro: a running task + slash-command popup + Esc should not interrupt the task.
         pane.insert_str("/");
@@ -1797,7 +1762,7 @@ mod tests {
             skills: Some(Vec::new()),
         });
 
-        pane.set_task_running(true);
+        pane.set_task_running(/*running*/ true);
 
         // Repro: `/agent ` hides the popup (cursor past command name). Esc should
         // keep editing command text instead of interrupting the running task.
@@ -1833,7 +1798,7 @@ mod tests {
             skills: Some(Vec::new()),
         });
 
-        pane.set_task_running(true);
+        pane.set_task_running(/*running*/ true);
         pane.show_selection_view(SelectionViewParams {
             title: Some("Agents".to_string()),
             items: vec![SelectionItem {
@@ -1881,7 +1846,7 @@ mod tests {
             skills: Some(Vec::new()),
         });
 
-        pane.set_task_running(true);
+        pane.set_task_running(/*running*/ true);
 
         pane.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 

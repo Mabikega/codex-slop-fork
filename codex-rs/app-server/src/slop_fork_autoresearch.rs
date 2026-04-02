@@ -337,7 +337,7 @@ mod tests {
                 accepted_revision: None,
                 snapshot_root: Some(workdir.path().join("snapshot")),
             },
-            None,
+            /*max_runs*/ None,
             Local::now(),
         )?);
         let _plan = runtime
@@ -383,7 +383,7 @@ mod tests {
             AutoresearchMode::Scientist,
             workdir.path().to_path_buf(),
             prepared_workspace.workspace.clone(),
-            None,
+            /*max_runs*/ None,
             Local::now(),
         )?);
         std::fs::write(workdir.path().join(AUTORESEARCH_JOURNAL_FILE), "[]")?;

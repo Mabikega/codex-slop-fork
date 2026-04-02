@@ -14,6 +14,7 @@ use std::sync::LazyLock;
 
 use async_trait::async_trait;
 use chrono::Local;
+use codex_tools::augment_tool_spec_for_code_mode as augment_tool_spec_for_code_mode_impl;
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -28,7 +29,6 @@ use crate::exec::process_exec_tool_call;
 use crate::exec_env::create_env;
 use crate::function_tool::FunctionCallError;
 use crate::sandboxing::SandboxPermissions;
-use crate::tools::code_mode_description::augment_tool_spec_for_code_mode;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
@@ -63,6 +63,14 @@ pub(crate) use discovery_tools::AUTORESEARCH_REQUEST_DISCOVERY_TOOL;
 pub(crate) use parallel_tools::AUTORESEARCH_RUN_PARALLEL_TOOL;
 #[cfg(test)]
 pub(crate) use validation_tools::AUTORESEARCH_LOG_VALIDATION_TOOL;
+
+pub(super) fn augment_tool_spec_for_code_mode(spec: ToolSpec, code_mode_enabled: bool) -> ToolSpec {
+    if code_mode_enabled {
+        augment_tool_spec_for_code_mode_impl(spec)
+    } else {
+        spec
+    }
+}
 
 pub(crate) static AUTORESEARCH_INIT_TOOL: LazyLock<ToolSpec> = LazyLock::new(|| {
     let properties = BTreeMap::from([

@@ -1,12 +1,10 @@
 ---
 source: tui/src/chatwidget/tests.rs
-assertion_line: 8260
 expression: popup
 ---
   Account Settings
   Fork-specific account switching behavior.
-  This session: API key (...test)
-  Shared active account: none
+  This session: none
 
 › [x] Auto switch accounts       Switch saved accounts when the active one is rate-limited.
   [ ] Follow external switch     Adopt account changes written by another Codex instance without

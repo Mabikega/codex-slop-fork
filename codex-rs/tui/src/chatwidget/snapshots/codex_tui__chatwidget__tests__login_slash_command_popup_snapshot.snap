@@ -4,7 +4,7 @@ expression: popup
 ---
   Accounts
   Choose an account, auth flow, or fork setting.
-  This session: API key (...test)
+  This session: none
   Shared active account: API key (...1234)
 
 › 1. Login with ChatGPT               Start browser login and wait for the callback.

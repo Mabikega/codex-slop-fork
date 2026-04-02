@@ -4,7 +4,7 @@ expression: popup
 ---
   View Account Limits
   Choose a saved account to review or refresh its latest usage and reset times.
-  This session: API key (...test)
+  This session: none
   Shared active account: refreshing@example.com (Pro)
   • Refreshing saved account limits (0s)
     └ Refreshing 1 saved account in the background.

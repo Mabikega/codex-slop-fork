@@ -1700,8 +1700,8 @@ mod tests {
     use codex_core::slop_fork::account_rate_limits::StoredQuotaWindow;
     use codex_core::slop_fork::account_rate_limits::StoredRateLimitSnapshot;
     use codex_core::slop_fork::auth_accounts::StoredAccount;
-    use codex_core::token_data::IdTokenInfo;
-    use codex_core::token_data::TokenData;
+    use codex_login::token_data::IdTokenInfo;
+    use codex_login::token_data::TokenData;
     use codex_protocol::protocol::RateLimitSnapshot;
     use codex_protocol::protocol::RateLimitWindow;
     use std::path::PathBuf;
