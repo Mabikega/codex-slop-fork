@@ -300,8 +300,8 @@ mod tests {
     use crate::auth::AuthDotJson;
     use crate::slop_fork::account_rate_limits::record_rate_limit_snapshot;
     use crate::slop_fork::auth_accounts::upsert_account;
-    use crate::token_data::IdTokenInfo;
-    use crate::token_data::TokenData;
+    use codex_login::token_data::IdTokenInfo;
+    use codex_login::token_data::TokenData;
     use codex_protocol::account::PlanType;
     use codex_protocol::protocol::RateLimitSnapshot;
     use codex_protocol::protocol::RateLimitWindow;
@@ -404,14 +404,14 @@ mod tests {
             dir.path(),
             &account_a,
             Some("pro"),
-            &sample_snapshot(now, 60.0),
+            &sample_snapshot(now, /*used_percent*/ 60.0),
             now,
         )?;
         record_rate_limit_snapshot(
             dir.path(),
             &account_b,
             Some("pro"),
-            &sample_snapshot(now, 20.0),
+            &sample_snapshot(now, /*used_percent*/ 20.0),
             now,
         )?;
 
@@ -419,9 +419,9 @@ mod tests {
             dir.path(),
             AuthCredentialsStoreMode::File,
             &mut RateLimitSwitchState::default(),
-            false,
-            None,
-            None,
+            /*allow_api_key_fallback*/ false,
+            /*failed_auth*/ None,
+            /*blocked_until*/ None,
             now,
         )?
         .expect("switched");
@@ -454,8 +454,8 @@ mod tests {
             dir.path(),
             AuthCredentialsStoreMode::File,
             &mut state,
-            true,
-            None,
+            /*allow_api_key_fallback*/ true,
+            /*failed_auth*/ None,
             Some(now + Duration::hours(1)),
             now,
         )?
@@ -482,9 +482,9 @@ mod tests {
             dir.path(),
             AuthCredentialsStoreMode::File,
             &mut RateLimitSwitchState::default(),
-            true,
-            None,
-            None,
+            /*allow_api_key_fallback*/ true,
+            /*failed_auth*/ None,
+            /*blocked_until*/ None,
             now,
         )?
         .expect("switched");
@@ -537,8 +537,8 @@ mod tests {
             dir.path(),
             AuthCredentialsStoreMode::File,
             &mut RateLimitSwitchState::default(),
-            false,
-            None,
+            /*allow_api_key_fallback*/ false,
+            /*failed_auth*/ None,
             Some(now + Duration::hours(1)),
             now,
         )?
@@ -569,21 +569,21 @@ mod tests {
             dir.path(),
             &account_a,
             Some("pro"),
-            &sample_snapshot(now, 100.0),
+            &sample_snapshot(now, /*used_percent*/ 100.0),
             now,
         )?;
         record_rate_limit_snapshot(
             dir.path(),
             &account_b,
             Some("pro"),
-            &sample_snapshot(now, 5.0),
+            &sample_snapshot(now, /*used_percent*/ 5.0),
             now,
         )?;
         record_rate_limit_snapshot(
             dir.path(),
             &account_c,
             Some("pro"),
-            &sample_snapshot(now, 0.0),
+            &sample_snapshot(now, /*used_percent*/ 0.0),
             now,
         )?;
 
@@ -591,9 +591,9 @@ mod tests {
             dir.path(),
             AuthCredentialsStoreMode::File,
             &mut RateLimitSwitchState::default(),
-            false,
-            None,
-            None,
+            /*allow_api_key_fallback*/ false,
+            /*failed_auth*/ None,
+            /*blocked_until*/ None,
             now,
         )?
         .expect("should switch despite all accounts having future reset times");
@@ -624,7 +624,7 @@ mod tests {
             dir.path(),
             AuthCredentialsStoreMode::File,
             &mut RateLimitSwitchState::default(),
-            false,
+            /*allow_api_key_fallback*/ false,
             Some(&failed_auth),
             Some(now + Duration::hours(1)),
             now,

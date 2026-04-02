@@ -345,9 +345,12 @@ mod tests {
             segment: 0,
         };
 
-        let (parent_approach_id, synthesis_parent_approach_ids) =
-            resolve_approach_lineage(None, None, Some(&existing_approach))
-                .expect("resolve lineage");
+        let (parent_approach_id, synthesis_parent_approach_ids) = resolve_approach_lineage(
+            /*parent_approach_id*/ None,
+            /*synthesis_parent_approach_ids*/ None,
+            Some(&existing_approach),
+        )
+        .expect("resolve lineage");
 
         assert_eq!(parent_approach_id.as_deref(), Some("approach-2"));
         assert_eq!(
@@ -358,8 +361,12 @@ mod tests {
 
     #[test]
     fn resolve_approach_lineage_rejects_non_pair_synthesis_parents() {
-        let err = resolve_approach_lineage(None, Some(vec!["approach-1".to_string()]), None)
-            .expect_err("expected invalid synthesis parent count");
+        let err = resolve_approach_lineage(
+            /*parent_approach_id*/ None,
+            Some(vec!["approach-1".to_string()]),
+            /*existing_approach*/ None,
+        )
+        .expect_err("expected invalid synthesis parent count");
 
         assert_eq!(
             err.to_string(),
@@ -386,7 +393,7 @@ mod tests {
         };
 
         let (parent_approach_id, synthesis_parent_approach_ids) = resolve_approach_lineage(
-            None,
+            /*parent_approach_id*/ None,
             Some(vec!["approach-5".to_string(), "approach-6".to_string()]),
             Some(&existing_approach),
         )

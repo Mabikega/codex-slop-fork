@@ -862,7 +862,11 @@ mod tests {
         };
 
         let started = runtime
-            .start("replace goal".to_string(), None, Local::now())
+            .start(
+                "replace goal".to_string(),
+                /*deadline_at*/ None,
+                Local::now(),
+            )
             .unwrap();
         assert!(!started);
         assert_eq!(runtime.state(), Some(&persisted));
@@ -890,7 +894,11 @@ mod tests {
             };
 
             let started = runtime
-                .start("replace goal".to_string(), None, Local::now())
+                .start(
+                    "replace goal".to_string(),
+                    /*deadline_at*/ None,
+                    Local::now(),
+                )
                 .unwrap();
             assert!(!started);
             assert_eq!(runtime.state(), Some(&persisted));

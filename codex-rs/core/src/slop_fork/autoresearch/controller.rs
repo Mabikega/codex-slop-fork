@@ -212,8 +212,8 @@ mod tests {
         state.consecutive_exploit_cycles = 2;
         let status = evaluate_portfolio_refresh_status(
             &state,
-            Some(&summary_with_families(2)),
-            1_000,
+            Some(&summary_with_families(/*family_count*/ 2)),
+            /*now_timestamp*/ 1_000,
             PortfolioRefreshPolicy {
                 minimum_family_count: 3,
                 low_diversity_exploit_cycles: 4,
@@ -237,8 +237,8 @@ mod tests {
         state.last_discovery_completed_at = Some(900);
         let status = evaluate_portfolio_refresh_status(
             &state,
-            Some(&summary_with_families(3)),
-            1_000,
+            Some(&summary_with_families(/*family_count*/ 3)),
+            /*now_timestamp*/ 1_000,
             PortfolioRefreshPolicy {
                 minimum_family_count: 3,
                 low_diversity_exploit_cycles: 2,
@@ -259,8 +259,8 @@ mod tests {
         state.last_discovery_completed_at = Some(900);
         let status = evaluate_portfolio_refresh_status(
             &state,
-            Some(&summary_with_families(2)),
-            1_000,
+            Some(&summary_with_families(/*family_count*/ 2)),
+            /*now_timestamp*/ 1_000,
             PortfolioRefreshPolicy {
                 minimum_family_count: 3,
                 low_diversity_exploit_cycles: 2,

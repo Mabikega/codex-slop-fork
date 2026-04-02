@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use chrono::DateTime;
 use chrono::Duration;
 use chrono::Utc;
-use codex_protocol::account::PlanType;
+use codex_protocol::account::PlanType as AccountPlanType;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::RateLimitWindow;
 use serde::Deserialize;
@@ -540,17 +540,19 @@ fn stored_quota_window(
     }
 }
 
-pub fn plan_label(plan: PlanType) -> &'static str {
+pub fn plan_label(plan: AccountPlanType) -> &'static str {
     match plan {
-        PlanType::Free => "free",
-        PlanType::Go => "go",
-        PlanType::Plus => "plus",
-        PlanType::Pro => "pro",
-        PlanType::Team => "team",
-        PlanType::Business => "business",
-        PlanType::Enterprise => "enterprise",
-        PlanType::Edu => "edu",
-        PlanType::Unknown => "unknown",
+        AccountPlanType::Free => "free",
+        AccountPlanType::Go => "go",
+        AccountPlanType::Plus => "plus",
+        AccountPlanType::Pro => "pro",
+        AccountPlanType::Team => "team",
+        AccountPlanType::Business => "business",
+        AccountPlanType::Enterprise => "enterprise",
+        AccountPlanType::SelfServeBusinessUsageBased => "self_serve_business_usage_based",
+        AccountPlanType::EnterpriseCbpUsageBased => "enterprise_cbp_usage_based",
+        AccountPlanType::Edu => "edu",
+        AccountPlanType::Unknown => "unknown",
     }
 }
 
@@ -692,8 +694,10 @@ mod tests {
     use super::*;
     use crate::auth::AuthDotJson;
     use crate::slop_fork::auth_accounts::upsert_account;
-    use crate::token_data::IdTokenInfo;
-    use crate::token_data::TokenData;
+    use codex_login::token_data::IdTokenInfo;
+    use codex_login::token_data::KnownPlan;
+    use codex_login::token_data::PlanType as TokenPlanType;
+    use codex_login::token_data::TokenData;
     use codex_protocol::protocol::RateLimitWindow;
 
     fn fixed_now() -> DateTime<Utc> {
@@ -717,7 +721,7 @@ mod tests {
                 resets_at: Some((now + Duration::hours(3)).timestamp()),
             }),
             credits: None,
-            plan_type: Some(PlanType::Pro),
+            plan_type: Some(AccountPlanType::Pro),
         }
     }
 
@@ -748,9 +752,7 @@ mod tests {
             tokens: Some(TokenData {
                 id_token: IdTokenInfo {
                     email: Some(email.to_string()),
-                    chatgpt_plan_type: Some(crate::token_data::PlanType::Known(
-                        crate::token_data::KnownPlan::Pro,
-                    )),
+                    chatgpt_plan_type: Some(TokenPlanType::Known(KnownPlan::Pro)),
                     chatgpt_user_id: None,
                     chatgpt_account_id: Some(account_id.to_string()),
                     raw_jwt: "jwt".to_string(),
@@ -767,8 +769,8 @@ mod tests {
     fn record_and_load_rate_limit_snapshot_round_trips() -> anyhow::Result<()> {
         let dir = tempdir()?;
         let now = fixed_now();
-        let snapshot = sample_snapshot(now, 25.0);
-        let raw = sample_raw_snapshot(now, 25);
+        let snapshot = sample_snapshot(now, /*primary_used_percent*/ 25.0);
+        let raw = sample_raw_snapshot(now, /*primary_used_percent*/ 25);
 
         record_rate_limit_snapshot_with_raw(
             dir.path(),
@@ -828,14 +830,14 @@ mod tests {
             dir.path(),
             "acct-1",
             Some("pro"),
-            &sample_snapshot(now, 25.0),
+            &sample_snapshot(now, /*primary_used_percent*/ 25.0),
             now,
         )?;
         record_rate_limit_snapshot(
             dir.path(),
             "acct-2",
             Some("team"),
-            &sample_snapshot(now, 10.0),
+            &sample_snapshot(now, /*primary_used_percent*/ 10.0),
             now,
         )?;
 
@@ -853,7 +855,7 @@ mod tests {
     fn legacy_rate_limit_dir_is_used_as_fallback_until_migrated() -> anyhow::Result<()> {
         let dir = tempdir()?;
         let now = fixed_now();
-        let snapshot = sample_snapshot(now, 25.0);
+        let snapshot = sample_snapshot(now, /*primary_used_percent*/ 25.0);
         let legacy_dir = legacy_rate_limits_dir(dir.path());
         std::fs::create_dir_all(&legacy_dir)?;
         let legacy_file = legacy_dir.join("acct-1.json");
@@ -931,7 +933,7 @@ mod tests {
             dir.path(),
             "acct-legacy",
             Some("pro"),
-            &sample_snapshot(now, 25.0),
+            &sample_snapshot(now, /*primary_used_percent*/ 25.0),
             now,
         )?;
 
@@ -964,7 +966,7 @@ mod tests {
             dir.path(),
             &legacy_saved_id,
             Some("pro"),
-            &sample_snapshot(now, 25.0),
+            &sample_snapshot(now, /*primary_used_percent*/ 25.0),
             now,
         )?;
 
@@ -986,7 +988,7 @@ mod tests {
             dir.path(),
             "acct-1",
             Some("pro"),
-            None,
+            /*reset_at*/ None,
             now,
             rate_limit_refresh_stale_interval(),
         )?);
@@ -994,7 +996,7 @@ mod tests {
             dir.path(),
             "acct-1",
             Some("pro"),
-            None,
+            /*reset_at*/ None,
             now + Duration::minutes(5),
             rate_limit_refresh_stale_interval(),
         )?);
@@ -1002,7 +1004,7 @@ mod tests {
             dir.path(),
             "acct-1",
             Some("pro"),
-            None,
+            /*reset_at*/ None,
             now + rate_limit_refresh_stale_interval(),
             rate_limit_refresh_stale_interval(),
         )?);
@@ -1013,7 +1015,7 @@ mod tests {
     fn mark_refresh_attempt_waits_until_reset_passes() -> anyhow::Result<()> {
         let dir = tempdir()?;
         let now = fixed_now();
-        let snapshot = sample_snapshot(now, 12.0);
+        let snapshot = sample_snapshot(now, /*primary_used_percent*/ 12.0);
         record_rate_limit_snapshot(dir.path(), "acct-1", Some("pro"), &snapshot, now)?;
         let reset_at = now + Duration::hours(3);
 
@@ -1048,7 +1050,8 @@ mod tests {
     fn refresh_due_helper_matches_recent_failed_attempt_cooldown() -> anyhow::Result<()> {
         let dir = tempdir()?;
         let now = fixed_now();
-        let snapshot = sample_snapshot(now - Duration::hours(4), 12.0);
+        let snapshot =
+            sample_snapshot(now - Duration::hours(4), /*primary_used_percent*/ 12.0);
         record_rate_limit_snapshot(
             dir.path(),
             "acct-1",
@@ -1097,7 +1100,7 @@ mod tests {
             }),
             secondary: None,
             credits: None,
-            plan_type: Some(PlanType::Pro),
+            plan_type: Some(AccountPlanType::Pro),
         };
         record_rate_limit_snapshot(dir.path(), "acct-1", Some("pro"), &snapshot, now)?;
 
@@ -1119,8 +1122,8 @@ mod tests {
     fn quota_window_state_detects_untouched_from_raw_delta() -> anyhow::Result<()> {
         let dir = tempdir()?;
         let now = fixed_now();
-        let snapshot = sample_snapshot(now, 0.0);
-        let raw = sample_raw_snapshot(now, 0);
+        let snapshot = sample_snapshot(now, /*primary_used_percent*/ 0.0);
+        let raw = sample_raw_snapshot(now, /*primary_used_percent*/ 0);
         record_rate_limit_snapshot_with_raw(
             dir.path(),
             "acct-1",
@@ -1156,8 +1159,8 @@ mod tests {
     fn quota_window_state_treats_one_second_reset_after_drift_as_untouched() -> anyhow::Result<()> {
         let dir = tempdir()?;
         let now = fixed_now();
-        let snapshot = sample_snapshot(now, 0.0);
-        let mut raw = sample_raw_snapshot(now, 0);
+        let snapshot = sample_snapshot(now, /*primary_used_percent*/ 0.0);
+        let mut raw = sample_raw_snapshot(now, /*primary_used_percent*/ 0);
         raw.secondary = Some(RawRateLimitWindowSnapshot {
             used_percent: 0,
             limit_window_seconds: 7 * 24 * 60 * 60,
@@ -1190,8 +1193,8 @@ mod tests {
     fn quota_window_reset_at_if_untouched_uses_now_plus_full_window() -> anyhow::Result<()> {
         let dir = tempdir()?;
         let now = fixed_now();
-        let snapshot = sample_snapshot(now, 0.0);
-        let raw = sample_raw_snapshot(now, 0);
+        let snapshot = sample_snapshot(now, /*primary_used_percent*/ 0.0);
+        let raw = sample_raw_snapshot(now, /*primary_used_percent*/ 0);
         record_rate_limit_snapshot_with_raw(
             dir.path(),
             "acct-1",
@@ -1217,8 +1220,8 @@ mod tests {
     fn quota_window_state_detects_started_once_delta_or_usage_moves() -> anyhow::Result<()> {
         let dir = tempdir()?;
         let now = fixed_now();
-        let snapshot = sample_snapshot(now, 0.0);
-        let mut raw = sample_raw_snapshot(now, 0);
+        let snapshot = sample_snapshot(now, /*primary_used_percent*/ 0.0);
+        let mut raw = sample_raw_snapshot(now, /*primary_used_percent*/ 0);
         raw.primary = Some(RawRateLimitWindowSnapshot {
             used_percent: 1,
             limit_window_seconds: 5 * 60 * 60,
@@ -1251,8 +1254,8 @@ mod tests {
     fn quota_window_state_detects_reset_passed_from_cache() -> anyhow::Result<()> {
         let dir = tempdir()?;
         let now = fixed_now();
-        let snapshot = sample_snapshot(now, 0.0);
-        let mut raw = sample_raw_snapshot(now, 0);
+        let snapshot = sample_snapshot(now, /*primary_used_percent*/ 0.0);
+        let mut raw = sample_raw_snapshot(now, /*primary_used_percent*/ 0);
         raw.secondary = Some(RawRateLimitWindowSnapshot {
             used_percent: 0,
             limit_window_seconds: 7 * 24 * 60 * 60,
@@ -1285,8 +1288,8 @@ mod tests {
     fn recent_touch_attempt_cools_down_auto_start() -> anyhow::Result<()> {
         let dir = tempdir()?;
         let now = fixed_now();
-        let snapshot = sample_snapshot(now, 0.0);
-        let raw = sample_raw_snapshot(now, 0);
+        let snapshot = sample_snapshot(now, /*primary_used_percent*/ 0.0);
+        let raw = sample_raw_snapshot(now, /*primary_used_percent*/ 0);
         record_rate_limit_snapshot_with_raw(
             dir.path(),
             "acct-1",
@@ -1321,8 +1324,8 @@ mod tests {
     fn confirmed_touch_suppresses_repeat_for_same_reset_boundary() -> anyhow::Result<()> {
         let dir = tempdir()?;
         let now = fixed_now();
-        let snapshot = sample_snapshot(now, 0.0);
-        let raw = sample_raw_snapshot(now, 0);
+        let snapshot = sample_snapshot(now, /*primary_used_percent*/ 0.0);
+        let raw = sample_raw_snapshot(now, /*primary_used_percent*/ 0);
         record_rate_limit_snapshot_with_raw(
             dir.path(),
             "acct-1",

@@ -1588,7 +1588,13 @@ fn test_build_specs_hide_autoresearch_tools_by_default() {
         windows_sandbox_level: WindowsSandboxLevel::Disabled,
     });
 
-    let (tools, _) = build_specs(&tools_config, None, None, &[]).build();
+    let (tools, _) = build_specs(
+        &tools_config,
+        /*mcp_tools*/ None,
+        /*app_tools*/ None,
+        &[],
+    )
+    .build();
 
     assert_lacks_tool_name(&tools, "autoresearch_init");
     assert_lacks_tool_name(&tools, "autoresearch_run");
@@ -1611,9 +1617,15 @@ fn test_build_specs_can_enable_autoresearch_tools() {
         sandbox_policy: &SandboxPolicy::DangerFullAccess,
         windows_sandbox_level: WindowsSandboxLevel::Disabled,
     })
-    .with_slop_fork_autoresearch_tools(true);
+    .with_slop_fork_autoresearch_tools(/*enabled*/ true);
 
-    let (tools, _) = build_specs(&tools_config, None, None, &[]).build();
+    let (tools, _) = build_specs(
+        &tools_config,
+        /*mcp_tools*/ None,
+        /*app_tools*/ None,
+        &[],
+    )
+    .build();
 
     assert_contains_tool_names(
         &tools,

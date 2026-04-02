@@ -2061,7 +2061,7 @@ mod tests {
         )?;
         registry.record_error(&entry.runtime_id, "boom".to_string())?;
 
-        assert!(registry.set_enabled(&entry.runtime_id, true)?);
+        assert!(registry.set_enabled(&entry.runtime_id, /*enabled*/ true)?);
         assert!(
             registry
                 .list_entries()

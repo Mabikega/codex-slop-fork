@@ -2905,7 +2905,7 @@ mod tests {
                 AutoresearchMode::Optimize,
                 workdir.path().to_path_buf(),
                 sample_workspace(workdir.path()),
-                None,
+                /*max_runs*/ None,
                 Local::now(),
             )
             .expect("start");
@@ -4395,7 +4395,7 @@ mod tests {
         AutoresearchResearchWorkspace::prepare(codex_home.path(), "thread-1", workdir.path())
             .expect("prepare research workspace");
         let mut journal = AutoresearchJournal::load(workdir.path()).expect("load journal");
-        seed_synthesis_ready_portfolio(&mut journal, false);
+        seed_synthesis_ready_portfolio(&mut journal, /*include_existing_synthesis*/ false);
 
         let mut runtime = AutoresearchRuntime::load(codex_home.path(), "thread-1").expect("load");
         runtime
@@ -4480,7 +4480,7 @@ mod tests {
         AutoresearchResearchWorkspace::prepare(codex_home.path(), "thread-1", workdir.path())
             .expect("prepare research workspace");
         let mut journal = AutoresearchJournal::load(workdir.path()).expect("load journal");
-        seed_synthesis_ready_portfolio(&mut journal, true);
+        seed_synthesis_ready_portfolio(&mut journal, /*include_existing_synthesis*/ true);
 
         let mut runtime = AutoresearchRuntime::load(codex_home.path(), "thread-1").expect("load");
         runtime
@@ -4545,7 +4545,7 @@ mod tests {
         AutoresearchResearchWorkspace::prepare(codex_home.path(), "thread-1", workdir.path())
             .expect("prepare research workspace");
         let mut journal = AutoresearchJournal::load(workdir.path()).expect("load journal");
-        seed_synthesis_ready_portfolio(&mut journal, false);
+        seed_synthesis_ready_portfolio(&mut journal, /*include_existing_synthesis*/ false);
 
         let mut runtime = AutoresearchRuntime::load(codex_home.path(), "thread-1").expect("load");
         runtime
@@ -4978,7 +4978,7 @@ mod tests {
         AutoresearchResearchWorkspace::prepare(codex_home.path(), "thread-1", workdir.path())
             .expect("prepare research workspace");
         let mut journal = AutoresearchJournal::load(workdir.path()).expect("load journal");
-        seed_synthesis_ready_portfolio(&mut journal, false);
+        seed_synthesis_ready_portfolio(&mut journal, /*include_existing_synthesis*/ false);
 
         let mut runtime = AutoresearchRuntime::load(codex_home.path(), "thread-1").expect("load");
         runtime
@@ -5024,7 +5024,7 @@ mod tests {
         AutoresearchResearchWorkspace::prepare(codex_home.path(), "thread-1", workdir.path())
             .expect("prepare research workspace");
         let mut journal = AutoresearchJournal::load(workdir.path()).expect("load journal");
-        seed_synthesis_ready_portfolio(&mut journal, false);
+        seed_synthesis_ready_portfolio(&mut journal, /*include_existing_synthesis*/ false);
 
         let mut runtime = AutoresearchRuntime::load(codex_home.path(), "thread-1").expect("load");
         runtime
