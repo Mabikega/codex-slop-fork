@@ -367,6 +367,21 @@ pub fn record_rate_limit_snapshot_with_raw(
     observed_at: DateTime<Utc>,
 ) -> std::io::Result<()> {
     update_snapshot_file(codex_home, account_id, plan, |stored| {
+        let previous_reset_at = [
+            stored.five_hour_window.reset_at,
+            stored.weekly_window.reset_at,
+            stored.primary_next_reset_at,
+            stored.secondary_next_reset_at,
+        ]
+        .into_iter()
+        .flatten()
+        .max();
+        let reset_tolerance = Duration::seconds(RESET_PASSED_TOLERANCE_SECS);
+        if stored.last_usage_limit_hit_at.is_some()
+            && previous_reset_at.is_some_and(|reset_at| observed_at + reset_tolerance >= reset_at)
+        {
+            stored.last_usage_limit_hit_at = None;
+        }
         stored.observed_at = Some(observed_at);
         stored.snapshot = Some(snapshot.clone());
         stored.five_hour_window = stored_quota_window(
@@ -913,6 +928,33 @@ mod tests {
                 last_usage_limit_hit_at: Some(now),
             }
         );
+        Ok(())
+    }
+
+    #[test]
+    fn fresh_snapshot_clears_expired_usage_limit_hint() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let hint_at = fixed_now();
+        let hinted_reset_at = hint_at + Duration::minutes(45);
+        record_usage_limit_hint(
+            dir.path(),
+            "acct-1",
+            Some("team"),
+            Some(hinted_reset_at),
+            hint_at,
+        )?;
+
+        let refreshed_at = hinted_reset_at + Duration::minutes(1);
+        record_rate_limit_snapshot(
+            dir.path(),
+            "acct-1",
+            Some("team"),
+            &sample_snapshot(refreshed_at, /*primary_used_percent*/ 0.0),
+            refreshed_at,
+        )?;
+
+        let loaded = load_rate_limit_snapshot(dir.path(), "acct-1")?.expect("snapshot");
+        assert_eq!(loaded.last_usage_limit_hit_at, None);
         Ok(())
     }
 

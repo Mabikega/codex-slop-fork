@@ -299,6 +299,7 @@ mod tests {
     use super::*;
     use crate::auth::AuthDotJson;
     use crate::slop_fork::account_rate_limits::record_rate_limit_snapshot;
+    use crate::slop_fork::account_rate_limits::record_usage_limit_hint;
     use crate::slop_fork::auth_accounts::upsert_account;
     use codex_login::token_data::IdTokenInfo;
     use codex_login::token_data::TokenData;
@@ -600,6 +601,49 @@ mod tests {
 
         // Account C has the lowest usage (0%) and should be selected.
         assert_eq!(next.id, account_c);
+        Ok(())
+    }
+
+    #[test]
+    fn switches_to_account_after_refreshed_snapshot_clears_expired_limit_hint() -> anyhow::Result<()>
+    {
+        let dir = tempdir()?;
+        let hint_at = fixed_now();
+        let refreshed_at = hint_at + Duration::hours(1);
+        let hinted_reset_at = hint_at + Duration::minutes(45);
+        let auth_a = chatgpt_auth("acct-a", "a@example.com");
+        let auth_b = chatgpt_auth("acct-b", "b@example.com");
+        let account_b = upsert_account(dir.path(), &auth_b)?.expect("account b");
+        upsert_account(dir.path(), &auth_a)?;
+        crate::auth::save_auth(dir.path(), &auth_a, AuthCredentialsStoreMode::File)?;
+
+        record_usage_limit_hint(
+            dir.path(),
+            &account_b,
+            Some("pro"),
+            Some(hinted_reset_at),
+            hint_at,
+        )?;
+        record_rate_limit_snapshot(
+            dir.path(),
+            &account_b,
+            Some("pro"),
+            &sample_snapshot(refreshed_at, /*used_percent*/ 0.0),
+            refreshed_at,
+        )?;
+
+        let next = switch_active_account_on_rate_limit(
+            dir.path(),
+            AuthCredentialsStoreMode::File,
+            &mut RateLimitSwitchState::default(),
+            /*allow_api_key_fallback*/ false,
+            /*failed_auth*/ None,
+            /*blocked_until*/ None,
+            refreshed_at,
+        )?
+        .expect("should switch after refreshed snapshot clears expired limit hint");
+
+        assert_eq!(next.id, account_b);
         Ok(())
     }
 
