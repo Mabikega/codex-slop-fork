@@ -40,10 +40,12 @@ This section describes the actual structure of this fork, not generic upstream C
   - `autoresearch_command.rs`
   - `auto_command.rs`
   - `external_auth.rs`
+  - `app_server.rs`
   - `event.rs`
   - `login_settings_view.rs`
   - `pilot_command.rs`
   - `rate_limit_poller.rs`
+  - `runtime_event.rs`
   - `schedule_parser.rs`
   - `status_line.rs`
   - `ui_automation.rs`
@@ -174,6 +176,7 @@ When bringing new upstream changes into the fork:
 - It is good to adopt those better upstream seams and adjust the fork implementation accordingly, but only if the fork features still work as intended after the change.
 - During every upstream merge, explicitly review whether any fork feature has become partially or fully redundant because upstream gained a very similar capability. If so, prefer deleting or shrinking the fork overlay instead of preserving older fork code out of habit.
 - After the merge or replay, verify that all fork features still work as intended, that fork logic still lives under `slop_fork/`, that upstream hotspots only contain thin delegation hooks, and that generated docs or schemas are regenerated only when the fork feature truly changes them.
+- Do not treat "it builds" or "tests passed" as sufficient proof after an upstream merge. Double-check and triple-check that the actual fork features still work end to end in the merged tree, especially around thin hooks, event wiring, turn lifecycle handling, account flows, automation, Autoresearch, Pilot, and any other fork-owned behavior that can silently lose call sites during an upstream sync.
 - When compile failures appear after a release rebase, first suspect mixed-version state before assuming the fork feature itself is wrong.
 
 ## Conflict Avoidance Rules
@@ -250,18 +253,21 @@ Before finalizing a fork change, check:
 - Is persisted fork state kept in fork-specific files and directories?
 - Would the next similar fork feature likely fit the same seam with another small local change?
 - Would this diff be likely to merge cleanly on top of a newer upstream Codex version?
+- For upstream merges specifically: did we double-check and triple-check that every important fork feature still works in the live code paths, not only in tests, helper code, or replay-only paths?
 
 If the answer to any of those is no, refactor before finalizing.
 
 ## Review Workflow
 
-After each larger fork change, run an explicit post-implementation review pass with a `gpt-5.4-xhigh` subagent.
+After each larger fork change, run an explicit post-implementation review pass by creating a sub-agent with `fork_context=false`, `model=gpt-5.4`, and `reasoning_effort=high`.
+
+Sub-agents can take a long time to run. Always wait for them to finish and return their results before deciding the review is complete.
 
 The required workflow is:
 
 - implement the change
 - run the normal local verification for the affected crate or area
-- spawn a `gpt-5.4-xhigh` subagent focused only on the changed code
+- create the sub-agent with `fork_context=false`, `model=gpt-5.4`, and `reasoning_effort=high`, focused only on the changed code
 - ask it to hunt for bugs, regressions, mergeability risks, code quality problems, and whether the fork changes stay out of the way of original/upstream code so future merges remain low-conflict
 - let it report findings first
 - fix the reported issues

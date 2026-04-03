@@ -1,4 +1,10 @@
 use super::*;
+use codex_app_server_protocol::AutomationDefinition as AppServerAutomationDefinition;
+use codex_app_server_protocol::AutomationLimits as AppServerAutomationLimits;
+use codex_app_server_protocol::AutomationMessageSource as AppServerAutomationMessageSource;
+use codex_app_server_protocol::AutomationPolicyCommand as AppServerAutomationPolicyCommand;
+use codex_app_server_protocol::AutomationScope as AppServerAutomationScope;
+use codex_app_server_protocol::AutomationTrigger as AppServerAutomationTrigger;
 
 #[derive(Clone, Copy)]
 enum AutomationCreateInitialRun {
@@ -20,6 +26,35 @@ impl SlopForkUi {
         trimmed: &str,
         last_user_message: Option<&str>,
     ) -> Vec<SlopForkUiEffect> {
+        if ctx.remote_app_server {
+            let command = match parse_auto_command(
+                trimmed,
+                AutomationScope::Session,
+                Local::now(),
+                last_user_message,
+            ) {
+                Ok(command) => command,
+                Err(message) => return vec![SlopForkUiEffect::AddErrorMessage(message)],
+            };
+            return match command {
+                AutoCommand::Help => self.show_auto_usage(),
+                AutoCommand::List => self.remote_auto_status_output(),
+                AutoCommand::Show { runtime_id } => self.remote_auto_show_output(&runtime_id),
+                AutoCommand::Pause { runtime_id } => {
+                    self.remote_auto_set_enabled(ctx, &runtime_id, /*enabled*/ false)
+                }
+                AutoCommand::Resume { runtime_id } => {
+                    self.remote_auto_set_enabled(ctx, &runtime_id, /*enabled*/ true)
+                }
+                AutoCommand::Remove { runtime_id } => self.remote_auto_remove(ctx, &runtime_id),
+                AutoCommand::Create {
+                    scope,
+                    spec,
+                    note,
+                    send_now,
+                } => self.remote_auto_create(ctx, scope, spec, note, send_now),
+            };
+        }
         let fork_config = match load_slop_fork_config(&ctx.codex_home) {
             Ok(config) => config,
             Err(err) => {
@@ -75,6 +110,9 @@ impl SlopForkUi {
         ctx: &SlopForkUiContext,
         now: DateTime<Local>,
     ) -> Vec<SlopForkUiEffect> {
+        if ctx.remote_app_server {
+            return Vec::new();
+        }
         let Ok(fork_config) = load_slop_fork_config(&ctx.codex_home) else {
             return Vec::new();
         };
@@ -98,6 +136,9 @@ impl SlopForkUi {
         ctx: &SlopForkUiContext,
         now: DateTime<Local>,
     ) -> Vec<SlopForkUiEffect> {
+        if ctx.remote_app_server {
+            return Vec::new();
+        }
         let Ok(fork_config) = load_slop_fork_config(&ctx.codex_home) else {
             return Vec::new();
         };
@@ -123,6 +164,9 @@ impl SlopForkUi {
         last_agent_message: &str,
         from_replay: bool,
     ) -> Vec<SlopForkUiEffect> {
+        if ctx.remote_app_server {
+            return Vec::new();
+        }
         if from_replay || ctx.thread_id.is_none() {
             return Vec::new();
         }
@@ -528,6 +572,97 @@ impl SlopForkUi {
         }
     }
 
+    fn remote_auto_create(
+        &self,
+        ctx: &SlopForkUiContext,
+        scope: AutomationScope,
+        spec: AutomationSpec,
+        note: Option<String>,
+        send_now: bool,
+    ) -> Vec<SlopForkUiEffect> {
+        let Some(thread_id) = ctx.thread_id.as_ref() else {
+            return vec![SlopForkUiEffect::AddErrorMessage(
+                "Automations require an active session.".to_string(),
+            )];
+        };
+        let mut hint = note.unwrap_or_else(|| {
+            "The connected app-server owns automation state and will broadcast the updated entry."
+                .to_string()
+        });
+        if send_now {
+            hint.push_str(
+                " The first run will still be decided by the server-owned automation policy.",
+            );
+        }
+        vec![
+            SlopForkUiEffect::AddInfoMessage {
+                message: "Remote automation create requested.".to_string(),
+                hint: Some(hint),
+            },
+            SlopForkUiEffect::UpsertRemoteAutomation {
+                thread_id: thread_id.clone(),
+                scope: automation_scope_to_remote(scope),
+                automation: automation_definition_to_remote(spec),
+            },
+        ]
+    }
+
+    fn remote_auto_set_enabled(
+        &self,
+        ctx: &SlopForkUiContext,
+        runtime_id: &str,
+        enabled: bool,
+    ) -> Vec<SlopForkUiEffect> {
+        let Some(thread_id) = ctx.thread_id.as_ref() else {
+            return vec![SlopForkUiEffect::AddErrorMessage(
+                "Automations require an active session.".to_string(),
+            )];
+        };
+        vec![
+            SlopForkUiEffect::AddInfoMessage {
+                message: if enabled {
+                    format!("Requested remote automation resume for {runtime_id}.")
+                } else {
+                    format!("Requested remote automation pause for {runtime_id}.")
+                },
+                hint: Some(
+                    "The remote app-server currently exposes automation enable/disable controls for this path."
+                        .to_string(),
+                ),
+            },
+            SlopForkUiEffect::SetRemoteAutomationEnabled {
+                thread_id: thread_id.clone(),
+                runtime_id: runtime_id.to_string(),
+                enabled,
+            },
+        ]
+    }
+
+    fn remote_auto_remove(
+        &self,
+        ctx: &SlopForkUiContext,
+        runtime_id: &str,
+    ) -> Vec<SlopForkUiEffect> {
+        let Some(thread_id) = ctx.thread_id.as_ref() else {
+            return vec![SlopForkUiEffect::AddErrorMessage(
+                "Automations require an active session.".to_string(),
+            )];
+        };
+        vec![
+            SlopForkUiEffect::AddInfoMessage {
+                message: format!("Requested remote automation removal for {runtime_id}."),
+                hint: Some(
+                    "The connected app-server will broadcast the deletion if it succeeds."
+                        .to_string(),
+                ),
+            },
+            SlopForkUiEffect::DeleteRemoteAutomation {
+                thread_id: thread_id.clone(),
+                runtime_id: runtime_id.to_string(),
+            },
+        ]
+    }
+
     fn spawn_automation_policy_task(
         &mut self,
         ctx: &SlopForkUiContext,
@@ -589,6 +724,11 @@ impl SlopForkUi {
         runtime_id_to_update: &str,
         decision: AutomationPolicyDecision,
     ) -> Vec<SlopForkUiEffect> {
+        if ctx.remote_app_server {
+            self.pending_automation_policies
+                .remove(&(thread_id.to_string(), runtime_id_to_update.to_string()));
+            return Vec::new();
+        }
         self.pending_automation_policies
             .remove(&(thread_id.to_string(), runtime_id_to_update.to_string()));
         if ctx.thread_id.as_deref() != Some(thread_id) {
@@ -633,6 +773,11 @@ impl SlopForkUi {
         runtime_id_to_update: &str,
         error: String,
     ) -> Vec<SlopForkUiEffect> {
+        if ctx.remote_app_server {
+            self.pending_automation_policies
+                .remove(&(thread_id.to_string(), runtime_id_to_update.to_string()));
+            return Vec::new();
+        }
         self.pending_automation_policies
             .remove(&(thread_id.to_string(), runtime_id_to_update.to_string()));
         if ctx.thread_id.as_deref() != Some(thread_id) {
@@ -655,6 +800,215 @@ impl SlopForkUi {
             prompt,
             suppress_legacy_notify: fork_config.automation_disable_notify_script,
             suppress_terminal_notification: fork_config.automation_disable_terminal_notifications,
+        }
+    }
+
+    fn remote_auto_status_output(&self) -> Vec<SlopForkUiEffect> {
+        if !self.remote_automation_state_loaded {
+            return vec![SlopForkUiEffect::AddInfoMessage {
+                message: "Automation remote status is unavailable.".to_string(),
+                hint: Some(
+                    "Wait for the server to send automation state before requesting status."
+                        .to_string(),
+                ),
+            }];
+        }
+        if self.remote_automations.is_empty() {
+            return vec![SlopForkUiEffect::AddInfoMessage {
+                message: "No automations configured.".to_string(),
+                hint: Some(
+                    "Remote automation state is loaded from the connected app-server.".to_string(),
+                ),
+            }];
+        }
+
+        let mut lines = vec![
+            "Automations".bold().into(),
+            "Server-owned follow-up rules for this session."
+                .dim()
+                .into(),
+            "".into(),
+        ];
+        for entry in &self.remote_automations {
+            let status = if entry.stopped {
+                "stopped"
+            } else if entry.paused {
+                "paused"
+            } else if entry.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            };
+            let trigger = remote_automation_trigger_label(&entry.trigger);
+            let source = remote_automation_source_label(&entry.message_source);
+            lines.push(Line::from(vec![
+                entry.runtime_id.clone().cyan().bold(),
+                " ".into(),
+                format!("[{status}]").dim(),
+                " ".into(),
+                trigger.into(),
+            ]));
+            lines.push(Line::from(format!(
+                "  source: {source} | runs: {}",
+                entry.run_count
+            )));
+            if let Some(last_error) = entry.last_error.as_deref() {
+                lines.push(format!("  last error: {last_error}").red().into());
+            }
+        }
+        vec![SlopForkUiEffect::AddPlainHistoryLines(lines)]
+    }
+
+    fn remote_auto_show_output(&self, runtime_id_to_show: &str) -> Vec<SlopForkUiEffect> {
+        if !self.remote_automation_state_loaded {
+            return vec![SlopForkUiEffect::AddInfoMessage {
+                message: "Automation remote status is unavailable.".to_string(),
+                hint: Some(
+                    "Wait for the server to send automation state before requesting details."
+                        .to_string(),
+                ),
+            }];
+        }
+        let Some(entry) = self
+            .remote_automations
+            .iter()
+            .find(|entry| entry.runtime_id == runtime_id_to_show)
+        else {
+            return vec![SlopForkUiEffect::AddErrorMessage(format!(
+                "No automation with id {runtime_id_to_show}."
+            ))];
+        };
+
+        let mut lines = vec![
+            entry.runtime_id.clone().cyan().bold().into(),
+            format!("Scope: {}", remote_automation_scope_label(entry.scope)).into(),
+            format!("Enabled: {}", entry.enabled).into(),
+            format!("Paused: {}", entry.paused).into(),
+            format!("Stopped: {}", entry.stopped).into(),
+            format!("Runs: {}", entry.run_count).into(),
+        ];
+        lines.push(
+            format!(
+                "Trigger: {}",
+                remote_automation_trigger_label(&entry.trigger)
+            )
+            .into(),
+        );
+        match &entry.message_source {
+            AppServerAutomationMessageSource::Static { message } => {
+                lines.push(format!("Message: {message}").into());
+            }
+            AppServerAutomationMessageSource::RoundRobin { messages } => {
+                lines.push("Messages:".into());
+                lines.extend(
+                    messages
+                        .iter()
+                        .map(|message| Line::from(format!("  - {message}"))),
+                );
+            }
+        }
+        if let Some(next_fire_at) = entry.next_fire_at {
+            lines.push(format!("Next fire: {next_fire_at}").into());
+        }
+        if let Some(max_runs) = entry.limits.max_runs {
+            lines.push(format!("Max runs: {max_runs}").into());
+        }
+        if let Some(until_at) = entry.limits.until_at {
+            lines.push(format!("Until: {until_at}").into());
+        }
+        if let Some(policy_command) = entry.policy_command.as_ref() {
+            lines.push(format!("Policy: {}", policy_command.command.join(" ")).into());
+        }
+        if let Some(last_error) = entry.last_error.as_deref() {
+            lines.push(format!("Last error: {last_error}").red().into());
+        }
+        vec![SlopForkUiEffect::AddPlainHistoryLines(lines)]
+    }
+}
+
+fn remote_automation_scope_label(scope: AppServerAutomationScope) -> &'static str {
+    match scope {
+        AppServerAutomationScope::Session => "session",
+        AppServerAutomationScope::Repo => "repo",
+        AppServerAutomationScope::Global => "global",
+    }
+}
+
+fn remote_automation_trigger_label(trigger: &AppServerAutomationTrigger) -> String {
+    match trigger {
+        AppServerAutomationTrigger::TurnCompleted => "on-complete".to_string(),
+        AppServerAutomationTrigger::Interval { every_seconds } => {
+            format!(
+                "every {}",
+                compact_duration_label(Duration::from_secs(*every_seconds))
+            )
+        }
+        AppServerAutomationTrigger::Cron { expression } => format!("cron {expression}"),
+    }
+}
+
+fn remote_automation_source_label(message_source: &AppServerAutomationMessageSource) -> String {
+    match message_source {
+        AppServerAutomationMessageSource::Static { message } => message.clone(),
+        AppServerAutomationMessageSource::RoundRobin { messages } => {
+            format!("round-robin {} messages", messages.len())
+        }
+    }
+}
+
+fn automation_scope_to_remote(scope: AutomationScope) -> AppServerAutomationScope {
+    match scope {
+        AutomationScope::Session => AppServerAutomationScope::Session,
+        AutomationScope::Repo => AppServerAutomationScope::Repo,
+        AutomationScope::Global => AppServerAutomationScope::Global,
+    }
+}
+
+fn automation_definition_to_remote(spec: AutomationSpec) -> AppServerAutomationDefinition {
+    AppServerAutomationDefinition {
+        id: (!spec.id.is_empty()).then_some(spec.id),
+        enabled: spec.enabled,
+        trigger: automation_trigger_to_remote(spec.trigger),
+        message_source: automation_message_source_to_remote(spec.message_source),
+        limits: AppServerAutomationLimits {
+            max_runs: spec.limits.max_runs,
+            until_at: spec.limits.until_at,
+        },
+        policy_command: spec.policy_command.map(|policy_command| {
+            AppServerAutomationPolicyCommand {
+                command: policy_command.command,
+                cwd: policy_command.cwd,
+                timeout_ms: policy_command.timeout_ms,
+            }
+        }),
+    }
+}
+
+fn automation_trigger_to_remote(
+    trigger: codex_core::slop_fork::automation::AutomationTrigger,
+) -> AppServerAutomationTrigger {
+    match trigger {
+        codex_core::slop_fork::automation::AutomationTrigger::TurnCompleted => {
+            AppServerAutomationTrigger::TurnCompleted
+        }
+        codex_core::slop_fork::automation::AutomationTrigger::Interval { every_seconds } => {
+            AppServerAutomationTrigger::Interval { every_seconds }
+        }
+        codex_core::slop_fork::automation::AutomationTrigger::Cron { expression } => {
+            AppServerAutomationTrigger::Cron { expression }
+        }
+    }
+}
+
+fn automation_message_source_to_remote(
+    message_source: codex_core::slop_fork::automation::AutomationMessageSource,
+) -> AppServerAutomationMessageSource {
+    match message_source {
+        codex_core::slop_fork::automation::AutomationMessageSource::Static { message } => {
+            AppServerAutomationMessageSource::Static { message }
+        }
+        codex_core::slop_fork::automation::AutomationMessageSource::RoundRobin { messages } => {
+            AppServerAutomationMessageSource::RoundRobin { messages }
         }
     }
 }

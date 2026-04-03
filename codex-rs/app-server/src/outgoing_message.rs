@@ -659,6 +659,12 @@ mod tests {
     use codex_app_server_protocol::AutomationTrigger;
     use codex_app_server_protocol::AutomationUpdateType;
     use codex_app_server_protocol::AutomationUpdatedNotification;
+    use codex_app_server_protocol::AutoresearchCycleKind;
+    use codex_app_server_protocol::AutoresearchMode;
+    use codex_app_server_protocol::AutoresearchRun;
+    use codex_app_server_protocol::AutoresearchStatus;
+    use codex_app_server_protocol::AutoresearchUpdateType;
+    use codex_app_server_protocol::AutoresearchUpdatedNotification;
     use codex_app_server_protocol::ConfigWarningNotification;
     use codex_app_server_protocol::DynamicToolCallParams;
     use codex_app_server_protocol::FileChangeRequestApprovalParams;
@@ -923,6 +929,79 @@ mod tests {
                         "lastAgentMessage": "Updated the scheduler and verified the tests."
                     },
                     "message": "Pilot completed a cycle."
+                },
+            }),
+            serde_json::to_value(jsonrpc_notification)
+                .expect("ensure the notification serializes correctly"),
+            "ensure the notification serializes correctly"
+        );
+    }
+
+    #[test]
+    fn verify_autoresearch_updated_notification_serialization() {
+        let notification =
+            ServerNotification::AutoresearchUpdated(AutoresearchUpdatedNotification {
+                thread_id: "thr_123".to_string(),
+                update_type: AutoresearchUpdateType::CycleStarted,
+                run: Some(AutoresearchRun {
+                    goal: "map OCR hypotheses".to_string(),
+                    mode: AutoresearchMode::Scientist,
+                    status: AutoresearchStatus::Running,
+                    started_at: 100,
+                    updated_at: 150,
+                    max_runs: Some(12),
+                    iteration_count: 3,
+                    discovery_count: 1,
+                    pending_cycle_kind: None,
+                    active_cycle_kind: Some(AutoresearchCycleKind::Research),
+                    active_turn_id: Some("turn_123".to_string()),
+                    last_submitted_turn_id: Some("turn_123".to_string()),
+                    wrap_up_requested: false,
+                    stop_requested_at: None,
+                    last_error: None,
+                    status_message: Some("Autoresearch started a research cycle.".to_string()),
+                    last_progress_at: Some(150),
+                    last_cycle_completed_at: Some(120),
+                    last_discovery_completed_at: Some(110),
+                    last_cycle_summary: Some("Selected the next OCR family.".to_string()),
+                    last_agent_message: Some(
+                        "Selected the next OCR family and started evaluating it.".to_string(),
+                    ),
+                }),
+                message: Some("Autoresearch started a research cycle.".to_string()),
+            });
+
+        let jsonrpc_notification = OutgoingMessage::AppServerNotification(notification);
+        assert_eq!(
+            json!({
+                "method": "autoresearch/updated",
+                "params": {
+                    "threadId": "thr_123",
+                    "updateType": "cycleStarted",
+                    "run": {
+                        "goal": "map OCR hypotheses",
+                        "mode": "scientist",
+                        "status": "running",
+                        "startedAt": 100,
+                        "updatedAt": 150,
+                        "maxRuns": 12,
+                        "iterationCount": 3,
+                        "discoveryCount": 1,
+                        "pendingCycleKind": null,
+                        "activeCycleKind": "research",
+                        "activeTurnId": "turn_123",
+                        "lastSubmittedTurnId": "turn_123",
+                        "wrapUpRequested": false,
+                        "stopRequestedAt": null,
+                        "lastError": null,
+                        "statusMessage": "Autoresearch started a research cycle.",
+                        "lastProgressAt": 150,
+                        "lastCycleCompletedAt": 120,
+                        "lastDiscoveryCompletedAt": 110,
+                        "lastCycleSummary": "Selected the next OCR family.",
+                        "lastAgentMessage": "Selected the next OCR family and started evaluating it."
+                    },
+                    "message": "Autoresearch started a research cycle."
                 },
             }),
             serde_json::to_value(jsonrpc_notification)

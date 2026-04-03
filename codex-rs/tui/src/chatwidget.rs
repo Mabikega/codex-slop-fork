@@ -62,9 +62,18 @@ use crate::slop_fork::LoginPopupKind;
 #[cfg(test)]
 use crate::slop_fork::PendingChatgptLogin;
 use crate::slop_fork::SlopForkEvent;
+use crate::slop_fork::SlopForkRuntimeEvent;
 use crate::slop_fork::SlopForkUi;
 use crate::slop_fork::SlopForkUiContext;
 use crate::slop_fork::SlopForkUiEffect;
+use crate::slop_fork::runtime_event_automation_updated;
+use crate::slop_fork::runtime_event_autoresearch_updated;
+use crate::slop_fork::runtime_event_controller_turn_started;
+use crate::slop_fork::runtime_event_failed_controller_turn;
+#[cfg(test)]
+use crate::slop_fork::runtime_event_from_turn_abort_reason;
+use crate::slop_fork::runtime_event_interrupted_controller_turn;
+use crate::slop_fork::runtime_event_pilot_updated;
 use crate::slop_fork::should_spawn_rate_limit_poller;
 use crate::slop_fork::spawn_external_auth_sync_poller;
 use crate::slop_fork::spawn_rate_limit_poller;
@@ -99,6 +108,7 @@ use codex_app_server_protocol::ToolRequestUserInputParams;
 use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnPlanStepStatus;
+use codex_app_server_protocol::TurnStartedNotification;
 use codex_app_server_protocol::TurnStatus;
 use codex_chatgpt::connectors;
 use codex_core::AuthManager;
@@ -562,6 +572,8 @@ pub(crate) fn get_limits_duration(windows_minutes: i64) -> String {
 /// Common initialization parameters shared by all `ChatWidget` constructors.
 pub(crate) struct ChatWidgetInit {
     pub(crate) config: Config,
+    pub(crate) app_server_owns_slop_fork_follow_ups: bool,
+    pub(crate) is_remote_app_server: bool,
     pub(crate) frame_requester: FrameRequester,
     pub(crate) app_event_tx: AppEventSender,
     pub(crate) initial_user_message: Option<UserMessage>,
@@ -754,6 +766,8 @@ impl PendingGuardianReviewStatus {
 pub(crate) struct ChatWidget {
     app_event_tx: AppEventSender,
     codex_op_target: CodexOpTarget,
+    app_server_owns_slop_fork_follow_ups: bool,
+    is_remote_app_server: bool,
     bottom_pane: BottomPane,
     active_cell: Option<Box<dyn HistoryCell>>,
     /// Monotonic-ish counter used to invalidate transcript overlay caching.
@@ -2355,6 +2369,7 @@ impl ChatWidget {
         self.request_redraw();
     }
 
+    #[cfg(test)]
     fn on_task_complete(&mut self, last_agent_message: Option<String>, from_replay: bool) {
         self.on_task_complete_for_turn(/*turn_id*/ None, last_agent_message, from_replay);
     }
@@ -2464,7 +2479,8 @@ impl ChatWidget {
             })
             .unwrap_or_default();
         self.apply_slop_fork_effects(autoresearch_effects);
-        if !was_pilot_turn && !was_autoresearch_turn {
+        let should_run_local_follow_ups = !self.app_server_owns_slop_fork_follow_ups;
+        if !was_pilot_turn && !was_autoresearch_turn && should_run_local_follow_ups {
             let auto_effects = self.slop_fork_ui.on_turn_completed(
                 &slop_fork_context,
                 last_agent_message.as_deref().unwrap_or_default(),
@@ -4738,6 +4754,8 @@ impl ChatWidget {
     fn new_with_op_target(common: ChatWidgetInit, codex_op_target: CodexOpTarget) -> Self {
         let ChatWidgetInit {
             config,
+            app_server_owns_slop_fork_follow_ups,
+            is_remote_app_server,
             frame_requester,
             app_event_tx,
             initial_user_message,
@@ -4792,6 +4810,8 @@ impl ChatWidget {
             app_event_tx: app_event_tx.clone(),
             frame_requester: frame_requester.clone(),
             codex_op_target,
+            app_server_owns_slop_fork_follow_ups,
+            is_remote_app_server,
             bottom_pane: BottomPane::new(BottomPaneParams {
                 frame_requester,
                 app_event_tx,
@@ -5813,6 +5833,7 @@ impl ChatWidget {
             codex_home: self.config.codex_home.clone(),
             cwd: self.config.cwd.to_path_buf(),
             thread_id: self.thread_id.map(|thread_id| thread_id.to_string()),
+            remote_app_server: self.is_remote_app_server,
             task_running: self.bottom_pane.is_task_running(),
             chatgpt_base_url: self.config.chatgpt_base_url.clone(),
             auth_credentials_store_mode: self.config.cli_auth_credentials_store_mode,
@@ -5957,6 +5978,105 @@ impl ChatWidget {
                                 .to_string(),
                         )]);
                     }
+                }
+                SlopForkUiEffect::RefreshRemoteAutomationState { thread_id } => {
+                    self.app_event_tx.send(AppEvent::SlopFork(
+                        SlopForkEvent::FetchRemoteAutomationState { thread_id },
+                    ));
+                }
+                SlopForkUiEffect::RefreshRemoteAutoresearchState { thread_id } => {
+                    self.app_event_tx.send(AppEvent::SlopFork(
+                        SlopForkEvent::FetchRemoteAutoresearchState { thread_id },
+                    ));
+                }
+                SlopForkUiEffect::RefreshRemotePilotState { thread_id } => {
+                    self.app_event_tx.send(AppEvent::SlopFork(
+                        SlopForkEvent::FetchRemotePilotState { thread_id },
+                    ));
+                }
+                SlopForkUiEffect::StartRemotePilot {
+                    thread_id,
+                    goal,
+                    deadline_at,
+                } => {
+                    self.app_event_tx
+                        .send(AppEvent::SlopFork(SlopForkEvent::StartRemotePilot {
+                            thread_id,
+                            goal,
+                            deadline_at,
+                        }));
+                }
+                SlopForkUiEffect::ControlRemotePilot { thread_id, action } => {
+                    self.app_event_tx
+                        .send(AppEvent::SlopFork(SlopForkEvent::ControlRemotePilot {
+                            thread_id,
+                            action,
+                        }));
+                }
+                SlopForkUiEffect::StartRemoteAutoresearch {
+                    thread_id,
+                    goal,
+                    max_runs,
+                    mode,
+                } => {
+                    self.app_event_tx.send(AppEvent::SlopFork(
+                        SlopForkEvent::StartRemoteAutoresearch {
+                            thread_id,
+                            goal,
+                            max_runs,
+                            mode,
+                        },
+                    ));
+                }
+                SlopForkUiEffect::ControlRemoteAutoresearch {
+                    thread_id,
+                    action,
+                    focus,
+                } => {
+                    self.app_event_tx.send(AppEvent::SlopFork(
+                        SlopForkEvent::ControlRemoteAutoresearch {
+                            thread_id,
+                            action,
+                            focus,
+                        },
+                    ));
+                }
+                SlopForkUiEffect::UpsertRemoteAutomation {
+                    thread_id,
+                    scope,
+                    automation,
+                } => {
+                    self.app_event_tx.send(AppEvent::SlopFork(
+                        SlopForkEvent::UpsertRemoteAutomation {
+                            thread_id,
+                            scope,
+                            automation,
+                        },
+                    ));
+                }
+                SlopForkUiEffect::SetRemoteAutomationEnabled {
+                    thread_id,
+                    runtime_id,
+                    enabled,
+                } => {
+                    self.app_event_tx.send(AppEvent::SlopFork(
+                        SlopForkEvent::SetRemoteAutomationEnabled {
+                            thread_id,
+                            runtime_id,
+                            enabled,
+                        },
+                    ));
+                }
+                SlopForkUiEffect::DeleteRemoteAutomation {
+                    thread_id,
+                    runtime_id,
+                } => {
+                    self.app_event_tx.send(AppEvent::SlopFork(
+                        SlopForkEvent::DeleteRemoteAutomation {
+                            thread_id,
+                            runtime_id,
+                        },
+                    ));
                 }
                 SlopForkUiEffect::ScheduleFrameIn(delay) => {
                     self.frame_requester.schedule_frame_in(delay);
@@ -6780,11 +6900,8 @@ impl ChatWidget {
                     }
                 }
             }
-            ServerNotification::TurnStarted(_) => {
-                self.last_non_retry_error = None;
-                if !matches!(replay_kind, Some(ReplayKind::ResumeInitialMessages)) {
-                    self.on_task_started();
-                }
+            ServerNotification::TurnStarted(notification) => {
+                self.handle_turn_started_notification(notification, replay_kind);
             }
             ServerNotification::TurnCompleted(notification) => {
                 self.handle_turn_completed_notification(notification, replay_kind);
@@ -6794,6 +6911,29 @@ impl ChatWidget {
             }
             ServerNotification::ItemCompleted(notification) => {
                 self.handle_item_completed_notification(notification, replay_kind);
+            }
+            ServerNotification::AutomationUpdated(notification) => self
+                .apply_slop_fork_runtime_event(runtime_event_automation_updated(
+                    notification.update_type,
+                    &notification.runtime_id,
+                    notification.automation,
+                    notification.message,
+                    replay_kind.is_some(),
+                )),
+            ServerNotification::AutoresearchUpdated(notification) => self
+                .apply_slop_fork_runtime_event(runtime_event_autoresearch_updated(
+                    notification.update_type,
+                    notification.run,
+                    notification.message,
+                    replay_kind.is_some(),
+                )),
+            ServerNotification::PilotUpdated(notification) => {
+                self.apply_slop_fork_runtime_event(runtime_event_pilot_updated(
+                    notification.update_type,
+                    notification.run,
+                    notification.message,
+                    replay_kind.is_some(),
+                ))
             }
             ServerNotification::AgentMessageDelta(notification) => {
                 self.on_agent_message_delta(notification.delta);
@@ -6968,7 +7108,6 @@ impl ChatWidget {
             ServerNotification::ServerRequestResolved(_)
             | ServerNotification::AccountUpdated(_)
             | ServerNotification::AccountRateLimitsUpdated(_)
-            | ServerNotification::AutomationUpdated(_)
             | ServerNotification::ThreadStarted(_)
             | ServerNotification::ThreadStatusChanged(_)
             | ServerNotification::ThreadArchived(_)
@@ -6982,7 +7121,6 @@ impl ChatWidget {
             | ServerNotification::ContextCompacted(_)
             | ServerNotification::FuzzyFileSearchSessionUpdated(_)
             | ServerNotification::FuzzyFileSearchSessionCompleted(_)
-            | ServerNotification::PilotUpdated(_)
             | ServerNotification::ThreadRealtimeTranscriptUpdated(_)
             | ServerNotification::WindowsWorldWritableWarning(_)
             | ServerNotification::WindowsSandboxSetupCompleted(_)
@@ -7035,21 +7173,63 @@ impl ChatWidget {
         self.on_elicitation_request(request);
     }
 
+    fn handle_turn_started_notification(
+        &mut self,
+        notification: TurnStartedNotification,
+        replay_kind: Option<ReplayKind>,
+    ) {
+        self.last_non_retry_error = None;
+        if matches!(replay_kind, Some(ReplayKind::ResumeInitialMessages)) {
+            return;
+        }
+        let turn_id = notification.turn.id;
+        self.apply_slop_fork_runtime_event(runtime_event_controller_turn_started(
+            &turn_id,
+            replay_kind.is_some(),
+        ));
+        self.on_task_started();
+    }
+
     fn handle_turn_completed_notification(
         &mut self,
         notification: TurnCompletedNotification,
         replay_kind: Option<ReplayKind>,
     ) {
+        let last_agent_message = self.pending_turn_copyable_output.clone().or_else(|| {
+            notification
+                .turn
+                .items
+                .iter()
+                .rev()
+                .find_map(|item| match item {
+                    ThreadItem::AgentMessage { text, .. } if !text.trim().is_empty() => {
+                        Some(text.clone())
+                    }
+                    _ => None,
+                })
+        });
         match notification.turn.status {
             TurnStatus::Completed => {
                 self.last_non_retry_error = None;
-                self.on_task_complete(/*last_agent_message*/ None, replay_kind.is_some())
+                self.on_task_complete_for_turn(
+                    Some(&notification.turn.id),
+                    last_agent_message,
+                    replay_kind.is_some(),
+                )
             }
             TurnStatus::Interrupted => {
                 self.last_non_retry_error = None;
                 self.on_interrupted_turn(TurnAbortReason::Interrupted);
+                self.apply_slop_fork_runtime_event(runtime_event_interrupted_controller_turn(
+                    Some(notification.turn.id.as_str()),
+                    replay_kind.is_some(),
+                ));
             }
             TurnStatus::Failed => {
+                self.apply_slop_fork_runtime_event(runtime_event_failed_controller_turn(
+                    Some(notification.turn.id.as_str()),
+                    replay_kind.is_some(),
+                ));
                 if let Some(error) = notification.turn.error {
                     if self.last_non_retry_error.as_ref()
                         == Some(&(notification.turn.id.clone(), error.message.clone()))
@@ -7309,18 +7489,10 @@ impl ChatWidget {
             EventMsg::TurnStarted(event) => {
                 if !is_resume_initial_replay {
                     self.apply_turn_started_context_window(event.model_context_window);
-                    let effects = self.slop_fork_ui.on_pilot_turn_started(
-                        &self.slop_fork_context(),
+                    self.apply_slop_fork_runtime_event(runtime_event_controller_turn_started(
                         &event.turn_id,
                         from_replay,
-                    );
-                    self.apply_slop_fork_effects(effects);
-                    let effects = self.slop_fork_ui.on_autoresearch_turn_started(
-                        &self.slop_fork_context(),
-                        &event.turn_id,
-                        from_replay,
-                    );
-                    self.apply_slop_fork_effects(effects);
+                    ));
                     self.on_task_started();
                 }
             }
@@ -7365,57 +7537,30 @@ impl ChatWidget {
             EventMsg::TurnAborted(ev) => match ev.reason {
                 TurnAbortReason::Interrupted => {
                     self.on_interrupted_turn(ev.reason);
-                    let effects = self.slop_fork_ui.on_pilot_turn_aborted(
-                        &self.slop_fork_context(),
+                    self.apply_slop_fork_runtime_event(runtime_event_from_turn_abort_reason(
                         ev.turn_id.as_deref(),
-                        "Pilot turn interrupted by the user.",
+                        TurnAbortReason::Interrupted,
                         from_replay,
-                    );
-                    self.apply_slop_fork_effects(effects);
-                    let effects = self.slop_fork_ui.on_autoresearch_turn_aborted(
-                        &self.slop_fork_context(),
-                        ev.turn_id.as_deref(),
-                        "Autoresearch turn interrupted by the user.",
-                        from_replay,
-                    );
-                    self.apply_slop_fork_effects(effects);
+                    ));
                 }
                 TurnAbortReason::Replaced => {
                     self.submit_pending_steers_after_interrupt = false;
                     self.pending_steers.clear();
                     self.refresh_pending_input_preview();
                     self.on_error("Turn aborted: replaced by a new task".to_owned());
-                    let effects = self.slop_fork_ui.on_pilot_turn_aborted(
-                        &self.slop_fork_context(),
+                    self.apply_slop_fork_runtime_event(runtime_event_from_turn_abort_reason(
                         ev.turn_id.as_deref(),
-                        "Pilot turn was replaced by another task.",
+                        TurnAbortReason::Replaced,
                         from_replay,
-                    );
-                    self.apply_slop_fork_effects(effects);
-                    let effects = self.slop_fork_ui.on_autoresearch_turn_aborted(
-                        &self.slop_fork_context(),
-                        ev.turn_id.as_deref(),
-                        "Autoresearch turn was replaced by another task.",
-                        from_replay,
-                    );
-                    self.apply_slop_fork_effects(effects);
+                    ));
                 }
                 TurnAbortReason::ReviewEnded => {
                     self.on_interrupted_turn(ev.reason);
-                    let effects = self.slop_fork_ui.on_pilot_turn_aborted(
-                        &self.slop_fork_context(),
+                    self.apply_slop_fork_runtime_event(runtime_event_from_turn_abort_reason(
                         ev.turn_id.as_deref(),
-                        "Pilot turn ended because review mode finished.",
+                        TurnAbortReason::ReviewEnded,
                         from_replay,
-                    );
-                    self.apply_slop_fork_effects(effects);
-                    let effects = self.slop_fork_ui.on_autoresearch_turn_aborted(
-                        &self.slop_fork_context(),
-                        ev.turn_id.as_deref(),
-                        "Autoresearch turn ended because review mode finished.",
-                        from_replay,
-                    );
-                    self.apply_slop_fork_effects(effects);
+                    ));
                 }
             },
             EventMsg::PlanUpdate(update) => self.on_plan_update(update),
@@ -11027,6 +11172,86 @@ impl ChatWidget {
     pub(crate) fn clear_esc_backtrack_hint(&mut self) {
         self.bottom_pane.clear_esc_backtrack_hint();
     }
+
+    pub(crate) fn on_pilot_turn_submission_rpc_failed(&mut self) {
+        let effects = self
+            .slop_fork_ui
+            .on_pilot_turn_submission_failed(&self.slop_fork_context());
+        self.apply_slop_fork_effects(effects);
+        self.update_task_running_state();
+    }
+
+    pub(crate) fn on_remote_automation_state_loaded(
+        &mut self,
+        automations: Vec<codex_app_server_protocol::Automation>,
+    ) -> bool {
+        self.slop_fork_ui
+            .on_remote_automation_state_loaded(automations)
+    }
+
+    pub(crate) fn on_remote_pilot_state_loaded(
+        &mut self,
+        run: Option<codex_app_server_protocol::PilotRun>,
+    ) -> bool {
+        self.slop_fork_ui
+            .on_remote_pilot_state_loaded(run, /*authoritative*/ false)
+    }
+
+    pub(crate) fn on_remote_pilot_action_state_loaded(
+        &mut self,
+        run: Option<codex_app_server_protocol::PilotRun>,
+    ) -> bool {
+        self.slop_fork_ui
+            .on_remote_pilot_state_loaded(run, /*authoritative*/ true)
+    }
+
+    pub(crate) fn on_remote_pilot_state_load_failed(&mut self) -> bool {
+        self.slop_fork_ui.on_remote_pilot_state_load_failed()
+    }
+
+    pub(crate) fn arm_remote_pilot_state_reload(&mut self) {
+        self.slop_fork_ui.arm_remote_pilot_state_reload();
+    }
+
+    pub(crate) fn on_remote_autoresearch_state_loaded(
+        &mut self,
+        run: Option<codex_app_server_protocol::AutoresearchRun>,
+    ) -> bool {
+        self.slop_fork_ui
+            .on_remote_autoresearch_state_loaded(run, /*authoritative*/ false)
+    }
+
+    pub(crate) fn on_remote_autoresearch_action_state_loaded(
+        &mut self,
+        run: Option<codex_app_server_protocol::AutoresearchRun>,
+    ) -> bool {
+        self.slop_fork_ui
+            .on_remote_autoresearch_state_loaded(run, /*authoritative*/ true)
+    }
+
+    pub(crate) fn on_remote_autoresearch_state_load_failed(&mut self) -> bool {
+        self.slop_fork_ui.on_remote_autoresearch_state_load_failed()
+    }
+
+    pub(crate) fn arm_remote_autoresearch_state_reload(&mut self) {
+        self.slop_fork_ui.arm_remote_autoresearch_state_reload();
+    }
+
+    pub(crate) fn on_autoresearch_turn_submission_rpc_failed(&mut self) {
+        let effects = self
+            .slop_fork_ui
+            .on_autoresearch_turn_submission_failed(&self.slop_fork_context());
+        self.apply_slop_fork_effects(effects);
+        self.update_task_running_state();
+    }
+
+    fn apply_slop_fork_runtime_event(&mut self, event: SlopForkRuntimeEvent<'_>) {
+        let effects = self
+            .slop_fork_ui
+            .handle_runtime_event(&self.slop_fork_context(), event);
+        self.apply_slop_fork_effects(effects);
+    }
+
     /// Forward a command directly to codex.
     pub(crate) fn submit_op<T>(&mut self, op: T) -> bool
     where

@@ -265,11 +265,28 @@ impl PilotRuntime {
     }
 
     pub fn clear_orphaned_cycle_if_idle(&mut self, now: DateTime<Local>) -> std::io::Result<bool> {
+        self.clear_orphaned_cycle_if_idle_with_scope(now, StaleCycleRecoveryScope::TerminalOnly)
+    }
+
+    pub fn clear_orphaned_cycle_if_idle_for_control(
+        &mut self,
+        now: DateTime<Local>,
+    ) -> std::io::Result<bool> {
+        self.clear_orphaned_cycle_if_idle_with_scope(now, StaleCycleRecoveryScope::ExplicitControl)
+    }
+
+    fn clear_orphaned_cycle_if_idle_with_scope(
+        &mut self,
+        now: DateTime<Local>,
+        scope: StaleCycleRecoveryScope,
+    ) -> std::io::Result<bool> {
         self.update_state(|state| {
             let Some(state) = state.as_mut() else {
                 return Ok(false);
             };
-            if !matches!(state.status, PilotStatus::Stopped | PilotStatus::Completed) {
+            if matches!(scope, StaleCycleRecoveryScope::TerminalOnly)
+                && !matches!(state.status, PilotStatus::Stopped | PilotStatus::Completed)
+            {
                 return Ok(false);
             }
             if state.pending_cycle_kind.is_none()
@@ -727,6 +744,11 @@ fn save_thread_state(
     Ok(())
 }
 
+enum StaleCycleRecoveryScope {
+    TerminalOnly,
+    ExplicitControl,
+}
+
 fn build_cycle_prompt(state: &PilotRunState, kind: PilotCycleKind, now: DateTime<Local>) -> String {
     let iteration = state.iteration_count.saturating_add(1);
     let started_at = chrono::TimeZone::timestamp_opt(&Local, state.started_at, 0)
@@ -1150,5 +1172,75 @@ mod tests {
 
         assert!(!runtime.clear_orphaned_cycle_if_idle(Local::now()).unwrap());
         assert_eq!(runtime.state(), Some(&state));
+    }
+
+    #[test]
+    fn clear_orphaned_cycle_if_idle_for_control_clears_paused_in_flight_markers() {
+        let dir = tempdir().unwrap();
+        let thread_id = "thread-1";
+        let state = PilotRunState {
+            status: PilotStatus::Paused,
+            pending_cycle_kind: Some(PilotCycleKind::Continue),
+            submission_dispatched_at: Some(1),
+            active_cycle_kind: Some(PilotCycleKind::Continue),
+            active_turn_id: Some("turn-pilot".to_string()),
+            last_submitted_turn_id: Some("turn-pilot".to_string()),
+            ..PilotRunState::default()
+        };
+        save_thread_state(dir.path(), thread_id, Some(&state)).unwrap();
+        let mut runtime = PilotRuntime::load(dir.path(), thread_id).unwrap();
+
+        assert!(
+            runtime
+                .clear_orphaned_cycle_if_idle_for_control(Local::now())
+                .unwrap()
+        );
+
+        let cleared_state = runtime.state().expect("pilot state");
+        assert_eq!(cleared_state.status, PilotStatus::Paused);
+        assert_eq!(cleared_state.pending_cycle_kind, None);
+        assert_eq!(cleared_state.submission_dispatched_at, None);
+        assert_eq!(cleared_state.active_cycle_kind, None);
+        assert_eq!(cleared_state.active_turn_id, None);
+        assert_eq!(cleared_state.last_submitted_turn_id, None);
+        assert_eq!(
+            cleared_state.status_message.as_deref(),
+            Some("Pilot cleared stale cycle state after the thread became idle.")
+        );
+    }
+
+    #[test]
+    fn clear_orphaned_cycle_if_idle_for_control_clears_running_in_flight_markers() {
+        let dir = tempdir().unwrap();
+        let thread_id = "thread-1";
+        let state = PilotRunState {
+            status: PilotStatus::Running,
+            pending_cycle_kind: Some(PilotCycleKind::Continue),
+            submission_dispatched_at: Some(1),
+            active_cycle_kind: Some(PilotCycleKind::Continue),
+            active_turn_id: Some("turn-pilot".to_string()),
+            last_submitted_turn_id: Some("turn-pilot".to_string()),
+            ..PilotRunState::default()
+        };
+        save_thread_state(dir.path(), thread_id, Some(&state)).unwrap();
+        let mut runtime = PilotRuntime::load(dir.path(), thread_id).unwrap();
+
+        assert!(
+            runtime
+                .clear_orphaned_cycle_if_idle_for_control(Local::now())
+                .unwrap()
+        );
+
+        let cleared_state = runtime.state().expect("pilot state");
+        assert_eq!(cleared_state.status, PilotStatus::Running);
+        assert_eq!(cleared_state.pending_cycle_kind, None);
+        assert_eq!(cleared_state.submission_dispatched_at, None);
+        assert_eq!(cleared_state.active_cycle_kind, None);
+        assert_eq!(cleared_state.active_turn_id, None);
+        assert_eq!(cleared_state.last_submitted_turn_id, None);
+        assert_eq!(
+            cleared_state.status_message.as_deref(),
+            Some("Pilot cleared stale cycle state after the thread became idle.")
+        );
     }
 }

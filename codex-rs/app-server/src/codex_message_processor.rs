@@ -20,6 +20,7 @@ use crate::slop_fork_autoresearch::SlopForkAutoresearchError;
 use crate::slop_fork_autoresearch::SlopForkAutoresearchManager;
 use crate::slop_fork_pilot::SlopForkPilotError;
 use crate::slop_fork_pilot::SlopForkPilotManager;
+use crate::slop_fork_runtime_events::SlopForkRuntimeEventHandler;
 use crate::thread_status::ThreadWatchManager;
 use crate::thread_status::resolve_thread_status;
 use chrono::DateTime;
@@ -43,6 +44,11 @@ use codex_app_server_protocol::AutomationUpdateType;
 use codex_app_server_protocol::AutomationUpdatedNotification;
 use codex_app_server_protocol::AutomationUpsertParams;
 use codex_app_server_protocol::AutomationUpsertResponse;
+use codex_app_server_protocol::AutoresearchReadParams;
+use codex_app_server_protocol::AutoresearchReadResponse;
+use codex_app_server_protocol::AutoresearchStartParams;
+use codex_app_server_protocol::AutoresearchUpdateType;
+use codex_app_server_protocol::AutoresearchUpdatedNotification;
 use codex_app_server_protocol::CancelLoginAccountParams;
 use codex_app_server_protocol::CancelLoginAccountResponse;
 use codex_app_server_protocol::CancelLoginAccountStatus;
@@ -103,6 +109,7 @@ use codex_app_server_protocol::PilotReadParams;
 use codex_app_server_protocol::PilotReadResponse;
 use codex_app_server_protocol::PilotStartParams;
 use codex_app_server_protocol::PilotStartResponse;
+use codex_app_server_protocol::PilotUpdateType;
 use codex_app_server_protocol::PilotUpdatedNotification;
 use codex_app_server_protocol::PluginDetail;
 use codex_app_server_protocol::PluginInstallParams;
@@ -130,6 +137,9 @@ use codex_app_server_protocol::SkillsConfigWriteParams;
 use codex_app_server_protocol::SkillsConfigWriteResponse;
 use codex_app_server_protocol::SkillsListParams;
 use codex_app_server_protocol::SkillsListResponse;
+use codex_app_server_protocol::SlopForkAssistantTurnKind;
+use codex_app_server_protocol::SlopForkAssistantTurnStartParams;
+use codex_app_server_protocol::SlopForkAssistantTurnStartResponse;
 use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadArchiveParams;
 use codex_app_server_protocol::ThreadArchiveResponse;
@@ -633,25 +643,81 @@ impl CodexMessageProcessor {
         }
     }
 
-    async fn resolve_active_fork_thread(
+    async fn resolve_fork_thread_with_optional_conversation(
         &self,
         thread_id: &str,
-    ) -> Result<(ThreadId, Arc<CodexThread>), JSONRPCErrorError> {
-        let thread_id = ThreadId::from_string(thread_id).map_err(|err| JSONRPCErrorError {
-            code: INVALID_REQUEST_ERROR_CODE,
-            message: format!("invalid thread id: {err}"),
-            data: None,
-        })?;
-        let conversation = self
-            .thread_manager
-            .get_thread(thread_id)
-            .await
-            .map_err(|_| JSONRPCErrorError {
-                code: INVALID_REQUEST_ERROR_CODE,
-                message: format!("thread is not active: {thread_id}"),
-                data: None,
-            })?;
+        allow_archived: bool,
+        retry_method: &str,
+    ) -> Result<(ThreadId, Option<Arc<CodexThread>>), JSONRPCErrorError> {
+        let thread_id = self
+            .resolve_fork_thread_id(thread_id, allow_archived)
+            .await?;
+        self.reject_pending_unload(thread_id, retry_method).await?;
+        let conversation = self.thread_manager.get_thread(thread_id).await.ok();
         Ok((thread_id, conversation))
+    }
+
+    async fn is_thread_pending_unload(&self, thread_id: ThreadId) -> bool {
+        self.pending_thread_unloads
+            .lock()
+            .await
+            .contains(&thread_id)
+    }
+
+    async fn reject_pending_unload(
+        &self,
+        thread_id: ThreadId,
+        retry_method: &str,
+    ) -> Result<(), JSONRPCErrorError> {
+        if self.is_thread_pending_unload(thread_id).await {
+            return Err(JSONRPCErrorError {
+                code: INVALID_REQUEST_ERROR_CODE,
+                message: format!(
+                    "thread {thread_id} is closing; retry {retry_method} after the thread is closed"
+                ),
+                data: None,
+            });
+        }
+        Ok(())
+    }
+
+    async fn resolve_unloaded_fork_thread_cwd(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<Option<PathBuf>, JSONRPCErrorError> {
+        let thread_id_str = thread_id.to_string();
+        let rollout_path = match find_thread_path_by_id_str(&self.config.codex_home, &thread_id_str)
+            .await
+        {
+            Ok(Some(path)) => Some(path),
+            Ok(None) => {
+                match find_archived_thread_path_by_id_str(&self.config.codex_home, &thread_id_str)
+                    .await
+                {
+                    Ok(path) => path,
+                    Err(err) => {
+                        return Err(JSONRPCErrorError {
+                            code: INTERNAL_ERROR_CODE,
+                            message: format!(
+                                "failed to resolve archived thread {thread_id}: {err}"
+                            ),
+                            data: None,
+                        });
+                    }
+                }
+            }
+            Err(err) => {
+                return Err(JSONRPCErrorError {
+                    code: INTERNAL_ERROR_CODE,
+                    message: format!("failed to resolve thread {thread_id}: {err}"),
+                    data: None,
+                });
+            }
+        };
+        let Some(rollout_path) = rollout_path else {
+            return Ok(None);
+        };
+        Ok(read_history_cwd_from_state_db(&self.config, Some(thread_id), &rollout_path).await)
     }
     pub fn new(args: CodexMessageProcessorArgs) -> Self {
         let CodexMessageProcessorArgs {
@@ -683,8 +749,8 @@ impl CodexMessageProcessor {
             thread_watch_manager: ThreadWatchManager::new_with_outgoing(outgoing),
             command_exec_manager: CommandExecManager::default(),
             automation_manager: SlopForkAutomationManager,
-            autoresearch_manager: SlopForkAutoresearchManager,
-            pilot_manager: SlopForkPilotManager,
+            autoresearch_manager: SlopForkAutoresearchManager::default(),
+            pilot_manager: SlopForkPilotManager::default(),
             pending_fuzzy_searches: Arc::new(Mutex::new(HashMap::new())),
             fuzzy_search_sessions: Arc::new(Mutex::new(HashMap::new())),
             background_tasks: TaskTracker::new(),
@@ -1084,12 +1150,20 @@ impl CodexMessageProcessor {
                 self.pilot_control(to_connection_request_id(request_id), params)
                     .await;
             }
+            ClientRequest::AutoresearchRead { request_id, params } => {
+                self.autoresearch_read(to_connection_request_id(request_id), params)
+                    .await;
+            }
             ClientRequest::AutoresearchStart { request_id, params } => {
                 self.autoresearch_start(to_connection_request_id(request_id), params)
                     .await;
             }
             ClientRequest::AutoresearchControl { request_id, params } => {
                 self.autoresearch_control(to_connection_request_id(request_id), params)
+                    .await;
+            }
+            ClientRequest::SlopForkAssistantTurnStart { request_id, params } => {
+                self.slop_fork_assistant_turn_start(to_connection_request_id(request_id), params)
                     .await;
             }
             ClientRequest::FuzzyFileSearch { request_id, params } => {
@@ -2102,8 +2176,12 @@ impl CodexMessageProcessor {
     }
 
     async fn pilot_read(&self, request_id: ConnectionRequestId, params: PilotReadParams) {
-        let thread_id = match self
-            .resolve_fork_thread_id(&params.thread_id, /*allow_archived*/ true)
+        let (thread_id, conversation) = match self
+            .resolve_fork_thread_with_optional_conversation(
+                &params.thread_id,
+                /*allow_archived*/ true,
+                "pilot/read",
+            )
             .await
         {
             Ok(thread_id) => thread_id,
@@ -2112,15 +2190,47 @@ impl CodexMessageProcessor {
                 return;
             }
         };
+        let has_active_turn = if let Some(conversation) = conversation.as_ref() {
+            self.thread_has_active_turn(&thread_id, conversation).await
+        } else {
+            false
+        };
         match self
             .pilot_manager
-            .read(&self.config.codex_home, &thread_id)
+            .read(&self.config.codex_home, &thread_id, has_active_turn)
             .await
         {
-            Ok(run) => {
+            Ok(read) => {
                 self.outgoing
-                    .send_response(request_id, PilotReadResponse { run })
+                    .send_response(
+                        request_id,
+                        PilotReadResponse {
+                            run: read.run.clone(),
+                        },
+                    )
                     .await;
+                if read.updated
+                    && let Some(conversation) = conversation
+                {
+                    self.send_pilot_notification(
+                        &thread_id,
+                        PilotUpdatedNotification {
+                            thread_id: thread_id.to_string(),
+                            update_type: PilotUpdateType::Updated,
+                            run: read.run.clone(),
+                            message: read.run.and_then(|run| run.status_message),
+                        },
+                    )
+                    .await;
+                    self.ensure_listener_task_running(
+                        thread_id,
+                        conversation,
+                        self.thread_state_manager.thread_state(thread_id).await,
+                        ApiVersion::V2,
+                    )
+                    .await;
+                    self.wake_automation_listener(thread_id).await;
+                }
             }
             Err(err) => {
                 self.send_internal_error(request_id, format!("failed to read pilot state: {err}"))
@@ -2130,33 +2240,44 @@ impl CodexMessageProcessor {
     }
 
     async fn pilot_start(&self, request_id: ConnectionRequestId, params: PilotStartParams) {
-        let (thread_id, conversation) =
-            match self.resolve_active_fork_thread(&params.thread_id).await {
-                Ok(thread) => thread,
-                Err(error) => {
-                    self.outgoing.send_error(request_id, error).await;
-                    return;
-                }
-            };
-        self.ensure_listener_task_running(
-            thread_id,
-            conversation,
-            self.thread_state_manager.thread_state(thread_id).await,
-            ApiVersion::V2,
-        )
-        .await;
+        let (thread_id, conversation) = match self
+            .resolve_fork_thread_with_optional_conversation(
+                &params.thread_id,
+                /*allow_archived*/ true,
+                "pilot/start",
+            )
+            .await
+        {
+            Ok(thread) => thread,
+            Err(error) => {
+                self.outgoing.send_error(request_id, error).await;
+                return;
+            }
+        };
+        let has_active_turn = if let Some(conversation) = conversation {
+            self.ensure_listener_task_running(
+                thread_id,
+                conversation.clone(),
+                self.thread_state_manager.thread_state(thread_id).await,
+                ApiVersion::V2,
+            )
+            .await;
+            self.thread_has_active_turn(&thread_id, &conversation).await
+        } else {
+            false
+        };
         match self
             .pilot_manager
             .start(
                 &self.config.codex_home,
                 &thread_id,
+                has_active_turn,
                 params.goal,
                 params.deadline_at,
             )
             .await
         {
             Ok(run) => {
-                self.wake_automation_listener(thread_id).await;
                 self.outgoing
                     .send_response(request_id, PilotStartResponse { run: run.clone() })
                     .await;
@@ -2170,6 +2291,7 @@ impl CodexMessageProcessor {
                     },
                 )
                 .await;
+                self.wake_automation_listener(thread_id).await;
             }
             Err(SlopForkPilotError::InvalidRequest(message)) => {
                 self.send_invalid_request_error(request_id, message).await;
@@ -2182,30 +2304,43 @@ impl CodexMessageProcessor {
     }
 
     async fn pilot_control(&self, request_id: ConnectionRequestId, params: PilotControlParams) {
-        let (thread_id, conversation) =
-            match self.resolve_active_fork_thread(&params.thread_id).await {
-                Ok(thread) => thread,
-                Err(error) => {
-                    self.outgoing.send_error(request_id, error).await;
-                    return;
-                }
-            };
-        self.ensure_listener_task_running(
-            thread_id,
-            conversation,
-            self.thread_state_manager.thread_state(thread_id).await,
-            ApiVersion::V2,
-        )
-        .await;
+        let (thread_id, conversation) = match self
+            .resolve_fork_thread_with_optional_conversation(
+                &params.thread_id,
+                /*allow_archived*/ true,
+                "pilot/control",
+            )
+            .await
+        {
+            Ok(thread) => thread,
+            Err(error) => {
+                self.outgoing.send_error(request_id, error).await;
+                return;
+            }
+        };
+        let has_active_turn = if let Some(conversation) = conversation {
+            self.ensure_listener_task_running(
+                thread_id,
+                conversation.clone(),
+                self.thread_state_manager.thread_state(thread_id).await,
+                ApiVersion::V2,
+            )
+            .await;
+            self.thread_has_active_turn(&thread_id, &conversation).await
+        } else {
+            false
+        };
         match self
             .pilot_manager
-            .control(&self.config.codex_home, &thread_id, params.action)
+            .control(
+                &self.config.codex_home,
+                &thread_id,
+                has_active_turn,
+                params.action,
+            )
             .await
         {
             Ok((updated, run, update_type, message)) => {
-                if updated {
-                    self.wake_automation_listener(thread_id).await;
-                }
                 self.outgoing
                     .send_response(
                         request_id,
@@ -2227,6 +2362,9 @@ impl CodexMessageProcessor {
                     )
                     .await;
                 }
+                if updated {
+                    self.wake_automation_listener(thread_id).await;
+                }
             }
             Err(SlopForkPilotError::InvalidRequest(message)) => {
                 self.send_invalid_request_error(request_id, message).await;
@@ -2241,29 +2379,60 @@ impl CodexMessageProcessor {
     async fn autoresearch_start(
         &self,
         request_id: ConnectionRequestId,
-        params: codex_app_server_protocol::AutoresearchStartParams,
+        params: AutoresearchStartParams,
     ) {
-        let (thread_id, conversation) =
-            match self.resolve_active_fork_thread(&params.thread_id).await {
-                Ok(thread) => thread,
+        let (thread_id, conversation) = match self
+            .resolve_fork_thread_with_optional_conversation(
+                &params.thread_id,
+                /*allow_archived*/ true,
+                "autoresearch/start",
+            )
+            .await
+        {
+            Ok(thread) => thread,
+            Err(error) => {
+                self.outgoing.send_error(request_id, error).await;
+                return;
+            }
+        };
+        let (cwd, has_active_turn) = if let Some(conversation) = conversation {
+            self.ensure_listener_task_running(
+                thread_id,
+                conversation.clone(),
+                self.thread_state_manager.thread_state(thread_id).await,
+                ApiVersion::V2,
+            )
+            .await;
+            (
+                conversation.config_snapshot().await.cwd,
+                self.thread_has_active_turn(&thread_id, &conversation).await,
+            )
+        } else {
+            let cwd = match self.resolve_unloaded_fork_thread_cwd(thread_id).await {
+                Ok(Some(cwd)) => cwd,
+                Ok(None) => {
+                    self.send_invalid_request_error(
+                        request_id,
+                        format!(
+                            "thread {thread_id} does not have persisted session metadata for autoresearch start"
+                        ),
+                    )
+                    .await;
+                    return;
+                }
                 Err(error) => {
                     self.outgoing.send_error(request_id, error).await;
                     return;
                 }
             };
-        self.ensure_listener_task_running(
-            thread_id,
-            conversation.clone(),
-            self.thread_state_manager.thread_state(thread_id).await,
-            ApiVersion::V2,
-        )
-        .await;
-        let cwd = conversation.config_snapshot().await.cwd;
+            (cwd, false)
+        };
         match self
             .autoresearch_manager
             .start(
                 &self.config.codex_home,
                 &thread_id,
+                has_active_turn,
                 &cwd,
                 params.goal,
                 params.max_runs,
@@ -2271,16 +2440,27 @@ impl CodexMessageProcessor {
             )
             .await
         {
-            Ok(updated) => {
-                if updated {
-                    self.wake_automation_listener(thread_id).await;
-                }
+            Ok(run) => {
                 self.outgoing
                     .send_response(
                         request_id,
-                        codex_app_server_protocol::AutoresearchStartResponse { updated },
+                        codex_app_server_protocol::AutoresearchStartResponse {
+                            updated: true,
+                            run: Some(run.clone()),
+                        },
                     )
                     .await;
+                self.send_autoresearch_notification(
+                    &thread_id,
+                    AutoresearchUpdatedNotification {
+                        thread_id: thread_id.to_string(),
+                        update_type: codex_app_server_protocol::AutoresearchUpdateType::Started,
+                        run: Some(run),
+                        message: Some("Autoresearch started.".to_string()),
+                    },
+                )
+                .await;
+                self.wake_automation_listener(thread_id).await;
             }
             Err(SlopForkAutoresearchError::InvalidRequest(message)) => {
                 self.send_invalid_request_error(request_id, message).await;
@@ -2300,45 +2480,76 @@ impl CodexMessageProcessor {
         request_id: ConnectionRequestId,
         params: codex_app_server_protocol::AutoresearchControlParams,
     ) {
-        let (thread_id, conversation) =
-            match self.resolve_active_fork_thread(&params.thread_id).await {
-                Ok(thread) => thread,
+        let (thread_id, conversation) = match self
+            .resolve_fork_thread_with_optional_conversation(
+                &params.thread_id,
+                /*allow_archived*/ true,
+                "autoresearch/control",
+            )
+            .await
+        {
+            Ok(thread) => thread,
+            Err(error) => {
+                self.outgoing.send_error(request_id, error).await;
+                return;
+            }
+        };
+        let (fallback_workdir, has_active_turn) = if let Some(conversation) = conversation {
+            self.ensure_listener_task_running(
+                thread_id,
+                conversation.clone(),
+                self.thread_state_manager.thread_state(thread_id).await,
+                ApiVersion::V2,
+            )
+            .await;
+            (
+                Some(conversation.config_snapshot().await.cwd),
+                self.thread_has_active_turn(&thread_id, &conversation).await,
+            )
+        } else {
+            match self.resolve_unloaded_fork_thread_cwd(thread_id).await {
+                Ok(cwd) => (cwd, false),
                 Err(error) => {
                     self.outgoing.send_error(request_id, error).await;
                     return;
                 }
-            };
-        self.ensure_listener_task_running(
-            thread_id,
-            conversation.clone(),
-            self.thread_state_manager.thread_state(thread_id).await,
-            ApiVersion::V2,
-        )
-        .await;
-        let cwd = conversation.config_snapshot().await.cwd;
-        let has_active_turn = self.thread_has_active_turn(&thread_id, &conversation).await;
+            }
+        };
         match self
             .autoresearch_manager
             .control(
                 &self.config.codex_home,
                 &thread_id,
-                &cwd,
+                fallback_workdir.as_deref(),
                 has_active_turn,
                 params.action,
                 params.focus,
             )
             .await
         {
-            Ok(updated) => {
-                if updated {
-                    self.wake_automation_listener(thread_id).await;
-                }
+            Ok((updated, run, update_type, message)) => {
                 self.outgoing
                     .send_response(
                         request_id,
-                        codex_app_server_protocol::AutoresearchControlResponse { updated },
+                        codex_app_server_protocol::AutoresearchControlResponse {
+                            updated,
+                            run: run.clone(),
+                        },
                     )
                     .await;
+                if updated {
+                    self.send_autoresearch_notification(
+                        &thread_id,
+                        AutoresearchUpdatedNotification {
+                            thread_id: thread_id.to_string(),
+                            update_type,
+                            run,
+                            message,
+                        },
+                    )
+                    .await;
+                    self.wake_automation_listener(thread_id).await;
+                }
             }
             Err(SlopForkAutoresearchError::InvalidRequest(message)) => {
                 self.send_invalid_request_error(request_id, message).await;
@@ -2347,6 +2558,133 @@ impl CodexMessageProcessor {
                 self.send_internal_error(
                     request_id,
                     format!("failed to control autoresearch: {err}"),
+                )
+                .await;
+            }
+        }
+    }
+
+    async fn autoresearch_read(
+        &self,
+        request_id: ConnectionRequestId,
+        params: AutoresearchReadParams,
+    ) {
+        let (thread_id, conversation) = match self
+            .resolve_fork_thread_with_optional_conversation(
+                &params.thread_id,
+                /*allow_archived*/ true,
+                "autoresearch/read",
+            )
+            .await
+        {
+            Ok(thread_id) => thread_id,
+            Err(error) => {
+                self.outgoing.send_error(request_id, error).await;
+                return;
+            }
+        };
+        let has_active_turn = if let Some(conversation) = conversation.as_ref() {
+            self.thread_has_active_turn(&thread_id, conversation).await
+        } else {
+            false
+        };
+        match self
+            .autoresearch_manager
+            .read(&self.config.codex_home, &thread_id, has_active_turn)
+            .await
+        {
+            Ok(read) => {
+                self.outgoing
+                    .send_response(
+                        request_id,
+                        AutoresearchReadResponse {
+                            run: read.run.clone(),
+                        },
+                    )
+                    .await;
+                if read.updated
+                    && let Some(conversation) = conversation
+                {
+                    self.send_autoresearch_notification(
+                        &thread_id,
+                        AutoresearchUpdatedNotification {
+                            thread_id: thread_id.to_string(),
+                            update_type: AutoresearchUpdateType::Updated,
+                            run: read.run.clone(),
+                            message: read.run.and_then(|run| run.status_message),
+                        },
+                    )
+                    .await;
+                    self.ensure_listener_task_running(
+                        thread_id,
+                        conversation,
+                        self.thread_state_manager.thread_state(thread_id).await,
+                        ApiVersion::V2,
+                    )
+                    .await;
+                    self.wake_automation_listener(thread_id).await;
+                }
+            }
+            Err(err) => {
+                self.send_internal_error(
+                    request_id,
+                    format!("failed to read autoresearch state: {err}"),
+                )
+                .await;
+            }
+        }
+    }
+
+    async fn slop_fork_assistant_turn_start(
+        &self,
+        request_id: ConnectionRequestId,
+        params: SlopForkAssistantTurnStartParams,
+    ) {
+        let thread_id = match ThreadId::from_string(&params.thread_id) {
+            Ok(thread_id) => thread_id,
+            Err(err) => {
+                self.send_invalid_request_error(request_id, format!("invalid thread id: {err}"))
+                    .await;
+                return;
+            }
+        };
+        if let Err(error) = self
+            .reject_pending_unload(thread_id, "slopFork/assistantTurnStart")
+            .await
+        {
+            self.outgoing.send_error(request_id, error).await;
+            return;
+        }
+        let (_, thread) = match self.load_thread(&params.thread_id).await {
+            Ok(thread) => thread,
+            Err(error) => {
+                self.outgoing.send_error(request_id, error).await;
+                return;
+            }
+        };
+
+        let op = match params.kind {
+            SlopForkAssistantTurnKind::Pilot => Op::SlopForkPilotTurn {
+                prompt: params.prompt,
+            },
+            SlopForkAssistantTurnKind::Autoresearch => Op::SlopForkAutoresearchTurn {
+                prompt: params.prompt,
+            },
+        };
+
+        match self.submit_core_op(&request_id, thread.as_ref(), op).await {
+            Ok(turn_id) => {
+                self.outgoing
+                    .record_request_turn_id(&request_id, &turn_id)
+                    .await;
+                self.outgoing
+                    .send_response(request_id, SlopForkAssistantTurnStartResponse { turn_id })
+                    .await;
+            }
+            Err(err) => {
+                self.send_internal_error(
+                    request_id,
+                    format!("failed to start fork assistant turn: {err}"),
                 )
                 .await;
             }
@@ -2396,6 +2734,22 @@ impl CodexMessageProcessor {
         {
             thread_outgoing
                 .send_server_notification(ServerNotification::PilotUpdated(notification))
+                .await;
+        }
+    }
+
+    async fn send_autoresearch_notification(
+        &self,
+        thread_id: &ThreadId,
+        notification: AutoresearchUpdatedNotification,
+    ) {
+        if let Some(thread_outgoing) = self
+            .thread_state_manager
+            .thread_outgoing(self.outgoing.clone(), thread_id)
+            .await
+        {
+            thread_outgoing
+                .send_server_notification(ServerNotification::AutoresearchUpdated(notification))
                 .await;
         }
     }
@@ -4346,19 +4700,9 @@ impl CodexMessageProcessor {
 
     async fn thread_resume(&mut self, request_id: ConnectionRequestId, params: ThreadResumeParams) {
         if let Ok(thread_id) = ThreadId::from_string(&params.thread_id)
-            && self
-                .pending_thread_unloads
-                .lock()
-                .await
-                .contains(&thread_id)
+            && let Err(error) = self.reject_pending_unload(thread_id, "thread/resume").await
         {
-            self.send_invalid_request_error(
-                request_id,
-                format!(
-                    "thread {thread_id} is closing; retry thread/resume after the thread is closed"
-                ),
-            )
-            .await;
+            self.outgoing.send_error(request_id, error).await;
             return;
         }
 
@@ -7921,14 +8265,25 @@ impl CodexMessageProcessor {
                         }
                         true
                     }
-                    Ok(None) => false,
+                    Ok(None) => match pilot_manager
+                        .has_in_flight_running_cycle(codex_home.as_path(), &conversation_id)
+                        .await
+                    {
+                        Ok(in_flight) => in_flight,
+                        Err(err) => {
+                            warn!(
+                                "failed to inspect pilot state after idle evaluation for {conversation_id}: {err}"
+                            );
+                            true
+                        }
+                    },
                     Err(err) => {
                         warn!("failed to evaluate pilot state for {conversation_id}: {err}");
                         false
                     }
                 };
-                if !pilot_submitted
-                    && let Err(err) = autoresearch_manager
+                if !pilot_submitted {
+                    match autoresearch_manager
                         .maybe_evaluate_idle(
                             codex_home.as_path(),
                             &conversation,
@@ -7936,8 +8291,26 @@ impl CodexMessageProcessor {
                             has_active_turn,
                         )
                         .await
-                {
-                    warn!("failed to evaluate autoresearch state for {conversation_id}: {err}");
+                    {
+                        Ok(Some(notification)) => {
+                            if let Some(thread_outgoing) = thread_state_manager
+                                .thread_outgoing(outgoing_for_task.clone(), &conversation_id)
+                                .await
+                            {
+                                thread_outgoing
+                                    .send_server_notification(
+                                        ServerNotification::AutoresearchUpdated(notification),
+                                    )
+                                    .await;
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            warn!(
+                                "failed to evaluate autoresearch state for {conversation_id}: {err}"
+                            );
+                        }
+                    }
                 }
                 let next_timer_wake = if !has_active_turn {
                     if fork_config
@@ -7995,9 +8368,29 @@ impl CodexMessageProcessor {
 
                         let thread_outgoing = ThreadScopedOutgoingMessageSender::new(
                             outgoing_for_task.clone(),
-                            subscribed_connection_ids,
+                            subscribed_connection_ids.clone(),
                             conversation_id,
                         );
+                        let turn_complete_error = match &event.msg {
+                            EventMsg::TurnComplete(_) => {
+                                thread_state.lock().await.turn_summary.last_error.clone()
+                            }
+                            _ => None,
+                        };
+                        let pending_notifications = SlopForkRuntimeEventHandler {
+                            automation_manager: &automation_manager,
+                            autoresearch_manager: &autoresearch_manager,
+                            pilot_manager: &pilot_manager,
+                            codex_home: codex_home.as_path(),
+                            thread: &conversation,
+                            thread_id: &conversation_id,
+                            fork_config: fork_config.as_ref(),
+                            codex_linux_sandbox_exe: codex_linux_sandbox_exe.clone(),
+                            windows_sandbox_level,
+                            windows_sandbox_private_desktop,
+                        }
+                        .handle_event(&event.msg, turn_complete_error.as_ref())
+                        .await;
                         apply_bespoke_event_handling(
                             event.clone(),
                             conversation_id,
@@ -8011,78 +8404,34 @@ impl CodexMessageProcessor {
                             codex_home.as_path(),
                         )
                         .await;
-
-                        if let EventMsg::TurnComplete(turn_complete) = &event.msg
-                            && let Some(fork_config) =
-                                fork_config.as_ref().filter(|config| config.automation_enabled)
-                        {
-                            match automation_manager
-                                .evaluate_turn_completed(
-                                    codex_home.as_path(),
-                                    &conversation,
-                                    &conversation_id,
-                                    &turn_complete.turn_id,
-                                    turn_complete.last_agent_message.as_deref().unwrap_or_default(),
-                                    fork_config.automation_shell_timeout_ms,
-                                    codex_linux_sandbox_exe.clone(),
-                                    windows_sandbox_level,
-                                    windows_sandbox_private_desktop,
-                                )
-                                .await
-                            {
-                                Ok(notifications) => {
-                                    if let Some(thread_outgoing) = thread_state_manager
-                                        .thread_outgoing(
-                                            outgoing_for_task.clone(),
-                                            &conversation_id,
-                                        )
-                                        .await
-                                    {
-                                        for notification in notifications {
-                                            thread_outgoing
-                                                .send_server_notification(
-                                                    ServerNotification::AutomationUpdated(
-                                                        notification,
-                                                    ),
-                                                )
-                                                .await;
-                                        }
-                                    }
-                                }
-                                Err(err) => {
-                                    warn!(
-                                        "failed to evaluate turn-complete automations for {conversation_id}: {err}"
-                                    );
-                                }
-                            }
+                        let subscribed_connection_ids = thread_state_manager
+                            .subscribed_connection_ids(conversation_id)
+                            .await;
+                        let thread_outgoing = ThreadScopedOutgoingMessageSender::new(
+                            outgoing_for_task.clone(),
+                            subscribed_connection_ids,
+                            conversation_id,
+                        );
+                        for notification in pending_notifications.automation_notifications {
+                            thread_outgoing
+                                .send_server_notification(ServerNotification::AutomationUpdated(
+                                    notification,
+                                ))
+                                .await;
                         }
-
-                        match pilot_manager
-                            .handle_event(codex_home.as_path(), &conversation_id, &event.msg)
-                            .await
-                        {
-                            Ok(Some(notification)) => {
-                                if let Some(thread_outgoing) = thread_state_manager
-                                    .thread_outgoing(outgoing_for_task.clone(), &conversation_id)
-                                    .await
-                                {
-                                    thread_outgoing
-                                        .send_server_notification(
-                                            ServerNotification::PilotUpdated(notification),
-                                        )
-                                        .await;
-                                }
-                            }
-                            Ok(None) => {}
-                            Err(err) => {
-                                warn!("failed to update pilot state for {conversation_id}: {err}");
-                            }
+                        if let Some(notification) = pending_notifications.autoresearch_notification {
+                            thread_outgoing
+                                .send_server_notification(ServerNotification::AutoresearchUpdated(
+                                    notification,
+                                ))
+                                .await;
                         }
-                        if let Err(err) = autoresearch_manager
-                            .handle_event(codex_home.as_path(), &conversation_id, &event.msg)
-                            .await
-                        {
-                            warn!("failed to update autoresearch state for {conversation_id}: {err}");
+                        if let Some(notification) = pending_notifications.pilot_notification {
+                            thread_outgoing
+                                .send_server_notification(ServerNotification::PilotUpdated(
+                                    notification,
+                                ))
+                                .await;
                         }
                     }
                     _ = async {

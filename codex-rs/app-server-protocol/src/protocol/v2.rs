@@ -2399,10 +2399,71 @@ pub struct PilotControlResponse {
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(rename_all = "camelCase", export_to = "v2/")]
+pub enum AutoresearchStatus {
+    Running,
+    Paused,
+    Stopped,
+    Completed,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = "v2/")]
+pub enum AutoresearchCycleKind {
+    Continue,
+    Research,
+    Discovery,
+    WrapUp,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = "v2/")]
 pub enum AutoresearchMode {
     Optimize,
     Research,
     Scientist,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AutoresearchRun {
+    pub goal: String,
+    pub mode: AutoresearchMode,
+    pub status: AutoresearchStatus,
+    pub started_at: i64,
+    pub updated_at: i64,
+    pub max_runs: Option<u32>,
+    pub iteration_count: u32,
+    pub discovery_count: u32,
+    pub pending_cycle_kind: Option<AutoresearchCycleKind>,
+    pub active_cycle_kind: Option<AutoresearchCycleKind>,
+    pub active_turn_id: Option<String>,
+    pub last_submitted_turn_id: Option<String>,
+    pub wrap_up_requested: bool,
+    pub stop_requested_at: Option<i64>,
+    pub last_error: Option<String>,
+    pub status_message: Option<String>,
+    pub last_progress_at: Option<i64>,
+    pub last_cycle_completed_at: Option<i64>,
+    pub last_discovery_completed_at: Option<i64>,
+    pub last_cycle_summary: Option<String>,
+    pub last_agent_message: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AutoresearchReadParams {
+    pub thread_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AutoresearchReadResponse {
+    pub run: Option<AutoresearchRun>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -2421,6 +2482,7 @@ pub struct AutoresearchStartParams {
 #[ts(export_to = "v2/")]
 pub struct AutoresearchStartResponse {
     pub updated: bool,
+    pub run: Option<AutoresearchRun>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -2506,6 +2568,60 @@ impl<'de> Deserialize<'de> for AutoresearchControlParams {
 #[ts(export_to = "v2/")]
 pub struct AutoresearchControlResponse {
     pub updated: bool,
+    pub run: Option<AutoresearchRun>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = "v2/")]
+pub enum AutoresearchUpdateType {
+    Started,
+    Queued,
+    CycleStarted,
+    CycleCompleted,
+    Paused,
+    Resumed,
+    WrapUpRequested,
+    Stopped,
+    Completed,
+    Failed,
+    Cleared,
+    DiscoveryQueued,
+    Updated,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AutoresearchUpdatedNotification {
+    pub thread_id: String,
+    pub update_type: AutoresearchUpdateType,
+    pub run: Option<AutoresearchRun>,
+    pub message: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = "v2/")]
+pub enum SlopForkAssistantTurnKind {
+    Pilot,
+    Autoresearch,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct SlopForkAssistantTurnStartParams {
+    pub thread_id: String,
+    pub prompt: String,
+    pub kind: SlopForkAssistantTurnKind,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct SlopForkAssistantTurnStartResponse {
+    pub turn_id: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]

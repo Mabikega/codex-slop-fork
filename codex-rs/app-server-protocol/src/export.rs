@@ -11,9 +11,13 @@ use crate::export_server_notification_schemas;
 use crate::export_server_param_schemas;
 use crate::export_server_response_schemas;
 use crate::export_server_responses;
+use crate::protocol::common::EXPERIMENTAL_CLIENT_METHOD_NESTED_TYPES;
 use crate::protocol::common::EXPERIMENTAL_CLIENT_METHOD_PARAM_TYPES;
 use crate::protocol::common::EXPERIMENTAL_CLIENT_METHOD_RESPONSE_TYPES;
 use crate::protocol::common::EXPERIMENTAL_CLIENT_METHODS;
+use crate::protocol::common::EXPERIMENTAL_SERVER_NOTIFICATION_METHODS;
+use crate::protocol::common::EXPERIMENTAL_SERVER_NOTIFICATION_NESTED_TYPES;
+use crate::protocol::common::EXPERIMENTAL_SERVER_NOTIFICATION_TYPES;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
@@ -247,10 +251,15 @@ fn filter_experimental_ts(out_dir: &Path) -> Result<()> {
     let registered_fields = experimental_fields();
     let experimental_method_types = experimental_method_types();
     // Most generated TS files are filtered by schema processing, but
-    // `ClientRequest.ts` and any type with `#[experimental(...)]` fields need
-    // direct post-processing because they encode method/field information in
-    // file-local unions/interfaces.
-    filter_client_request_ts(out_dir, EXPERIMENTAL_CLIENT_METHODS)?;
+    // `ClientRequest.ts`, `ServerNotification.ts`, and any type with
+    // `#[experimental(...)]` fields need direct post-processing because they
+    // encode method/field information in file-local unions/interfaces.
+    filter_tagged_union_ts(out_dir, "ClientRequest.ts", EXPERIMENTAL_CLIENT_METHODS)?;
+    filter_tagged_union_ts(
+        out_dir,
+        "ServerNotification.ts",
+        EXPERIMENTAL_SERVER_NOTIFICATION_METHODS,
+    )?;
     filter_experimental_type_fields_ts(out_dir, &registered_fields)?;
     remove_generated_type_files(out_dir, &experimental_method_types, "ts")?;
     Ok(())
@@ -261,7 +270,14 @@ pub(crate) fn filter_experimental_ts_tree(tree: &mut BTreeMap<PathBuf, String>) 
     let experimental_method_types = experimental_method_types();
     if let Some(content) = tree.get_mut(Path::new("ClientRequest.ts")) {
         let filtered =
-            filter_client_request_ts_contents(std::mem::take(content), EXPERIMENTAL_CLIENT_METHODS);
+            filter_tagged_union_ts_contents(std::mem::take(content), EXPERIMENTAL_CLIENT_METHODS);
+        *content = filtered;
+    }
+    if let Some(content) = tree.get_mut(Path::new("ServerNotification.ts")) {
+        let filtered = filter_tagged_union_ts_contents(
+            std::mem::take(content),
+            EXPERIMENTAL_SERVER_NOTIFICATION_METHODS,
+        );
         *content = filtered;
     }
 
@@ -291,21 +307,26 @@ pub(crate) fn filter_experimental_ts_tree(tree: &mut BTreeMap<PathBuf, String>) 
     Ok(())
 }
 
-/// Removes union arms from `ClientRequest.ts` for methods marked experimental.
-fn filter_client_request_ts(out_dir: &Path, experimental_methods: &[&str]) -> Result<()> {
-    let path = out_dir.join("ClientRequest.ts");
+/// Removes union arms from generated tagged-union TypeScript files for methods
+/// marked experimental.
+fn filter_tagged_union_ts(
+    out_dir: &Path,
+    file_name: &str,
+    experimental_methods: &[&str],
+) -> Result<()> {
+    let path = out_dir.join(file_name);
     if !path.exists() {
         return Ok(());
     }
     let mut content =
         fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
-    content = filter_client_request_ts_contents(content, experimental_methods);
+    content = filter_tagged_union_ts_contents(content, experimental_methods);
 
     fs::write(&path, content).with_context(|| format!("Failed to write {}", path.display()))?;
     Ok(())
 }
 
-fn filter_client_request_ts_contents(mut content: String, experimental_methods: &[&str]) -> String {
+fn filter_tagged_union_ts_contents(mut content: String, experimental_methods: &[&str]) -> String {
     let Some((prefix, body, suffix)) = split_type_alias(&content) else {
         return content;
     };
@@ -402,6 +423,7 @@ fn filter_experimental_schema(bundle: &mut Value) -> Result<()> {
     filter_experimental_fields_in_root(bundle, &registered_fields);
     filter_experimental_fields_in_definitions(bundle, &registered_fields);
     prune_experimental_methods(bundle, EXPERIMENTAL_CLIENT_METHODS);
+    prune_experimental_methods(bundle, EXPERIMENTAL_SERVER_NOTIFICATION_METHODS);
     remove_experimental_method_type_definitions(bundle);
     Ok(())
 }
@@ -557,6 +579,12 @@ fn experimental_method_types() -> HashSet<String> {
     let mut type_names = HashSet::new();
     collect_experimental_type_names(EXPERIMENTAL_CLIENT_METHOD_PARAM_TYPES, &mut type_names);
     collect_experimental_type_names(EXPERIMENTAL_CLIENT_METHOD_RESPONSE_TYPES, &mut type_names);
+    collect_experimental_type_names(EXPERIMENTAL_CLIENT_METHOD_NESTED_TYPES, &mut type_names);
+    collect_experimental_type_names(EXPERIMENTAL_SERVER_NOTIFICATION_TYPES, &mut type_names);
+    collect_experimental_type_names(
+        EXPERIMENTAL_SERVER_NOTIFICATION_NESTED_TYPES,
+        &mut type_names,
+    );
     type_names
 }
 

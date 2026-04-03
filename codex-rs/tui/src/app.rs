@@ -43,6 +43,7 @@ use crate::read_session_model;
 use crate::render::highlight::highlight_bash_to_lines;
 use crate::render::renderable::Renderable;
 use crate::resume_picker::SessionSelection;
+use crate::slop_fork::try_submit_app_server_op as try_submit_slop_fork_app_server_op;
 #[cfg(test)]
 use crate::test_support::PathBufExt;
 use crate::tui;
@@ -523,6 +524,8 @@ impl ThreadEventStore {
             ThreadBufferedEvent::Request(_)
                 | ThreadBufferedEvent::Notification(ServerNotification::HookStarted(_))
                 | ThreadBufferedEvent::Notification(ServerNotification::HookCompleted(_))
+                | ThreadBufferedEvent::Notification(ServerNotification::AutoresearchUpdated(_))
+                | ThreadBufferedEvent::Notification(ServerNotification::PilotUpdated(_))
         )
     }
 
@@ -967,6 +970,7 @@ pub(crate) struct App {
     feedback_audience: FeedbackAudience,
     remote_app_server_url: Option<String>,
     remote_app_server_auth_token: Option<String>,
+    slop_fork_app_server: crate::slop_fork::SlopForkAppServerState,
     /// Set when the user confirms an update; propagated on exit.
     pub(crate) pending_update_action: Option<UpdateAction>,
 
@@ -1045,6 +1049,8 @@ impl App {
     ) -> crate::chatwidget::ChatWidgetInit {
         crate::chatwidget::ChatWidgetInit {
             config: cfg.clone(),
+            app_server_owns_slop_fork_follow_ups: true,
+            is_remote_app_server: self.remote_app_server_url.is_some(),
             frame_requester: tui.frame_requester(),
             app_event_tx: self.app_event_tx.clone(),
             // Fork/resume bootstraps here don't carry any prefilled message content.
@@ -1830,6 +1836,16 @@ impl App {
             .try_resolve_app_server_request(app_server, thread_id, &op)
             .await?
         {
+            return Ok(());
+        }
+
+        if try_submit_slop_fork_app_server_op(&mut self.chat_widget, app_server, thread_id, &op)
+            .await?
+        {
+            if ThreadEventStore::op_can_change_pending_replay_state(&op) {
+                self.note_thread_outbound_op(thread_id, &op).await;
+                self.refresh_pending_thread_approvals().await;
+            }
             return Ok(());
         }
 
@@ -3449,6 +3465,8 @@ impl App {
                         .await;
                 let init = crate::chatwidget::ChatWidgetInit {
                     config: config.clone(),
+                    app_server_owns_slop_fork_follow_ups: true,
+                    is_remote_app_server: remote_app_server_url.is_some(),
                     frame_requester: tui.frame_requester(),
                     app_event_tx: app_event_tx.clone(),
                     initial_user_message: crate::chatwidget::create_initial_user_message(
@@ -3489,6 +3507,8 @@ impl App {
                     })?;
                 let init = crate::chatwidget::ChatWidgetInit {
                     config: config.clone(),
+                    app_server_owns_slop_fork_follow_ups: true,
+                    is_remote_app_server: remote_app_server_url.is_some(),
                     frame_requester: tui.frame_requester(),
                     app_event_tx: app_event_tx.clone(),
                     initial_user_message: crate::chatwidget::create_initial_user_message(
@@ -3534,6 +3554,8 @@ impl App {
                     })?;
                 let init = crate::chatwidget::ChatWidgetInit {
                     config: config.clone(),
+                    app_server_owns_slop_fork_follow_ups: true,
+                    is_remote_app_server: remote_app_server_url.is_some(),
                     frame_requester: tui.frame_requester(),
                     app_event_tx: app_event_tx.clone(),
                     initial_user_message: crate::chatwidget::create_initial_user_message(
@@ -3602,6 +3624,7 @@ impl App {
             feedback_audience,
             remote_app_server_url,
             remote_app_server_auth_token,
+            slop_fork_app_server: crate::slop_fork::SlopForkAppServerState::default(),
             pending_update_action: None,
             pending_shutdown_exit_thread_id: None,
             windows_sandbox: WindowsSandboxState::default(),
@@ -4150,7 +4173,14 @@ impl App {
                     .on_auth_state_changed(message, is_error, is_warning);
             }
             AppEvent::SlopFork(event) => {
-                self.chat_widget.handle_slop_fork_event(event);
+                if let Some(event) = self.slop_fork_app_server.handle_app_event(
+                    &mut self.chat_widget,
+                    Some(app_server),
+                    &self.app_event_tx,
+                    event,
+                ) {
+                    self.chat_widget.handle_slop_fork_event(event);
+                }
             }
             AppEvent::RefreshConnectors { force_refetch } => {
                 self.chat_widget.refresh_connectors(force_refetch);
@@ -6286,6 +6316,8 @@ mod tests {
         let model = codex_core::test_support::get_model_offline(config.model.as_deref());
         app.chat_widget = ChatWidget::new_with_app_event(ChatWidgetInit {
             config: config.clone(),
+            app_server_owns_slop_fork_follow_ups: true,
+            is_remote_app_server: app.remote_app_server_url.is_some(),
             frame_requester: crate::tui::FrameRequester::test_dummy(),
             app_event_tx: app.app_event_tx.clone(),
             initial_user_message: create_initial_user_message(
@@ -8818,6 +8850,7 @@ guardian_approval = true
             feedback_audience: FeedbackAudience::External,
             remote_app_server_url: None,
             remote_app_server_auth_token: None,
+            slop_fork_app_server: crate::slop_fork::SlopForkAppServerState::default(),
             pending_update_action: None,
             pending_shutdown_exit_thread_id: None,
             windows_sandbox: WindowsSandboxState::default(),
@@ -8872,6 +8905,7 @@ guardian_approval = true
                 feedback_audience: FeedbackAudience::External,
                 remote_app_server_url: None,
                 remote_app_server_auth_token: None,
+                slop_fork_app_server: crate::slop_fork::SlopForkAppServerState::default(),
                 pending_update_action: None,
                 pending_shutdown_exit_thread_id: None,
                 windows_sandbox: WindowsSandboxState::default(),
@@ -9171,6 +9205,49 @@ guardian_approval = true
                     .expect("hook notification should serialize"),
             ]
         );
+    }
+
+    #[test]
+    fn thread_event_store_rebase_preserves_remote_pilot_and_autoresearch_updates() {
+        let thread_id = ThreadId::new();
+        let mut store = ThreadEventStore::new(/*capacity*/ 8);
+        store.push_notification(ServerNotification::PilotUpdated(
+            codex_app_server_protocol::PilotUpdatedNotification {
+                thread_id: thread_id.to_string(),
+                update_type: codex_app_server_protocol::PilotUpdateType::Updated,
+                run: None,
+                message: Some("pilot replay".to_string()),
+            },
+        ));
+        store.push_notification(ServerNotification::AutoresearchUpdated(
+            codex_app_server_protocol::AutoresearchUpdatedNotification {
+                thread_id: thread_id.to_string(),
+                update_type: codex_app_server_protocol::AutoresearchUpdateType::Updated,
+                run: None,
+                message: Some("autoresearch replay".to_string()),
+            },
+        ));
+
+        store.rebase_buffer_after_session_refresh();
+
+        let snapshot = store.snapshot();
+        let notifications = snapshot
+            .events
+            .into_iter()
+            .map(|event| match event {
+                ThreadBufferedEvent::Notification(notification) => notification,
+                other => panic!("expected buffered notification, saw: {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(notifications.len(), 2);
+        assert!(matches!(
+            notifications[0],
+            ServerNotification::PilotUpdated(_)
+        ));
+        assert!(matches!(
+            notifications[1],
+            ServerNotification::AutoresearchUpdated(_)
+        ));
     }
 
     fn next_user_turn_op(op_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Op>) -> Op {
@@ -10070,6 +10147,8 @@ guardian_approval = true
 
         let replacement = ChatWidget::new_with_app_event(ChatWidgetInit {
             config: app.config.clone(),
+            app_server_owns_slop_fork_follow_ups: true,
+            is_remote_app_server: app.remote_app_server_url.is_some(),
             frame_requester: crate::tui::FrameRequester::test_dummy(),
             app_event_tx: app.app_event_tx.clone(),
             initial_user_message: None,

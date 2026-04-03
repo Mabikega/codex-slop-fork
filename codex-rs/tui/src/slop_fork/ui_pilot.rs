@@ -1,4 +1,6 @@
 use super::*;
+use codex_app_server_protocol::PilotCycleKind as AppServerPilotCycleKind;
+use codex_app_server_protocol::PilotStatus as AppServerPilotStatus;
 use codex_core::slop_fork::pilot::PilotCyclePlan;
 use codex_core::slop_fork::pilot::PilotStatus;
 
@@ -40,6 +42,9 @@ impl SlopForkUi {
     ) -> Vec<SlopForkUiEffect> {
         let _ = cycle_kind;
         self.awaiting_pilot_turn_start = true;
+        if ctx.remote_app_server {
+            return Vec::new();
+        }
         match self.ensure_pilot_runtime(ctx).and_then(|runtime| {
             runtime
                 .note_submission_dispatched()
@@ -55,6 +60,11 @@ impl SlopForkUi {
         ctx: &SlopForkUiContext,
     ) -> Vec<SlopForkUiEffect> {
         self.awaiting_pilot_turn_start = false;
+        if ctx.remote_app_server {
+            return vec![SlopForkUiEffect::AddErrorMessage(
+                "Pilot submission failed before the turn could start.".to_string(),
+            )];
+        }
         match self.ensure_pilot_runtime(ctx).and_then(|runtime| {
             runtime
                 .note_submission_failure("Pilot submission failed before the turn could start.")
@@ -74,6 +84,9 @@ impl SlopForkUi {
         from_replay: bool,
     ) -> Vec<SlopForkUiEffect> {
         if from_replay {
+            return Vec::new();
+        }
+        if ctx.remote_app_server {
             return Vec::new();
         }
         let should_claim_pending_cycle = if self.awaiting_pilot_turn_start {
@@ -115,6 +128,10 @@ impl SlopForkUi {
         if from_replay {
             return Vec::new();
         }
+        if ctx.remote_app_server {
+            let _ = (turn_id, last_agent_message);
+            return Vec::new();
+        }
         let runtime = match self.ensure_pilot_runtime(ctx) {
             Ok(runtime) => runtime,
             Err(err) => return vec![SlopForkUiEffect::AddErrorMessage(err)],
@@ -141,6 +158,9 @@ impl SlopForkUi {
         if from_replay {
             return Vec::new();
         }
+        if ctx.remote_app_server {
+            return Vec::new();
+        }
         self.pilot_follow_up_effects(ctx)
     }
 
@@ -155,6 +175,10 @@ impl SlopForkUi {
             return Vec::new();
         }
         self.awaiting_pilot_turn_start = false;
+        if ctx.remote_app_server {
+            let _ = (turn_id, reason);
+            return Vec::new();
+        }
         match self.ensure_pilot_runtime(ctx) {
             Ok(runtime) => match runtime.abort_turn(turn_id, reason) {
                 Ok(true) => vec![SlopForkUiEffect::AddInfoMessage {
@@ -174,6 +198,13 @@ impl SlopForkUi {
     }
 
     pub(crate) fn pilot_has_active_turn(&mut self, ctx: &SlopForkUiContext, turn_id: &str) -> bool {
+        if ctx.remote_app_server {
+            return self
+                .remote_pilot_run
+                .as_ref()
+                .and_then(|run| run.active_turn_id.as_deref())
+                == Some(turn_id);
+        }
         self.ensure_pilot_runtime(ctx)
             .ok()
             .is_some_and(|runtime| runtime.is_active_turn(turn_id))
@@ -185,6 +216,27 @@ impl SlopForkUi {
         goal: String,
         deadline_at: Option<i64>,
     ) -> Vec<SlopForkUiEffect> {
+        if ctx.remote_app_server {
+            let Some(thread_id) = ctx.thread_id.as_ref() else {
+                return vec![SlopForkUiEffect::AddErrorMessage(
+                    "Pilot requires an active session.".to_string(),
+                )];
+            };
+            return vec![
+                SlopForkUiEffect::AddInfoMessage {
+                    message: "Pilot start requested.".to_string(),
+                    hint: Some(
+                        "The connected app-server owns Pilot state and will queue the first cycle when the thread is idle."
+                            .to_string(),
+                    ),
+                },
+                SlopForkUiEffect::StartRemotePilot {
+                    thread_id: thread_id.clone(),
+                    goal,
+                    deadline_at,
+                },
+            ];
+        }
         let (recovered, has_queued_or_running_cycle) = {
             let runtime = match self.ensure_pilot_runtime(ctx) {
                 Ok(runtime) => runtime,
@@ -245,6 +297,27 @@ impl SlopForkUi {
     }
 
     fn pilot_pause(&mut self, ctx: &SlopForkUiContext) -> Vec<SlopForkUiEffect> {
+        if ctx.remote_app_server {
+            let Some(thread_id) = ctx.thread_id.as_ref() else {
+                return vec![SlopForkUiEffect::AddErrorMessage(
+                    "Pilot requires an active session.".to_string(),
+                )];
+            };
+            self.awaiting_pilot_turn_start = false;
+            return vec![
+                SlopForkUiEffect::AddInfoMessage {
+                    message: "Pilot pause requested.".to_string(),
+                    hint: Some(
+                        "Use $pilot status to inspect the server-owned Pilot state after the control request completes."
+                            .to_string(),
+                    ),
+                },
+                SlopForkUiEffect::ControlRemotePilot {
+                    thread_id: thread_id.clone(),
+                    action: codex_app_server_protocol::PilotControlAction::Pause,
+                },
+            ];
+        }
         let runtime = match self.ensure_pilot_runtime(ctx) {
             Ok(runtime) => runtime,
             Err(err) => return vec![SlopForkUiEffect::AddErrorMessage(err)],
@@ -270,6 +343,26 @@ impl SlopForkUi {
     }
 
     fn pilot_resume(&mut self, ctx: &SlopForkUiContext) -> Vec<SlopForkUiEffect> {
+        if ctx.remote_app_server {
+            let Some(thread_id) = ctx.thread_id.as_ref() else {
+                return vec![SlopForkUiEffect::AddErrorMessage(
+                    "Pilot requires an active session.".to_string(),
+                )];
+            };
+            return vec![
+                SlopForkUiEffect::AddInfoMessage {
+                    message: "Pilot resume requested.".to_string(),
+                    hint: Some(
+                        "The connected app-server will decide whether Pilot can continue from its current state."
+                            .to_string(),
+                    ),
+                },
+                SlopForkUiEffect::ControlRemotePilot {
+                    thread_id: thread_id.clone(),
+                    action: codex_app_server_protocol::PilotControlAction::Resume,
+                },
+            ];
+        }
         let runtime = match self.ensure_pilot_runtime(ctx) {
             Ok(runtime) => runtime,
             Err(err) => return vec![SlopForkUiEffect::AddErrorMessage(err)],
@@ -293,6 +386,26 @@ impl SlopForkUi {
     }
 
     fn pilot_wrap_up(&mut self, ctx: &SlopForkUiContext) -> Vec<SlopForkUiEffect> {
+        if ctx.remote_app_server {
+            let Some(thread_id) = ctx.thread_id.as_ref() else {
+                return vec![SlopForkUiEffect::AddErrorMessage(
+                    "Pilot requires an active session.".to_string(),
+                )];
+            };
+            return vec![
+                SlopForkUiEffect::AddInfoMessage {
+                    message: "Pilot wrap-up requested.".to_string(),
+                    hint: Some(
+                        "The connected app-server will stop broad new work and finish with a final report when Pilot accepts the request."
+                            .to_string(),
+                    ),
+                },
+                SlopForkUiEffect::ControlRemotePilot {
+                    thread_id: thread_id.clone(),
+                    action: codex_app_server_protocol::PilotControlAction::WrapUp,
+                },
+            ];
+        }
         let runtime = match self.ensure_pilot_runtime(ctx) {
             Ok(runtime) => runtime,
             Err(err) => return vec![SlopForkUiEffect::AddErrorMessage(err)],
@@ -319,6 +432,27 @@ impl SlopForkUi {
     }
 
     fn pilot_stop(&mut self, ctx: &SlopForkUiContext) -> Vec<SlopForkUiEffect> {
+        if ctx.remote_app_server {
+            let Some(thread_id) = ctx.thread_id.as_ref() else {
+                return vec![SlopForkUiEffect::AddErrorMessage(
+                    "Pilot requires an active session.".to_string(),
+                )];
+            };
+            self.awaiting_pilot_turn_start = false;
+            return vec![
+                SlopForkUiEffect::AddInfoMessage {
+                    message: "Pilot stop requested.".to_string(),
+                    hint: Some(
+                        "If a server-owned Pilot turn is already running, it may still finish, but no further cycles should be queued."
+                            .to_string(),
+                    ),
+                },
+                SlopForkUiEffect::ControlRemotePilot {
+                    thread_id: thread_id.clone(),
+                    action: codex_app_server_protocol::PilotControlAction::Stop,
+                },
+            ];
+        }
         let recovered = {
             let runtime = match self.ensure_pilot_runtime(ctx) {
                 Ok(runtime) => runtime,
@@ -384,6 +518,9 @@ impl SlopForkUi {
     }
 
     fn pilot_follow_up_effects(&mut self, ctx: &SlopForkUiContext) -> Vec<SlopForkUiEffect> {
+        if ctx.remote_app_server {
+            return Vec::new();
+        }
         if ctx.task_running {
             return Vec::new();
         }
@@ -410,6 +547,78 @@ impl SlopForkUi {
     }
 
     fn pilot_status_output(&mut self, ctx: &SlopForkUiContext) -> Vec<SlopForkUiEffect> {
+        if ctx.remote_app_server {
+            if !self.remote_pilot_state_loaded {
+                return vec![SlopForkUiEffect::AddInfoMessage {
+                    message: "Pilot remote status is unavailable.".to_string(),
+                    hint: Some(
+                        "Wait for the server to send a Pilot update before requesting status."
+                            .to_string(),
+                    ),
+                }];
+            }
+            let Some(run) = self.remote_pilot_run.as_ref() else {
+                return vec![SlopForkUiEffect::AddPlainHistoryLines(vec![
+                    "Pilot".bold().into(),
+                    "Status: idle".into(),
+                    "Server state: no Pilot run is active for this thread.".into(),
+                ])];
+            };
+
+            let mut lines = vec![
+                "Pilot".bold().into(),
+                format!("Status: {}", remote_pilot_status_label(run)).into(),
+                format!("Goal: {}", run.goal).into(),
+                format!("Iterations: {}", run.iteration_count).into(),
+                format!("Started: {}", timestamp_label(run.started_at)).into(),
+                format!("Updated: {}", timestamp_label(run.updated_at)).into(),
+            ];
+            if let Some(deadline_at) = run.deadline_at {
+                lines.push(format!("Deadline: {}", timestamp_label(deadline_at)).into());
+            } else {
+                lines.push("Deadline: none".into());
+            }
+            if let Some(active_turn_id) = run.active_turn_id.as_deref() {
+                lines.push(format!("Active turn: {active_turn_id}").into());
+            }
+            if let Some(last_submitted_turn_id) = run.last_submitted_turn_id.as_deref() {
+                lines.push(format!("Last submitted turn: {last_submitted_turn_id}").into());
+            }
+            if let Some(pending_cycle_kind) = run.pending_cycle_kind {
+                lines.push(
+                    format!(
+                        "Pending cycle: {}",
+                        remote_pilot_cycle_label(pending_cycle_kind)
+                    )
+                    .into(),
+                );
+            }
+            if run.wrap_up_requested {
+                lines.push("Wrap-up requested: true".into());
+            }
+            if let Some(last_cycle_completed_at) = run.last_cycle_completed_at {
+                lines.push(
+                    format!(
+                        "Last cycle completed: {}",
+                        timestamp_label(last_cycle_completed_at)
+                    )
+                    .into(),
+                );
+            }
+            if let Some(last_progress_at) = run.last_progress_at {
+                lines.push(format!("Last progress: {}", timestamp_label(last_progress_at)).into());
+            }
+            if let Some(status_message) = run.status_message.as_deref() {
+                lines.push(format!("Status message: {status_message}").into());
+            }
+            if let Some(last_cycle_summary) = run.last_cycle_summary.as_deref() {
+                lines.push(format!("Last cycle summary: {last_cycle_summary}").into());
+            }
+            if let Some(last_error) = run.last_error.as_deref() {
+                lines.push(format!("Last error: {last_error}").red().into());
+            }
+            return vec![SlopForkUiEffect::AddPlainHistoryLines(lines)];
+        }
         let (recovered, state) = {
             let runtime = match self.ensure_pilot_runtime(ctx) {
                 Ok(runtime) => runtime,
@@ -486,6 +695,12 @@ impl SlopForkUi {
         &mut self,
         ctx: &SlopForkUiContext,
     ) -> Result<&mut PilotRuntime, String> {
+        if ctx.remote_app_server {
+            self.pilot_runtime = None;
+            return Err(
+                "Pilot runtime is server-owned when connected to a remote app-server.".to_string(),
+            );
+        }
         let Some(thread_id) = ctx.thread_id.as_deref() else {
             self.pilot_runtime = None;
             return Err("Pilot requires an active thread.".to_string());
@@ -521,6 +736,22 @@ fn pilot_cycle_label(kind: PilotCycleKind) -> &'static str {
     match kind {
         PilotCycleKind::Continue => "continue",
         PilotCycleKind::WrapUp => "wrap_up",
+    }
+}
+
+fn remote_pilot_status_label(run: &codex_app_server_protocol::PilotRun) -> &'static str {
+    match run.status {
+        AppServerPilotStatus::Running => "running",
+        AppServerPilotStatus::Paused => "paused",
+        AppServerPilotStatus::Stopped => "stopped",
+        AppServerPilotStatus::Completed => "completed",
+    }
+}
+
+fn remote_pilot_cycle_label(kind: AppServerPilotCycleKind) -> &'static str {
+    match kind {
+        AppServerPilotCycleKind::Continue => "continue",
+        AppServerPilotCycleKind::WrapUp => "wrap_up",
     }
 }
 

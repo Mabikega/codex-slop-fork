@@ -23,6 +23,9 @@ use codex_app_server_protocol::ReviewStartParams;
 use codex_app_server_protocol::ReviewStartResponse;
 use codex_app_server_protocol::SkillsListParams;
 use codex_app_server_protocol::SkillsListResponse;
+use codex_app_server_protocol::SlopForkAssistantTurnKind;
+use codex_app_server_protocol::SlopForkAssistantTurnStartParams;
+use codex_app_server_protocol::SlopForkAssistantTurnStartResponse;
 use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadBackgroundTerminalsCleanParams;
 use codex_app_server_protocol::ThreadBackgroundTerminalsCleanResponse;
@@ -432,6 +435,26 @@ impl AppServerSession {
             })
             .await
             .wrap_err("turn/start failed in TUI")
+    }
+
+    pub(crate) async fn slop_fork_assistant_turn_start(
+        &mut self,
+        thread_id: ThreadId,
+        prompt: String,
+        kind: SlopForkAssistantTurnKind,
+    ) -> Result<SlopForkAssistantTurnStartResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::SlopForkAssistantTurnStart {
+                request_id,
+                params: SlopForkAssistantTurnStartParams {
+                    thread_id: thread_id.to_string(),
+                    prompt,
+                    kind,
+                },
+            })
+            .await
+            .wrap_err("slopFork/assistantTurnStart failed in TUI")
     }
 
     pub(crate) async fn turn_interrupt(

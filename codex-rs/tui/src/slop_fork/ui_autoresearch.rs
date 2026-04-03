@@ -1,4 +1,8 @@
 use super::*;
+use codex_app_server_protocol::AutoresearchControlAction as AppServerAutoresearchControlAction;
+use codex_app_server_protocol::AutoresearchCycleKind as AppServerAutoresearchCycleKind;
+use codex_app_server_protocol::AutoresearchMode as AppServerAutoresearchMode;
+use codex_app_server_protocol::AutoresearchStatus as AppServerAutoresearchStatus;
 use codex_core::slop_fork::autoresearch::AUTORESEARCH_PLAYBOOK_FILE;
 use codex_core::slop_fork::autoresearch::AUTORESEARCH_REPORT_FILE;
 use codex_core::slop_fork::autoresearch::AutoresearchApproachEntry;
@@ -47,6 +51,17 @@ impl SlopForkUi {
             Ok(command) => command,
             Err(err) => return vec![SlopForkUiEffect::AddErrorMessage(err)],
         };
+        if ctx.remote_app_server
+            && matches!(
+                command,
+                AutoresearchCommand::Init { .. } | AutoresearchCommand::Portfolio
+            )
+        {
+            return vec![SlopForkUiEffect::AddErrorMessage(
+                "Autoresearch init and portfolio views still require local fork state; use $autoresearch status and remote control commands when connected to a remote app-server."
+                    .to_string(),
+            )];
+        }
         match command {
             AutoresearchCommand::Help => self.show_autoresearch_usage(),
             AutoresearchCommand::Init { request, open_mode } => {
@@ -141,6 +156,9 @@ impl SlopForkUi {
             std::mem::take(&mut self.next_autoresearch_turn_requires_started_event);
         self.awaiting_autoresearch_turn_start = !requires_started_event;
         self.recovered_autoresearch_turn_start = requires_started_event;
+        if ctx.remote_app_server {
+            return Vec::new();
+        }
         match self.ensure_autoresearch_runtime(ctx).and_then(|runtime| {
             runtime
                 .note_submission_dispatched()
@@ -156,6 +174,11 @@ impl SlopForkUi {
         ctx: &SlopForkUiContext,
     ) -> Vec<SlopForkUiEffect> {
         self.clear_autoresearch_turn_start_expectation();
+        if ctx.remote_app_server {
+            return vec![SlopForkUiEffect::AddErrorMessage(
+                "Autoresearch submission failed before the turn could start.".to_string(),
+            )];
+        }
         match self.ensure_autoresearch_runtime(ctx).and_then(|runtime| {
             runtime
                 .note_submission_failure(
@@ -177,6 +200,10 @@ impl SlopForkUi {
         from_replay: bool,
     ) -> Vec<SlopForkUiEffect> {
         if from_replay {
+            return Vec::new();
+        }
+        if ctx.remote_app_server {
+            let _ = turn_id;
             return Vec::new();
         }
         if ctx.thread_id.is_none() {
@@ -224,6 +251,10 @@ impl SlopForkUi {
         if from_replay {
             return Vec::new();
         }
+        if ctx.remote_app_server {
+            let _ = (turn_id, last_agent_message);
+            return Vec::new();
+        }
         let completed = match self.complete_autoresearch_turn(ctx, turn_id, last_agent_message) {
             Ok(completed) => completed,
             Err(err) => return vec![SlopForkUiEffect::AddErrorMessage(err)],
@@ -239,6 +270,13 @@ impl SlopForkUi {
         ctx: &SlopForkUiContext,
         turn_id: &str,
     ) -> bool {
+        if ctx.remote_app_server {
+            return self
+                .remote_autoresearch_run
+                .as_ref()
+                .and_then(|run| run.active_turn_id.as_deref())
+                == Some(turn_id);
+        }
         let pending_turn_can_claim_completion = self.awaiting_autoresearch_turn_start;
         self.ensure_autoresearch_runtime(ctx)
             .ok()
@@ -256,6 +294,9 @@ impl SlopForkUi {
         if from_replay {
             return Vec::new();
         }
+        if ctx.remote_app_server {
+            return Vec::new();
+        }
         self.autoresearch_follow_up_effects(ctx, AutoresearchTurnStartPolicy::AllowCompletionClaim)
     }
 
@@ -270,6 +311,10 @@ impl SlopForkUi {
             return Vec::new();
         }
         self.clear_autoresearch_turn_start_expectation();
+        if ctx.remote_app_server {
+            let _ = (turn_id, reason);
+            return Vec::new();
+        }
         match self.ensure_autoresearch_runtime(ctx) {
             Ok(runtime) => match runtime.abort_turn(turn_id, reason) {
                 Ok(true) => vec![SlopForkUiEffect::AddInfoMessage {
@@ -288,6 +333,44 @@ impl SlopForkUi {
         }
     }
 
+    pub(crate) fn on_autoresearch_updated(
+        &mut self,
+        ctx: &SlopForkUiContext,
+        update_type: codex_app_server_protocol::AutoresearchUpdateType,
+        run: Option<AppServerAutoresearchRun>,
+        message: Option<String>,
+        from_replay: bool,
+    ) -> Vec<SlopForkUiEffect> {
+        if ctx.remote_app_server {
+            self.remote_autoresearch_run = run.clone();
+            self.autoresearch_runtime = None;
+            if !from_replay && !self.remote_autoresearch_readback_pending {
+                self.remote_autoresearch_bootstrap_pending = false;
+            }
+            self.remote_autoresearch_state_loaded = true;
+            self.clear_autoresearch_turn_start_expectation();
+            if from_replay {
+                return Vec::new();
+            }
+        } else if from_replay {
+            return Vec::new();
+        } else if let Some(thread_id) = ctx.thread_id.as_deref() {
+            self.autoresearch_runtime = AutoresearchRuntime::load(&ctx.codex_home, thread_id).ok();
+        } else {
+            self.autoresearch_runtime = None;
+            self.remote_autoresearch_state_loaded = false;
+        }
+        let message =
+            message.or_else(|| fallback_autoresearch_status_message(update_type, run.as_ref()));
+        message
+            .map(|message| SlopForkUiEffect::AddInfoMessage {
+                message,
+                hint: None,
+            })
+            .into_iter()
+            .collect()
+    }
+
     fn autoresearch_start(
         &mut self,
         ctx: &SlopForkUiContext,
@@ -295,6 +378,32 @@ impl SlopForkUi {
         max_runs: Option<u32>,
         mode: AutoresearchMode,
     ) -> Vec<SlopForkUiEffect> {
+        if ctx.remote_app_server {
+            let Some(thread_id) = ctx.thread_id.as_ref() else {
+                return vec![SlopForkUiEffect::AddErrorMessage(
+                    "Autoresearch requires an active session.".to_string(),
+                )];
+            };
+            return vec![
+                SlopForkUiEffect::AddInfoMessage {
+                    message: if mode.is_open_ended() {
+                        format!("Autoresearch {} mode start requested.", mode.cli_name())
+                    } else {
+                        "Autoresearch start requested.".to_string()
+                    },
+                    hint: Some(
+                        "The connected app-server owns Autoresearch state and will refresh the cached run after the request completes."
+                            .to_string(),
+                    ),
+                },
+                SlopForkUiEffect::StartRemoteAutoresearch {
+                    thread_id: thread_id.clone(),
+                    goal,
+                    max_runs,
+                    mode: autoresearch_mode_to_remote(mode),
+                },
+            ];
+        }
         let Some(thread_id) = ctx.thread_id.as_deref() else {
             return vec![SlopForkUiEffect::AddErrorMessage(
                 "Autoresearch requires an active session.".to_string(),
@@ -384,6 +493,28 @@ impl SlopForkUi {
     }
 
     fn autoresearch_pause(&mut self, ctx: &SlopForkUiContext) -> Vec<SlopForkUiEffect> {
+        if ctx.remote_app_server {
+            let Some(thread_id) = ctx.thread_id.as_ref() else {
+                return vec![SlopForkUiEffect::AddErrorMessage(
+                    "Autoresearch requires an active session.".to_string(),
+                )];
+            };
+            self.clear_autoresearch_turn_start_expectation();
+            return vec![
+                SlopForkUiEffect::AddInfoMessage {
+                    message: "Autoresearch pause requested.".to_string(),
+                    hint: Some(
+                        "The connected app-server will refresh the cached Autoresearch state after the control request completes."
+                            .to_string(),
+                    ),
+                },
+                SlopForkUiEffect::ControlRemoteAutoresearch {
+                    thread_id: thread_id.clone(),
+                    action: AppServerAutoresearchControlAction::Pause,
+                    focus: None,
+                },
+            ];
+        }
         let runtime = match self.ensure_autoresearch_runtime(ctx) {
             Ok(runtime) => runtime,
             Err(err) => return vec![SlopForkUiEffect::AddErrorMessage(err)],
@@ -424,6 +555,27 @@ impl SlopForkUi {
         ctx: &SlopForkUiContext,
         focus: Option<String>,
     ) -> Vec<SlopForkUiEffect> {
+        if ctx.remote_app_server {
+            let Some(thread_id) = ctx.thread_id.as_ref() else {
+                return vec![SlopForkUiEffect::AddErrorMessage(
+                    "Autoresearch requires an active session.".to_string(),
+                )];
+            };
+            return vec![
+                SlopForkUiEffect::AddInfoMessage {
+                    message: "Autoresearch discovery requested.".to_string(),
+                    hint: Some(
+                        "The connected app-server will refresh the cached Autoresearch state after the control request completes."
+                            .to_string(),
+                    ),
+                },
+                SlopForkUiEffect::ControlRemoteAutoresearch {
+                    thread_id: thread_id.clone(),
+                    action: AppServerAutoresearchControlAction::Discover,
+                    focus,
+                },
+            ];
+        }
         let runtime = match self.ensure_autoresearch_runtime(ctx) {
             Ok(runtime) => runtime,
             Err(err) => return vec![SlopForkUiEffect::AddErrorMessage(err)],
@@ -457,6 +609,27 @@ impl SlopForkUi {
     }
 
     fn autoresearch_resume(&mut self, ctx: &SlopForkUiContext) -> Vec<SlopForkUiEffect> {
+        if ctx.remote_app_server {
+            let Some(thread_id) = ctx.thread_id.as_ref() else {
+                return vec![SlopForkUiEffect::AddErrorMessage(
+                    "Autoresearch requires an active session.".to_string(),
+                )];
+            };
+            return vec![
+                SlopForkUiEffect::AddInfoMessage {
+                    message: "Autoresearch resume requested.".to_string(),
+                    hint: Some(
+                        "The connected app-server will decide whether the current Autoresearch session can continue."
+                            .to_string(),
+                    ),
+                },
+                SlopForkUiEffect::ControlRemoteAutoresearch {
+                    thread_id: thread_id.clone(),
+                    action: AppServerAutoresearchControlAction::Resume,
+                    focus: None,
+                },
+            ];
+        }
         let recovered = {
             let runtime = match self.ensure_autoresearch_runtime(ctx) {
                 Ok(runtime) => runtime,
@@ -501,6 +674,27 @@ impl SlopForkUi {
     }
 
     fn autoresearch_wrap_up(&mut self, ctx: &SlopForkUiContext) -> Vec<SlopForkUiEffect> {
+        if ctx.remote_app_server {
+            let Some(thread_id) = ctx.thread_id.as_ref() else {
+                return vec![SlopForkUiEffect::AddErrorMessage(
+                    "Autoresearch requires an active session.".to_string(),
+                )];
+            };
+            return vec![
+                SlopForkUiEffect::AddInfoMessage {
+                    message: "Autoresearch wrap-up requested.".to_string(),
+                    hint: Some(
+                        "The connected app-server will refresh the cached Autoresearch state after the control request completes."
+                            .to_string(),
+                    ),
+                },
+                SlopForkUiEffect::ControlRemoteAutoresearch {
+                    thread_id: thread_id.clone(),
+                    action: AppServerAutoresearchControlAction::WrapUp,
+                    focus: None,
+                },
+            ];
+        }
         let recovered = {
             let runtime = match self.ensure_autoresearch_runtime(ctx) {
                 Ok(runtime) => runtime,
@@ -548,6 +742,28 @@ impl SlopForkUi {
     }
 
     fn autoresearch_stop(&mut self, ctx: &SlopForkUiContext) -> Vec<SlopForkUiEffect> {
+        if ctx.remote_app_server {
+            let Some(thread_id) = ctx.thread_id.as_ref() else {
+                return vec![SlopForkUiEffect::AddErrorMessage(
+                    "Autoresearch requires an active session.".to_string(),
+                )];
+            };
+            self.clear_autoresearch_turn_start_expectation();
+            return vec![
+                SlopForkUiEffect::AddInfoMessage {
+                    message: "Autoresearch stop requested.".to_string(),
+                    hint: Some(
+                        "If a server-owned controller turn is already running, it may still finish, but no further cycles should be queued."
+                            .to_string(),
+                    ),
+                },
+                SlopForkUiEffect::ControlRemoteAutoresearch {
+                    thread_id: thread_id.clone(),
+                    action: AppServerAutoresearchControlAction::Stop,
+                    focus: None,
+                },
+            ];
+        }
         let recovered = {
             let runtime = match self.ensure_autoresearch_runtime(ctx) {
                 Ok(runtime) => runtime,
@@ -615,6 +831,28 @@ impl SlopForkUi {
     }
 
     fn autoresearch_clear(&mut self, ctx: &SlopForkUiContext) -> Vec<SlopForkUiEffect> {
+        if ctx.remote_app_server {
+            let Some(thread_id) = ctx.thread_id.as_ref() else {
+                return vec![SlopForkUiEffect::AddErrorMessage(
+                    "Autoresearch requires an active session.".to_string(),
+                )];
+            };
+            self.clear_autoresearch_turn_start_expectation();
+            return vec![
+                SlopForkUiEffect::AddInfoMessage {
+                    message: "Autoresearch clear requested.".to_string(),
+                    hint: Some(
+                        "The connected app-server will refresh the cached Autoresearch state after the control request completes."
+                            .to_string(),
+                    ),
+                },
+                SlopForkUiEffect::ControlRemoteAutoresearch {
+                    thread_id: thread_id.clone(),
+                    action: AppServerAutoresearchControlAction::Clear,
+                    focus: None,
+                },
+            ];
+        }
         let Some(thread_id) = ctx.thread_id.as_deref() else {
             return vec![SlopForkUiEffect::AddErrorMessage(
                 "Autoresearch requires an active session.".to_string(),
@@ -693,6 +931,9 @@ impl SlopForkUi {
         turn_start_policy: AutoresearchTurnStartPolicy,
     ) -> Vec<SlopForkUiEffect> {
         self.next_autoresearch_turn_requires_started_event = false;
+        if ctx.remote_app_server {
+            return Vec::new();
+        }
         if ctx.task_running || ctx.thread_id.is_none() {
             return Vec::new();
         }
@@ -722,6 +963,99 @@ impl SlopForkUi {
     }
 
     fn autoresearch_status_output(&mut self, ctx: &SlopForkUiContext) -> Vec<SlopForkUiEffect> {
+        if ctx.remote_app_server {
+            if !self.remote_autoresearch_state_loaded {
+                return vec![SlopForkUiEffect::AddInfoMessage {
+                    message: "Autoresearch remote status is unavailable.".to_string(),
+                    hint: Some(
+                        "Wait for the server to send or refresh Autoresearch state before requesting status."
+                            .to_string(),
+                    ),
+                }];
+            }
+            let Some(run) = self.remote_autoresearch_run.as_ref() else {
+                return vec![SlopForkUiEffect::AddPlainHistoryLines(vec![
+                    "Autoresearch".bold().into(),
+                    "Status: idle".into(),
+                    "Server state: no Autoresearch run is active for this thread.".into(),
+                ])];
+            };
+            let mut lines = vec![
+                "Autoresearch".bold().into(),
+                format!("Status: {}", remote_autoresearch_status_label(run.status)).into(),
+                format!("Mode: {}", remote_autoresearch_mode_label(run.mode)).into(),
+                format!("Goal: {}", run.goal).into(),
+                format!("Iterations: {}", run.iteration_count).into(),
+                format!("Discovery passes: {}", run.discovery_count).into(),
+                format!("Started: {}", timestamp_label(run.started_at)).into(),
+                format!("Updated: {}", timestamp_label(run.updated_at)).into(),
+            ];
+            if let Some(max_runs) = run.max_runs {
+                lines.push(format!("Max runs: {max_runs}").into());
+            }
+            if let Some(active_cycle_kind) = run.active_cycle_kind {
+                lines.push(
+                    format!(
+                        "Active cycle: {}",
+                        remote_autoresearch_cycle_label(active_cycle_kind)
+                    )
+                    .into(),
+                );
+            }
+            if let Some(pending_cycle_kind) = run.pending_cycle_kind {
+                lines.push(
+                    format!(
+                        "Pending cycle: {}",
+                        remote_autoresearch_cycle_label(pending_cycle_kind)
+                    )
+                    .into(),
+                );
+            }
+            if let Some(active_turn_id) = run.active_turn_id.as_deref() {
+                lines.push(format!("Active turn: {active_turn_id}").into());
+            }
+            if let Some(last_submitted_turn_id) = run.last_submitted_turn_id.as_deref() {
+                lines.push(format!("Last submitted turn: {last_submitted_turn_id}").into());
+            }
+            if run.wrap_up_requested {
+                lines.push("Wrap-up requested: true".into());
+            }
+            if let Some(stop_requested_at) = run.stop_requested_at {
+                lines
+                    .push(format!("Stop requested: {}", timestamp_label(stop_requested_at)).into());
+            }
+            if let Some(last_cycle_completed_at) = run.last_cycle_completed_at {
+                lines.push(
+                    format!(
+                        "Last cycle completed: {}",
+                        timestamp_label(last_cycle_completed_at)
+                    )
+                    .into(),
+                );
+            }
+            if let Some(last_discovery_completed_at) = run.last_discovery_completed_at {
+                lines.push(
+                    format!(
+                        "Last discovery completed: {}",
+                        timestamp_label(last_discovery_completed_at)
+                    )
+                    .into(),
+                );
+            }
+            if let Some(last_progress_at) = run.last_progress_at {
+                lines.push(format!("Last progress: {}", timestamp_label(last_progress_at)).into());
+            }
+            if let Some(status_message) = run.status_message.as_deref() {
+                lines.push(format!("Status message: {status_message}").into());
+            }
+            if let Some(last_cycle_summary) = run.last_cycle_summary.as_deref() {
+                lines.push(format!("Last cycle summary: {last_cycle_summary}").into());
+            }
+            if let Some(last_error) = run.last_error.as_deref() {
+                lines.push(format!("Last error: {last_error}").red().into());
+            }
+            return vec![SlopForkUiEffect::AddPlainHistoryLines(lines)];
+        }
         if ctx.thread_id.is_none() {
             return vec![SlopForkUiEffect::AddErrorMessage(
                 "Autoresearch requires an active session.".to_string(),
@@ -1087,6 +1421,13 @@ impl SlopForkUi {
         &mut self,
         ctx: &SlopForkUiContext,
     ) -> Result<&mut AutoresearchRuntime, String> {
+        if ctx.remote_app_server {
+            self.autoresearch_runtime = None;
+            return Err(
+                "Autoresearch runtime is server-owned when connected to a remote app-server."
+                    .to_string(),
+            );
+        }
         let Some(thread_id) = ctx.thread_id.as_deref() else {
             self.autoresearch_runtime = None;
             return Err("Autoresearch requires an active session.".to_string());
@@ -1167,6 +1508,47 @@ fn autoresearch_status_label(status: AutoresearchStatus) -> &'static str {
         AutoresearchStatus::Stopped => "stopped",
         AutoresearchStatus::Completed => "completed",
     }
+}
+
+fn autoresearch_mode_to_remote(mode: AutoresearchMode) -> AppServerAutoresearchMode {
+    match mode {
+        AutoresearchMode::Optimize => AppServerAutoresearchMode::Optimize,
+        AutoresearchMode::Research => AppServerAutoresearchMode::Research,
+        AutoresearchMode::Scientist => AppServerAutoresearchMode::Scientist,
+    }
+}
+
+fn remote_autoresearch_status_label(status: AppServerAutoresearchStatus) -> &'static str {
+    match status {
+        AppServerAutoresearchStatus::Running => "running",
+        AppServerAutoresearchStatus::Paused => "paused",
+        AppServerAutoresearchStatus::Stopped => "stopped",
+        AppServerAutoresearchStatus::Completed => "completed",
+    }
+}
+
+fn remote_autoresearch_mode_label(mode: AppServerAutoresearchMode) -> &'static str {
+    match mode {
+        AppServerAutoresearchMode::Optimize => "optimize",
+        AppServerAutoresearchMode::Research => "research",
+        AppServerAutoresearchMode::Scientist => "scientist",
+    }
+}
+
+fn remote_autoresearch_cycle_label(kind: AppServerAutoresearchCycleKind) -> &'static str {
+    match kind {
+        AppServerAutoresearchCycleKind::Continue => "continue",
+        AppServerAutoresearchCycleKind::Research => "research",
+        AppServerAutoresearchCycleKind::Discovery => "discovery",
+        AppServerAutoresearchCycleKind::WrapUp => "wrap-up",
+    }
+}
+
+fn timestamp_label(timestamp: i64) -> String {
+    chrono::TimeZone::timestamp_opt(&Local, timestamp, 0)
+        .single()
+        .map(|ts| ts.to_rfc3339())
+        .unwrap_or_else(|| timestamp.to_string())
 }
 
 fn append_controller_lines(

@@ -364,114 +364,6 @@
       ],
       "type": "object"
     },
-    "AutoresearchControlAction": {
-      "oneOf": [
-        {
-          "properties": {
-            "type": {
-              "enum": [
-                "pause"
-              ],
-              "title": "PauseAutoresearchControlActionType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "type"
-          ],
-          "title": "PauseAutoresearchControlAction",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "type": {
-              "enum": [
-                "resume"
-              ],
-              "title": "ResumeAutoresearchControlActionType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "type"
-          ],
-          "title": "ResumeAutoresearchControlAction",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "type": {
-              "enum": [
-                "wrapUp"
-              ],
-              "title": "WrapUpAutoresearchControlActionType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "type"
-          ],
-          "title": "WrapUpAutoresearchControlAction",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "type": {
-              "enum": [
-                "stop"
-              ],
-              "title": "StopAutoresearchControlActionType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "type"
-          ],
-          "title": "StopAutoresearchControlAction",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "type": {
-              "enum": [
-                "clear"
-              ],
-              "title": "ClearAutoresearchControlActionType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "type"
-          ],
-          "title": "ClearAutoresearchControlAction",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "type": {
-              "enum": [
-                "discover"
-              ],
-              "title": "DiscoverAutoresearchControlActionType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "type"
-          ],
-          "title": "DiscoverAutoresearchControlAction",
-          "type": "object"
-        }
-      ]
-    },
-    "AutoresearchMode": {
-      "enum": [
-        "optimize",
-        "research",
-        "scientist"
-      ],
-      "type": "string"
-    },
     "ByteRange": {
       "properties": {
         "end": {
@@ -1685,15 +1577,6 @@
         "none",
         "friendly",
         "pragmatic"
-      ],
-      "type": "string"
-    },
-    "PilotControlAction": {
-      "enum": [
-        "pause",
-        "resume",
-        "wrapUp",
-        "stop"
       ],
       "type": "string"
     },

@@ -7,8 +7,11 @@ use crate::outgoing_message::OutgoingEnvelope;
 use crate::outgoing_message::OutgoingError;
 use crate::outgoing_message::OutgoingMessage;
 use crate::outgoing_message::QueuedOutgoingMessage;
+use codex_app_server_protocol::ExperimentalApi;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::JSONRPCMessage;
+#[cfg(test)]
+use codex_app_server_protocol::PilotUpdatedNotification;
 use codex_app_server_protocol::ServerRequest;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -245,6 +248,9 @@ fn should_skip_notification_for_connection(
     connection_state: &OutboundConnectionState,
     message: &OutgoingMessage,
 ) -> bool {
+    let experimental_api_enabled = connection_state
+        .experimental_api_enabled
+        .load(Ordering::Acquire);
     let Ok(opted_out_notification_methods) = connection_state.opted_out_notification_methods.read()
     else {
         warn!("failed to read outbound opted-out notifications");
@@ -252,6 +258,11 @@ fn should_skip_notification_for_connection(
     };
     match message {
         OutgoingMessage::AppServerNotification(notification) => {
+            if !experimental_api_enabled
+                && ExperimentalApi::experimental_reason(notification).is_some()
+            {
+                return true;
+            }
             let method = notification.to_string();
             opted_out_notification_methods.contains(method.as_str())
         }
@@ -1053,5 +1064,43 @@ mod tests {
                 ConfigWarningNotification { summary, .. }
             )) if summary == "second"
         ));
+    }
+
+    #[tokio::test]
+    async fn experimental_notifications_are_skipped_for_stable_connections() {
+        let connection_id = ConnectionId(4);
+        let (writer_tx, mut writer_rx) = mpsc::channel(1);
+
+        let mut connections = HashMap::new();
+        connections.insert(
+            connection_id,
+            OutboundConnectionState::new(
+                writer_tx,
+                Arc::new(AtomicBool::new(true)),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(RwLock::new(HashSet::new())),
+                /*disconnect_sender*/ None,
+            ),
+        );
+
+        route_outgoing_envelope(
+            &mut connections,
+            OutgoingEnvelope::ToConnection {
+                connection_id,
+                message: OutgoingMessage::AppServerNotification(ServerNotification::PilotUpdated(
+                    PilotUpdatedNotification {
+                        thread_id: "thread_123".to_string(),
+                        update_type: codex_app_server_protocol::PilotUpdateType::Updated,
+                        run: None,
+                        message: None,
+                    },
+                )),
+                write_complete_tx: None,
+            },
+        )
+        .await;
+
+        assert!(connections.contains_key(&connection_id));
+        assert!(writer_rx.try_recv().is_err());
     }
 }

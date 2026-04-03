@@ -187,6 +187,23 @@ macro_rules! client_request_definitions {
                 experimental_type_entry!($(#[experimental($reason)])? $response),
             )*
         ];
+        pub(crate) const EXPERIMENTAL_CLIENT_METHOD_NESTED_TYPES: &[&str] = &[
+            // Experimental method filtering only knows about top-level params/response types.
+            // Keep nested helper types here so generated stable schemas do not leak orphaned
+            // definitions for experimental-only request surfaces.
+            "v2::AutoresearchControlAction",
+            "v2::AutoresearchCycleKind",
+            "v2::AutoresearchMode",
+            "v2::AutoresearchRun",
+            "v2::AutoresearchStatus",
+            "v2::AutoresearchUpdateType",
+            "v2::PilotControlAction",
+            "v2::PilotCycleKind",
+            "v2::PilotRun",
+            "v2::PilotStatus",
+            "v2::PilotUpdateType",
+            "v2::SlopForkAssistantTurnKind",
+        ];
 
         pub fn export_client_responses(
             out_dir: &::std::path::Path,
@@ -392,6 +409,11 @@ client_request_definitions! {
         params: v2::PilotControlParams,
         response: v2::PilotControlResponse,
     },
+    #[experimental("autoresearch/read")]
+    AutoresearchRead => "autoresearch/read" {
+        params: v2::AutoresearchReadParams,
+        response: v2::AutoresearchReadResponse,
+    },
     #[experimental("autoresearch/start")]
     AutoresearchStart => "autoresearch/start" {
         params: v2::AutoresearchStartParams,
@@ -401,6 +423,11 @@ client_request_definitions! {
     AutoresearchControl => "autoresearch/control" {
         params: v2::AutoresearchControlParams,
         response: v2::AutoresearchControlResponse,
+    },
+    #[experimental("slopFork/assistantTurnStart")]
+    SlopForkAssistantTurnStart => "slopFork/assistantTurnStart" {
+        params: v2::SlopForkAssistantTurnStartParams,
+        response: v2::SlopForkAssistantTurnStartResponse,
     },
     FsWatch => "fs/watch" {
         params: v2::FsWatchParams,
@@ -998,6 +1025,8 @@ server_notification_definitions! {
     AccountRateLimitsUpdated => "account/rateLimits/updated" (v2::AccountRateLimitsUpdatedNotification),
     AppListUpdated => "app/list/updated" (v2::AppListUpdatedNotification),
     AutomationUpdated => "automation/updated" (v2::AutomationUpdatedNotification),
+    #[experimental("autoresearch/updated")]
+    AutoresearchUpdated => "autoresearch/updated" (v2::AutoresearchUpdatedNotification),
     #[experimental("pilot/updated")]
     PilotUpdated => "pilot/updated" (v2::PilotUpdatedNotification),
     FsChanged => "fs/changed" (v2::FsChangedNotification),
@@ -1034,6 +1063,39 @@ server_notification_definitions! {
     AccountLoginCompleted(v2::AccountLoginCompletedNotification),
 
 }
+
+pub(crate) const EXPERIMENTAL_SERVER_NOTIFICATION_METHODS: &[&str] = &[
+    "autoresearch/updated",
+    "pilot/updated",
+    "thread/realtime/started",
+    "thread/realtime/itemAdded",
+    "thread/realtime/transcriptUpdated",
+    "thread/realtime/outputAudio/delta",
+    "thread/realtime/error",
+    "thread/realtime/closed",
+];
+
+pub(crate) const EXPERIMENTAL_SERVER_NOTIFICATION_TYPES: &[&str] = &[
+    "v2::AutoresearchUpdatedNotification",
+    "v2::PilotUpdatedNotification",
+    "v2::ThreadRealtimeStartedNotification",
+    "v2::ThreadRealtimeItemAddedNotification",
+    "v2::ThreadRealtimeTranscriptUpdatedNotification",
+    "v2::ThreadRealtimeOutputAudioDeltaNotification",
+    "v2::ThreadRealtimeErrorNotification",
+    "v2::ThreadRealtimeClosedNotification",
+];
+
+pub(crate) const EXPERIMENTAL_SERVER_NOTIFICATION_NESTED_TYPES: &[&str] = &[
+    "v2::AutoresearchCycleKind",
+    "v2::AutoresearchRun",
+    "v2::AutoresearchStatus",
+    "v2::AutoresearchUpdateType",
+    "v2::PilotRun",
+    "v2::PilotCycleKind",
+    "v2::PilotStatus",
+    "v2::PilotUpdateType",
+];
 
 client_notification_definitions! {
     Initialized,
@@ -1662,6 +1724,31 @@ mod tests {
     }
 
     #[test]
+    fn serialize_slop_fork_assistant_turn_start() -> Result<()> {
+        let request = ClientRequest::SlopForkAssistantTurnStart {
+            request_id: RequestId::Integer(11),
+            params: v2::SlopForkAssistantTurnStartParams {
+                thread_id: "thr_123".to_string(),
+                prompt: "Continue autonomously".to_string(),
+                kind: v2::SlopForkAssistantTurnKind::Pilot,
+            },
+        };
+        assert_eq!(
+            json!({
+                "method": "slopFork/assistantTurnStart",
+                "id": 11,
+                "params": {
+                    "threadId": "thr_123",
+                    "prompt": "Continue autonomously",
+                    "kind": "pilot"
+                }
+            }),
+            serde_json::to_value(&request)?,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn account_serializes_fields_in_camel_case() -> Result<()> {
         let api_key = v2::Account::ApiKey {};
         assert_eq!(
@@ -1975,6 +2062,78 @@ mod tests {
     }
 
     #[test]
+    fn serialize_autoresearch_updated_notification() -> Result<()> {
+        let notification =
+            ServerNotification::AutoresearchUpdated(v2::AutoresearchUpdatedNotification {
+                thread_id: "thr_123".to_string(),
+                update_type: v2::AutoresearchUpdateType::DiscoveryQueued,
+                run: Some(v2::AutoresearchRun {
+                    goal: "Map OCR hypotheses".to_string(),
+                    mode: v2::AutoresearchMode::Scientist,
+                    status: v2::AutoresearchStatus::Running,
+                    started_at: 10,
+                    updated_at: 11,
+                    max_runs: Some(12),
+                    iteration_count: 2,
+                    discovery_count: 1,
+                    pending_cycle_kind: Some(v2::AutoresearchCycleKind::Discovery),
+                    active_cycle_kind: None,
+                    active_turn_id: None,
+                    last_submitted_turn_id: Some("turn_123".to_string()),
+                    wrap_up_requested: false,
+                    stop_requested_at: None,
+                    last_error: None,
+                    status_message: Some(
+                        "Autoresearch queued a bounded discovery pass.".to_string(),
+                    ),
+                    last_progress_at: Some(11),
+                    last_cycle_completed_at: Some(8),
+                    last_discovery_completed_at: Some(9),
+                    last_cycle_summary: Some("Compared two OCR families.".to_string()),
+                    last_agent_message: Some(
+                        "Compared two OCR families and kept the best one.".to_string(),
+                    ),
+                }),
+                message: Some("Autoresearch queued a bounded discovery pass.".to_string()),
+            });
+        assert_eq!(
+            json!({
+                "method": "autoresearch/updated",
+                "params": {
+                    "threadId": "thr_123",
+                    "updateType": "discoveryQueued",
+                    "run": {
+                        "goal": "Map OCR hypotheses",
+                        "mode": "scientist",
+                        "status": "running",
+                        "startedAt": 10,
+                        "updatedAt": 11,
+                        "maxRuns": 12,
+                        "iterationCount": 2,
+                        "discoveryCount": 1,
+                        "pendingCycleKind": "discovery",
+                        "activeCycleKind": null,
+                        "activeTurnId": null,
+                        "lastSubmittedTurnId": "turn_123",
+                        "wrapUpRequested": false,
+                        "stopRequestedAt": null,
+                        "lastError": null,
+                        "statusMessage": "Autoresearch queued a bounded discovery pass.",
+                        "lastProgressAt": 11,
+                        "lastCycleCompletedAt": 8,
+                        "lastDiscoveryCompletedAt": 9,
+                        "lastCycleSummary": "Compared two OCR families.",
+                        "lastAgentMessage": "Compared two OCR families and kept the best one."
+                    },
+                    "message": "Autoresearch queued a bounded discovery pass."
+                }
+            }),
+            serde_json::to_value(&notification)?,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn mock_experimental_method_is_marked_experimental() {
         let request = ClientRequest::MockExperimentalMethod {
             request_id: RequestId::Integer(1),
@@ -2034,6 +2193,20 @@ mod tests {
         };
         let reason = crate::experimental_api::ExperimentalApi::experimental_reason(&request);
         assert_eq!(reason, Some("pilot/control"));
+    }
+
+    #[test]
+    fn slop_fork_assistant_turn_start_is_marked_experimental() {
+        let request = ClientRequest::SlopForkAssistantTurnStart {
+            request_id: RequestId::Integer(1),
+            params: v2::SlopForkAssistantTurnStartParams {
+                thread_id: "thr_123".to_string(),
+                prompt: "Continue autonomously".to_string(),
+                kind: v2::SlopForkAssistantTurnKind::Autoresearch,
+            },
+        };
+        let reason = crate::experimental_api::ExperimentalApi::experimental_reason(&request);
+        assert_eq!(reason, Some("slopFork/assistantTurnStart"));
     }
 
     #[test]

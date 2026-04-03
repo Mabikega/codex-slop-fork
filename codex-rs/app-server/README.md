@@ -161,9 +161,19 @@ Example with notification opt-out:
 - `plugin/list` — list discovered plugin marketplaces, including plugin id, installed/enabled state, and optional interface metadata (**under development; do not call from production clients yet**).
 - `skills/changed` — notification emitted when watched local skill files change.
 - `app/list` — list available apps.
+- `automation/list` — list the fork's persisted automations for a thread (experimental).
+- `automation/upsert` — create or update a fork automation for a thread and return the persisted entry (experimental).
+- `automation/delete` — delete a fork automation by `runtimeId` for a thread (experimental).
+- `automation/setEnabled` — enable or disable a fork automation by `runtimeId` for a thread (experimental).
 - `pilot/read` — read the persisted state of the fork's Pilot autonomous run for a thread, even if that thread is not currently loaded (experimental).
 - `pilot/start` — start or replace the fork's persisted Pilot autonomous run for a thread; the listener queues assistant-only continuation turns once a loaded thread reaches idle (experimental).
 - `pilot/control` — send a control action (`pause`, `resume`, `wrapUp`, `stop`) to the fork's persisted Pilot autonomous run for a thread, even if that thread is not currently loaded (experimental).
+- `autoresearch/read` — read the persisted state of the fork's Autoresearch run for a thread, even if that thread is not currently loaded (experimental).
+- `autoresearch/start` — start or replace the fork's persisted Autoresearch run for a thread; the listener queues assistant-only continuation turns once a loaded thread reaches idle (experimental).
+- `autoresearch/control` — send a control action (`pause`, `resume`, `wrapUp`, `stop`, `clear`, `discover`) to the fork's persisted Autoresearch run for a thread, even if that thread is not currently loaded (experimental).
+- `slopFork/assistantTurnStart` — start a fork-owned assistant-only Pilot or Autoresearch turn on an already loaded thread and return its `turnId`; used by the fork TUI app-server path to submit controller turns without falling back to generic `turn/start` semantics (experimental).
+- `automation/updated` — notification emitted when a fork automation is created, updated, fired, paused, fails, or is deleted (experimental).
+- `autoresearch/updated` — notification emitted when the fork's Autoresearch run changes state, queues a cycle, starts a cycle, completes, pauses, stops, clears, or queues discovery (experimental).
 - `pilot/updated` — notification emitted when the fork's Pilot run changes state, queues a cycle, starts a cycle, completes, pauses, or stops (experimental).
 - `skills/config/write` — write user-level skill config by path.
 - `plugin/install` — install a plugin from a discovered marketplace entry and return any apps that still need auth (**under development; do not call from production clients yet**).

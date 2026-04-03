@@ -1,6 +1,20 @@
 use std::path::PathBuf;
 
+use codex_app_server_protocol::Automation;
+use codex_app_server_protocol::AutomationDefinition;
+use codex_app_server_protocol::AutomationScope as AppServerAutomationScope;
+use codex_app_server_protocol::AutoresearchControlAction;
+use codex_app_server_protocol::AutoresearchMode as AppServerAutoresearchMode;
+use codex_app_server_protocol::AutoresearchRun;
+use codex_app_server_protocol::PilotControlAction;
+use codex_app_server_protocol::PilotRun;
 use codex_core::slop_fork::automation::AutomationPolicyDecision;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RemoteStateLoadSource {
+    Bootstrap,
+    ActionResponse,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct LoginSettingsState {
@@ -77,6 +91,71 @@ pub(crate) enum SlopForkEvent {
         thread_id: String,
         runtime_id: String,
         error: String,
+    },
+    FetchRemoteAutomationState {
+        thread_id: String,
+    },
+    RemoteAutomationStateLoaded {
+        thread_id: String,
+        request_nonce: u64,
+        result: Result<Vec<Automation>, String>,
+    },
+    FetchRemotePilotState {
+        thread_id: String,
+    },
+    RemotePilotStateLoaded {
+        thread_id: String,
+        request_nonce: u64,
+        source: RemoteStateLoadSource,
+        report_error: bool,
+        result: Result<Option<PilotRun>, String>,
+    },
+    FetchRemoteAutoresearchState {
+        thread_id: String,
+    },
+    RemoteAutoresearchStateLoaded {
+        thread_id: String,
+        request_nonce: u64,
+        source: RemoteStateLoadSource,
+        report_error: bool,
+        result: Result<Option<AutoresearchRun>, String>,
+    },
+    StartRemotePilot {
+        thread_id: String,
+        goal: String,
+        deadline_at: Option<i64>,
+    },
+    ControlRemotePilot {
+        thread_id: String,
+        action: PilotControlAction,
+    },
+    StartRemoteAutoresearch {
+        thread_id: String,
+        goal: String,
+        max_runs: Option<u32>,
+        mode: AppServerAutoresearchMode,
+    },
+    ControlRemoteAutoresearch {
+        thread_id: String,
+        action: AutoresearchControlAction,
+        focus: Option<String>,
+    },
+    UpsertRemoteAutomation {
+        thread_id: String,
+        scope: AppServerAutomationScope,
+        automation: AutomationDefinition,
+    },
+    SetRemoteAutomationEnabled {
+        thread_id: String,
+        runtime_id: String,
+        enabled: bool,
+    },
+    DeleteRemoteAutomation {
+        thread_id: String,
+        runtime_id: String,
+    },
+    RemoteActionFailed {
+        message: String,
     },
     SaveLoginSettings {
         settings: LoginSettingsState,

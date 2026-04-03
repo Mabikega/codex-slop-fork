@@ -397,6 +397,13 @@ fn server_notification_thread_target(
         ServerNotification::ThreadRealtimeClosed(notification) => {
             Some(notification.thread_id.as_str())
         }
+        ServerNotification::AutomationUpdated(notification) => {
+            Some(notification.thread_id.as_str())
+        }
+        ServerNotification::AutoresearchUpdated(notification) => {
+            Some(notification.thread_id.as_str())
+        }
+        ServerNotification::PilotUpdated(notification) => Some(notification.thread_id.as_str()),
         ServerNotification::SkillsChanged(_)
         | ServerNotification::McpServerStatusUpdated(_)
         | ServerNotification::McpServerOauthLoginCompleted(_)
@@ -408,8 +415,6 @@ fn server_notification_thread_target(
         | ServerNotification::FuzzyFileSearchSessionUpdated(_)
         | ServerNotification::FuzzyFileSearchSessionCompleted(_)
         | ServerNotification::CommandExecOutputDelta(_)
-        | ServerNotification::AutomationUpdated(_)
-        | ServerNotification::PilotUpdated(_)
         | ServerNotification::FsChanged(_)
         | ServerNotification::WindowsWorldWritableWarning(_)
         | ServerNotification::WindowsSandboxSetupCompleted(_)
@@ -1009,9 +1014,14 @@ fn app_server_codex_error_info_to_core(
 mod tests {
     use super::command_execution_started_event;
     use super::server_notification_thread_events;
+    use super::server_notification_thread_target;
     use super::thread_snapshot_events;
     use super::turn_snapshot_events;
     use codex_app_server_protocol::AgentMessageDeltaNotification;
+    use codex_app_server_protocol::AutomationUpdateType;
+    use codex_app_server_protocol::AutomationUpdatedNotification;
+    use codex_app_server_protocol::AutoresearchUpdateType;
+    use codex_app_server_protocol::AutoresearchUpdatedNotification;
     use codex_app_server_protocol::CodexErrorInfo;
     use codex_app_server_protocol::CommandAction;
     use codex_app_server_protocol::CommandExecutionOutputDeltaNotification;
@@ -1019,6 +1029,8 @@ mod tests {
     use codex_app_server_protocol::CommandExecutionStatus;
     use codex_app_server_protocol::ItemCompletedNotification;
     use codex_app_server_protocol::ItemStartedNotification;
+    use codex_app_server_protocol::PilotUpdateType;
+    use codex_app_server_protocol::PilotUpdatedNotification;
     use codex_app_server_protocol::ReasoningSummaryTextDeltaNotification;
     use codex_app_server_protocol::ServerNotification;
     use codex_app_server_protocol::Thread;
@@ -1586,5 +1598,50 @@ mod tests {
         };
         assert_eq!(raw_reasoning.text, "hidden chain");
         assert!(matches!(events[3].msg, EventMsg::TurnComplete(_)));
+    }
+
+    #[test]
+    fn routes_automation_autoresearch_and_pilot_notifications_to_thread_targets() {
+        let thread_id = ThreadId::new();
+
+        let automation_target = server_notification_thread_target(
+            &ServerNotification::AutomationUpdated(AutomationUpdatedNotification {
+                thread_id: thread_id.to_string(),
+                runtime_id: "session:auto-1".to_string(),
+                update_type: AutomationUpdateType::Fired,
+                automation: None,
+                message: Some("continue".to_string()),
+            }),
+        );
+        assert_eq!(
+            automation_target,
+            super::ServerNotificationThreadTarget::Thread(thread_id)
+        );
+
+        let autoresearch_target = server_notification_thread_target(
+            &ServerNotification::AutoresearchUpdated(AutoresearchUpdatedNotification {
+                thread_id: thread_id.to_string(),
+                update_type: AutoresearchUpdateType::Updated,
+                run: None,
+                message: None,
+            }),
+        );
+        assert_eq!(
+            autoresearch_target,
+            super::ServerNotificationThreadTarget::Thread(thread_id)
+        );
+
+        let pilot_target = server_notification_thread_target(&ServerNotification::PilotUpdated(
+            PilotUpdatedNotification {
+                thread_id: thread_id.to_string(),
+                update_type: PilotUpdateType::Updated,
+                run: None,
+                message: None,
+            },
+        ));
+        assert_eq!(
+            pilot_target,
+            super::ServerNotificationThreadTarget::Thread(thread_id)
+        );
     }
 }

@@ -22,6 +22,7 @@ use crate::slop_fork::LoginFlowKind;
 use crate::slop_fork::LoginPopupKind;
 use crate::slop_fork::PendingChatgptLogin;
 use crate::slop_fork::PendingDeviceCodeState;
+use crate::slop_fork::SlopForkAppServerState;
 use crate::slop_fork::SlopForkEvent;
 use crate::test_backend::VT100Backend;
 use crate::test_support::PathBufExt;
@@ -35,6 +36,20 @@ use chrono::TimeZone;
 use chrono::Utc;
 use codex_app_server_protocol::AppSummary;
 use codex_app_server_protocol::AuthMode;
+use codex_app_server_protocol::Automation as AppServerAutomation;
+use codex_app_server_protocol::AutomationLimits as AppServerAutomationLimits;
+use codex_app_server_protocol::AutomationMessageSource as AppServerAutomationMessageSource;
+use codex_app_server_protocol::AutomationScope as AppServerAutomationScope;
+use codex_app_server_protocol::AutomationTrigger as AppServerAutomationTrigger;
+use codex_app_server_protocol::AutomationUpdateType;
+use codex_app_server_protocol::AutomationUpdatedNotification;
+use codex_app_server_protocol::AutoresearchControlAction as AppServerAutoresearchControlAction;
+use codex_app_server_protocol::AutoresearchCycleKind as AppServerAutoresearchCycleKind;
+use codex_app_server_protocol::AutoresearchMode as AppServerAutoresearchMode;
+use codex_app_server_protocol::AutoresearchRun as AppServerAutoresearchRun;
+use codex_app_server_protocol::AutoresearchStatus as AppServerAutoresearchStatus;
+use codex_app_server_protocol::AutoresearchUpdateType as AppServerAutoresearchUpdateType;
+use codex_app_server_protocol::AutoresearchUpdatedNotification;
 use codex_app_server_protocol::CollabAgentState as AppServerCollabAgentState;
 use codex_app_server_protocol::CollabAgentStatus as AppServerCollabAgentStatus;
 use codex_app_server_protocol::CollabAgentTool as AppServerCollabAgentTool;
@@ -67,6 +82,12 @@ use codex_app_server_protocol::McpServerStartupState;
 use codex_app_server_protocol::McpServerStatusUpdatedNotification;
 use codex_app_server_protocol::PatchApplyStatus as AppServerPatchApplyStatus;
 use codex_app_server_protocol::PatchChangeKind;
+use codex_app_server_protocol::PilotControlAction as AppServerPilotControlAction;
+use codex_app_server_protocol::PilotCycleKind as AppServerPilotCycleKind;
+use codex_app_server_protocol::PilotRun as AppServerPilotRun;
+use codex_app_server_protocol::PilotStatus as AppServerPilotStatus;
+use codex_app_server_protocol::PilotUpdateType;
+use codex_app_server_protocol::PilotUpdatedNotification;
 use codex_app_server_protocol::PluginAuthPolicy;
 use codex_app_server_protocol::PluginDetail;
 use codex_app_server_protocol::PluginInstallPolicy;
@@ -117,6 +138,7 @@ use codex_core::slop_fork::autoresearch::AutoresearchRuntime;
 use codex_core::slop_fork::autoresearch::AutoresearchStatus;
 use codex_core::slop_fork::autoresearch::AutoresearchWorkspace;
 use codex_core::slop_fork::autoresearch::MetricDirection;
+use codex_core::slop_fork::pilot::PilotRuntime;
 use codex_features::FEATURES;
 use codex_features::Feature;
 use codex_git_utils::CommitLogEntry;
@@ -2087,6 +2109,8 @@ async fn helpers_are_available_and_do_not_panic() {
     let session_telemetry = test_session_telemetry(&cfg, resolved_model.as_str());
     let init = ChatWidgetInit {
         config: cfg.clone(),
+        app_server_owns_slop_fork_follow_ups: false,
+        is_remote_app_server: false,
         frame_requester: FrameRequester::test_dummy(),
         app_event_tx: tx,
         initial_user_message: None,
@@ -2188,6 +2212,8 @@ async fn make_chatwidget_manual(
     let mut widget = ChatWidget {
         app_event_tx,
         codex_op_target: super::CodexOpTarget::Direct(op_tx),
+        app_server_owns_slop_fork_follow_ups: false,
+        is_remote_app_server: false,
         bottom_pane: bottom,
         active_cell: None,
         active_cell_revision: 0,
@@ -7094,6 +7120,8 @@ async fn collaboration_modes_defaults_to_code_on_startup() {
     let session_telemetry = test_session_telemetry(&cfg, resolved_model.as_str());
     let init = ChatWidgetInit {
         config: cfg.clone(),
+        app_server_owns_slop_fork_follow_ups: false,
+        is_remote_app_server: false,
         frame_requester: FrameRequester::test_dummy(),
         app_event_tx: AppEventSender::new(unbounded_channel::<AppEvent>().0),
         initial_user_message: None,
@@ -7144,6 +7172,8 @@ async fn experimental_mode_plan_is_ignored_on_startup() {
     let session_telemetry = test_session_telemetry(&cfg, resolved_model.as_str());
     let init = ChatWidgetInit {
         config: cfg.clone(),
+        app_server_owns_slop_fork_follow_ups: false,
+        is_remote_app_server: false,
         frame_requester: FrameRequester::test_dummy(),
         app_event_tx: AppEventSender::new(unbounded_channel::<AppEvent>().0),
         initial_user_message: None,
@@ -13317,6 +13347,269 @@ async fn pilot_turn_start_recovers_pending_cycle_without_awaiting_flag() {
 }
 
 #[tokio::test]
+async fn app_server_turn_started_claims_pending_pilot_cycle() {
+    let dir = tempdir().unwrap();
+    let thread_id = ThreadId::new();
+    let thread_id_string = thread_id.to_string();
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.thread_id = Some(thread_id);
+
+    let mut runtime =
+        codex_core::slop_fork::pilot::PilotRuntime::load(dir.path(), thread_id_string.as_str())
+            .unwrap();
+    assert!(
+        runtime
+            .start(
+                "review benchmark regressions".to_string(),
+                /*deadline_at*/ None,
+                Local::now()
+            )
+            .unwrap()
+    );
+    assert!(
+        runtime
+            .prepare_cycle_submission(Local::now())
+            .unwrap()
+            .is_some()
+    );
+
+    chat.handle_server_notification(
+        ServerNotification::TurnStarted(TurnStartedNotification {
+            thread_id: thread_id.to_string(),
+            turn: AppServerTurn {
+                id: "turn-pilot-1".to_string(),
+                items: Vec::new(),
+                status: AppServerTurnStatus::InProgress,
+                error: None,
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let state =
+        codex_core::slop_fork::pilot::PilotRuntime::load(dir.path(), thread_id_string.as_str())
+            .unwrap()
+            .state()
+            .cloned()
+            .expect("pilot state after app-server turn start");
+    assert_eq!(state.active_turn_id.as_deref(), Some("turn-pilot-1"));
+    assert_eq!(
+        state.active_cycle_kind,
+        Some(codex_core::slop_fork::pilot::PilotCycleKind::Continue)
+    );
+}
+
+#[tokio::test]
+async fn app_server_turn_interrupted_pauses_pilot_cycle() {
+    let dir = tempdir().unwrap();
+    let thread_id = ThreadId::new();
+    let thread_id_string = thread_id.to_string();
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.thread_id = Some(thread_id);
+
+    let mut runtime =
+        codex_core::slop_fork::pilot::PilotRuntime::load(dir.path(), thread_id_string.as_str())
+            .unwrap();
+    assert!(
+        runtime
+            .start(
+                "review benchmark regressions".to_string(),
+                /*deadline_at*/ None,
+                Local::now()
+            )
+            .unwrap()
+    );
+    assert!(
+        runtime
+            .prepare_cycle_submission(Local::now())
+            .unwrap()
+            .is_some()
+    );
+
+    chat.handle_server_notification(
+        ServerNotification::TurnStarted(TurnStartedNotification {
+            thread_id: thread_id.to_string(),
+            turn: AppServerTurn {
+                id: "turn-pilot-1".to_string(),
+                items: Vec::new(),
+                status: AppServerTurnStatus::InProgress,
+                error: None,
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+    chat.handle_server_notification(
+        ServerNotification::TurnCompleted(TurnCompletedNotification {
+            thread_id: thread_id.to_string(),
+            turn: AppServerTurn {
+                id: "turn-pilot-1".to_string(),
+                items: Vec::new(),
+                status: AppServerTurnStatus::Interrupted,
+                error: None,
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let state =
+        codex_core::slop_fork::pilot::PilotRuntime::load(dir.path(), thread_id_string.as_str())
+            .unwrap()
+            .state()
+            .cloned()
+            .expect("pilot state after app-server interrupt");
+    assert_eq!(
+        state.status,
+        codex_core::slop_fork::pilot::PilotStatus::Paused
+    );
+    assert_eq!(state.active_turn_id, None);
+}
+
+#[tokio::test]
+async fn app_server_turn_failed_pauses_pilot_cycle() {
+    let dir = tempdir().unwrap();
+    let thread_id = ThreadId::new();
+    let thread_id_string = thread_id.to_string();
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.thread_id = Some(thread_id);
+
+    let mut runtime =
+        codex_core::slop_fork::pilot::PilotRuntime::load(dir.path(), thread_id_string.as_str())
+            .unwrap();
+    assert!(
+        runtime
+            .start(
+                "review benchmark regressions".to_string(),
+                /*deadline_at*/ None,
+                Local::now()
+            )
+            .unwrap()
+    );
+    assert!(
+        runtime
+            .prepare_cycle_submission(Local::now())
+            .unwrap()
+            .is_some()
+    );
+
+    chat.handle_server_notification(
+        ServerNotification::TurnStarted(TurnStartedNotification {
+            thread_id: thread_id.to_string(),
+            turn: AppServerTurn {
+                id: "turn-pilot-1".to_string(),
+                items: Vec::new(),
+                status: AppServerTurnStatus::InProgress,
+                error: None,
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+    chat.handle_server_notification(
+        ServerNotification::TurnCompleted(TurnCompletedNotification {
+            thread_id: thread_id.to_string(),
+            turn: AppServerTurn {
+                id: "turn-pilot-1".to_string(),
+                items: Vec::new(),
+                status: AppServerTurnStatus::Failed,
+                error: Some(AppServerTurnError {
+                    message: "controller turn failed".to_string(),
+                    codex_error_info: None,
+                    additional_details: None,
+                }),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let state =
+        codex_core::slop_fork::pilot::PilotRuntime::load(dir.path(), thread_id_string.as_str())
+            .unwrap()
+            .state()
+            .cloned()
+            .expect("pilot state after app-server failure");
+    assert_eq!(
+        state.status,
+        codex_core::slop_fork::pilot::PilotStatus::Paused
+    );
+    assert_eq!(state.active_turn_id, None);
+}
+
+#[tokio::test]
+async fn app_server_turn_completion_preserves_pilot_last_agent_message() {
+    let dir = tempdir().unwrap();
+    let thread_id = ThreadId::new();
+    let thread_id_string = thread_id.to_string();
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.thread_id = Some(thread_id);
+    chat.codex_op_target = super::CodexOpTarget::AppEvent;
+
+    let mut runtime =
+        codex_core::slop_fork::pilot::PilotRuntime::load(dir.path(), thread_id_string.as_str())
+            .unwrap();
+    assert!(
+        runtime
+            .start(
+                "review benchmark regressions".to_string(),
+                /*deadline_at*/ None,
+                Local::now()
+            )
+            .unwrap()
+    );
+    assert!(
+        runtime
+            .prepare_cycle_submission(Local::now())
+            .unwrap()
+            .is_some()
+    );
+
+    chat.handle_server_notification(
+        ServerNotification::TurnStarted(TurnStartedNotification {
+            thread_id: thread_id.to_string(),
+            turn: AppServerTurn {
+                id: "turn-pilot-1".to_string(),
+                items: Vec::new(),
+                status: AppServerTurnStatus::InProgress,
+                error: None,
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+    chat.pending_turn_copyable_output =
+        Some("Benchmark improved to 0.91 after the latest patch.".to_string());
+    chat.handle_server_notification(
+        ServerNotification::TurnCompleted(TurnCompletedNotification {
+            thread_id: thread_id.to_string(),
+            turn: AppServerTurn {
+                id: "turn-pilot-1".to_string(),
+                items: Vec::new(),
+                status: AppServerTurnStatus::Completed,
+                error: None,
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let state =
+        codex_core::slop_fork::pilot::PilotRuntime::load(dir.path(), thread_id_string.as_str())
+            .unwrap()
+            .state()
+            .cloned()
+            .expect("pilot state after app-server completion");
+    assert_eq!(
+        state.last_agent_message.as_deref(),
+        Some("Benchmark improved to 0.91 after the latest patch.")
+    );
+    assert_eq!(
+        state.last_cycle_summary.as_deref(),
+        Some("Benchmark improved to 0.91 after the latest patch.")
+    );
+    assert_no_pilot_op(&mut op_rx);
+}
+
+#[tokio::test]
 async fn autoresearch_start_recovers_from_stopped_stale_active_turn_state() {
     let codex_home = tempdir().unwrap();
     let workdir = tempdir().unwrap();
@@ -13447,6 +13740,2316 @@ async fn autoresearch_status_recovers_stopped_submitted_turn_after_reconnect() {
     drain_insert_history(&mut rx);
     let prompt = next_autoresearch_op(&mut op_rx);
     assert!(prompt.contains("new goal"));
+}
+
+#[tokio::test]
+async fn app_server_turn_completion_advances_autoresearch_cycle() {
+    let codex_home = tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let thread_id = ThreadId::new();
+    let thread_id_string = thread_id.to_string();
+    let prepared_workspace = AutoresearchWorkspace::prepare(
+        codex_home.path(),
+        thread_id_string.as_str(),
+        workdir.path(),
+    )
+    .expect("prepare workspace");
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.codex_home = codex_home.path().to_path_buf();
+    chat.config.cwd = workdir.path().to_path_buf().abs();
+    chat.thread_id = Some(thread_id);
+    chat.codex_op_target = super::CodexOpTarget::AppEvent;
+
+    let mut runtime = AutoresearchRuntime::load(codex_home.path(), thread_id_string.as_str())
+        .expect("load autoresearch runtime");
+    assert!(
+        runtime
+            .start(
+                "improve benchmark accuracy".to_string(),
+                AutoresearchMode::Optimize,
+                workdir.path().to_path_buf(),
+                prepared_workspace.workspace,
+                Some(3),
+                Local::now(),
+            )
+            .unwrap()
+    );
+    assert!(
+        runtime
+            .prepare_cycle_submission(Local::now())
+            .unwrap()
+            .is_some()
+    );
+
+    chat.handle_server_notification(
+        ServerNotification::TurnStarted(TurnStartedNotification {
+            thread_id: thread_id.to_string(),
+            turn: AppServerTurn {
+                id: "turn-autoresearch-1".to_string(),
+                items: Vec::new(),
+                status: AppServerTurnStatus::InProgress,
+                error: None,
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+    chat.pending_turn_copyable_output =
+        Some("Exploration found a stronger candidate family.".to_string());
+    chat.handle_server_notification(
+        ServerNotification::TurnCompleted(TurnCompletedNotification {
+            thread_id: thread_id.to_string(),
+            turn: AppServerTurn {
+                id: "turn-autoresearch-1".to_string(),
+                items: Vec::new(),
+                status: AppServerTurnStatus::Completed,
+                error: None,
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    assert_no_autoresearch_op(&mut op_rx);
+    let state = AutoresearchRuntime::load(codex_home.path(), thread_id_string.as_str())
+        .expect("reload autoresearch runtime")
+        .state()
+        .cloned()
+        .expect("autoresearch state after app-server completion");
+    assert_eq!(
+        state.last_agent_message.as_deref(),
+        Some("Exploration found a stronger candidate family.")
+    );
+}
+
+#[tokio::test]
+async fn app_server_turn_failed_pauses_autoresearch_cycle() {
+    let codex_home = tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let thread_id = ThreadId::new();
+    let thread_id_string = thread_id.to_string();
+    let prepared_workspace = AutoresearchWorkspace::prepare(
+        codex_home.path(),
+        thread_id_string.as_str(),
+        workdir.path(),
+    )
+    .expect("prepare workspace");
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.codex_home = codex_home.path().to_path_buf();
+    chat.config.cwd = workdir.path().to_path_buf().abs();
+    chat.thread_id = Some(thread_id);
+
+    let mut runtime = AutoresearchRuntime::load(codex_home.path(), thread_id_string.as_str())
+        .expect("load autoresearch runtime");
+    assert!(
+        runtime
+            .start(
+                "improve benchmark accuracy".to_string(),
+                AutoresearchMode::Optimize,
+                workdir.path().to_path_buf(),
+                prepared_workspace.workspace,
+                Some(3),
+                Local::now(),
+            )
+            .unwrap()
+    );
+    assert!(
+        runtime
+            .prepare_cycle_submission(Local::now())
+            .unwrap()
+            .is_some()
+    );
+
+    chat.handle_server_notification(
+        ServerNotification::TurnStarted(TurnStartedNotification {
+            thread_id: thread_id.to_string(),
+            turn: AppServerTurn {
+                id: "turn-autoresearch-1".to_string(),
+                items: Vec::new(),
+                status: AppServerTurnStatus::InProgress,
+                error: None,
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+    chat.handle_server_notification(
+        ServerNotification::TurnCompleted(TurnCompletedNotification {
+            thread_id: thread_id.to_string(),
+            turn: AppServerTurn {
+                id: "turn-autoresearch-1".to_string(),
+                items: Vec::new(),
+                status: AppServerTurnStatus::Failed,
+                error: Some(AppServerTurnError {
+                    message: "controller turn failed".to_string(),
+                    codex_error_info: None,
+                    additional_details: None,
+                }),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let state = AutoresearchRuntime::load(codex_home.path(), thread_id_string.as_str())
+        .expect("reload autoresearch runtime")
+        .state()
+        .cloned()
+        .expect("autoresearch state after app-server failure");
+    assert_eq!(state.status, AutoresearchStatus::Paused);
+    assert_eq!(state.active_turn_id, None);
+}
+
+#[tokio::test]
+async fn pilot_rpc_failure_rolls_back_dispatched_submission_state() {
+    let codex_home = tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let thread_id = ThreadId::new();
+    let thread_id_string = thread_id.to_string();
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.codex_home = codex_home.path().to_path_buf();
+    chat.config.cwd = workdir.path().to_path_buf().abs();
+    chat.thread_id = Some(thread_id);
+
+    let mut runtime =
+        PilotRuntime::load(codex_home.path(), thread_id_string.as_str()).expect("load pilot");
+    assert!(
+        runtime
+            .start("ship the benchmark fix".to_string(), None, Local::now())
+            .unwrap()
+    );
+    assert!(
+        runtime
+            .prepare_cycle_submission(Local::now())
+            .unwrap()
+            .is_some()
+    );
+    assert!(runtime.note_submission_dispatched().unwrap());
+
+    chat.bottom_pane.set_task_running(/*running*/ true);
+    chat.on_pilot_turn_submission_rpc_failed();
+
+    let state = PilotRuntime::load(codex_home.path(), thread_id_string.as_str())
+        .expect("reload pilot")
+        .state()
+        .cloned()
+        .expect("pilot state after rollback");
+    assert_eq!(state.pending_cycle_kind, None);
+    assert_eq!(state.submission_dispatched_at, None);
+    assert_eq!(state.active_turn_id, None);
+    assert_eq!(
+        state.status_message.as_deref(),
+        Some("Pilot submission failed before the turn could start.")
+    );
+    assert_eq!(chat.bottom_pane.is_task_running(), false);
+}
+
+#[tokio::test]
+async fn app_server_pilot_updated_refreshes_runtime_state() {
+    let codex_home = tempdir().unwrap();
+    let thread_id = ThreadId::new();
+    let thread_id_string = thread_id.to_string();
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.codex_home = codex_home.path().to_path_buf();
+    chat.thread_id = Some(thread_id);
+
+    let mut runtime =
+        PilotRuntime::load(codex_home.path(), thread_id_string.as_str()).expect("load pilot");
+    assert!(
+        runtime
+            .start(
+                "stabilize app-server pilot sync".to_string(),
+                None,
+                Local::now()
+            )
+            .unwrap()
+    );
+
+    let state = PilotRuntime::load(codex_home.path(), thread_id_string.as_str())
+        .expect("reload pilot")
+        .state()
+        .cloned()
+        .expect("pilot state after start");
+
+    chat.handle_server_notification(
+        ServerNotification::PilotUpdated(PilotUpdatedNotification {
+            thread_id: thread_id_string,
+            update_type: PilotUpdateType::Updated,
+            run: Some(AppServerPilotRun {
+                goal: state.goal.clone(),
+                status: AppServerPilotStatus::Running,
+                started_at: state.started_at,
+                deadline_at: state.deadline_at,
+                updated_at: state.updated_at,
+                iteration_count: state.iteration_count,
+                pending_cycle_kind: state.pending_cycle_kind.map(|kind| match kind {
+                    codex_core::slop_fork::pilot::PilotCycleKind::Continue => {
+                        AppServerPilotCycleKind::Continue
+                    }
+                    codex_core::slop_fork::pilot::PilotCycleKind::WrapUp => {
+                        AppServerPilotCycleKind::WrapUp
+                    }
+                }),
+                active_cycle_kind: state.active_cycle_kind.map(|kind| match kind {
+                    codex_core::slop_fork::pilot::PilotCycleKind::Continue => {
+                        AppServerPilotCycleKind::Continue
+                    }
+                    codex_core::slop_fork::pilot::PilotCycleKind::WrapUp => {
+                        AppServerPilotCycleKind::WrapUp
+                    }
+                }),
+                active_turn_id: state.active_turn_id.clone(),
+                last_submitted_turn_id: state.last_submitted_turn_id.clone(),
+                wrap_up_requested: state.wrap_up_requested,
+                wrap_up_requested_at: state.wrap_up_requested_at,
+                stop_requested_at: state.stop_requested_at,
+                last_error: state.last_error.clone(),
+                status_message: Some("Pilot updated from app-server.".to_string()),
+                last_progress_at: state.last_progress_at,
+                last_cycle_completed_at: state.last_cycle_completed_at,
+                last_cycle_summary: state.last_cycle_summary.clone(),
+                last_cycle_kind: state.last_cycle_kind.map(|kind| match kind {
+                    codex_core::slop_fork::pilot::PilotCycleKind::Continue => {
+                        AppServerPilotCycleKind::Continue
+                    }
+                    codex_core::slop_fork::pilot::PilotCycleKind::WrapUp => {
+                        AppServerPilotCycleKind::WrapUp
+                    }
+                }),
+                last_agent_message: state.last_agent_message.clone(),
+            }),
+            message: None,
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let refreshed_state = chat
+        .slop_fork_ui
+        .cached_pilot_runtime_state()
+        .cloned()
+        .expect("pilot runtime in widget");
+    assert_eq!(refreshed_state, state);
+}
+
+#[tokio::test]
+async fn remote_app_server_pilot_updated_caches_server_run_without_local_runtime() {
+    let codex_home = tempdir().unwrap();
+    let thread_id = ThreadId::new();
+    let thread_id_string = thread_id.to_string();
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.codex_home = codex_home.path().to_path_buf();
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    chat.handle_server_notification(
+        ServerNotification::PilotUpdated(PilotUpdatedNotification {
+            thread_id: thread_id_string,
+            update_type: PilotUpdateType::Updated,
+            run: Some(AppServerPilotRun {
+                goal: "stabilize remote pilot state".to_string(),
+                status: AppServerPilotStatus::Running,
+                started_at: 10,
+                deadline_at: Some(20),
+                updated_at: 11,
+                iteration_count: 3,
+                pending_cycle_kind: None,
+                active_cycle_kind: Some(AppServerPilotCycleKind::Continue),
+                active_turn_id: Some("turn-remote-1".to_string()),
+                last_submitted_turn_id: Some("turn-remote-1".to_string()),
+                wrap_up_requested: false,
+                wrap_up_requested_at: None,
+                stop_requested_at: None,
+                last_error: None,
+                status_message: Some("Pilot is running on the remote server.".to_string()),
+                last_progress_at: Some(11),
+                last_cycle_completed_at: None,
+                last_cycle_summary: None,
+                last_cycle_kind: None,
+                last_agent_message: None,
+            }),
+            message: None,
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let cached_run = chat
+        .slop_fork_ui
+        .cached_remote_pilot_run()
+        .cloned()
+        .expect("remote pilot run cached");
+    assert_eq!(cached_run.goal, "stabilize remote pilot state");
+    assert_eq!(cached_run.active_turn_id.as_deref(), Some("turn-remote-1"));
+    assert_eq!(chat.slop_fork_ui.cached_pilot_runtime_state(), None);
+    assert!(
+        chat.slop_fork_ui
+            .pilot_has_active_turn(&chat.slop_fork_context(), "turn-remote-1")
+    );
+}
+
+fn sample_remote_automation(runtime_id: &str) -> AppServerAutomation {
+    AppServerAutomation {
+        runtime_id: runtime_id.to_string(),
+        id: "auto-1".to_string(),
+        scope: AppServerAutomationScope::Session,
+        enabled: true,
+        paused: false,
+        stopped: false,
+        run_count: 2,
+        next_fire_at: Some(60),
+        last_error: None,
+        trigger: AppServerAutomationTrigger::Interval { every_seconds: 600 },
+        message_source: AppServerAutomationMessageSource::Static {
+            message: "check deploy".to_string(),
+        },
+        limits: AppServerAutomationLimits::default(),
+        policy_command: None,
+    }
+}
+
+fn sample_remote_autoresearch() -> AppServerAutoresearchRun {
+    AppServerAutoresearchRun {
+        goal: "map promising OCR hypotheses".to_string(),
+        mode: AppServerAutoresearchMode::Scientist,
+        status: AppServerAutoresearchStatus::Running,
+        started_at: 10,
+        updated_at: 20,
+        max_runs: Some(50),
+        iteration_count: 4,
+        discovery_count: 2,
+        pending_cycle_kind: None,
+        active_cycle_kind: Some(codex_app_server_protocol::AutoresearchCycleKind::Research),
+        active_turn_id: Some("turn-autoresearch-1".to_string()),
+        last_submitted_turn_id: Some("turn-autoresearch-1".to_string()),
+        wrap_up_requested: false,
+        stop_requested_at: None,
+        last_error: None,
+        status_message: Some("Autoresearch is exploring server-side.".to_string()),
+        last_progress_at: Some(20),
+        last_cycle_completed_at: Some(18),
+        last_discovery_completed_at: Some(17),
+        last_cycle_summary: Some("Compared two new OCR families.".to_string()),
+        last_agent_message: Some("Compared two new OCR families.".to_string()),
+    }
+}
+
+#[tokio::test]
+async fn remote_app_server_session_configured_requests_automation_bootstrap() {
+    let (mut chat, _tx, mut rx, _op_rx) = make_chatwidget_manual_with_sender().await;
+    let thread_id = ThreadId::new();
+    chat.is_remote_app_server = true;
+    chat.thread_id = Some(thread_id);
+
+    chat.on_session_configured(codex_protocol::protocol::SessionConfiguredEvent {
+        session_id: thread_id,
+        forked_from_id: None,
+        thread_name: None,
+        model: "gpt-5".to_string(),
+        model_provider_id: chat.config.model_provider_id.clone(),
+        service_tier: None,
+        approval_policy: AskForApproval::default(),
+        approvals_reviewer: ApprovalsReviewer::default(),
+        sandbox_policy: chat.config.permissions.sandbox_policy.get().clone(),
+        cwd: chat.config.cwd.to_path_buf(),
+        reasoning_effort: None,
+        history_log_id: 0,
+        history_entry_count: 0,
+        initial_messages: None,
+        network_proxy: None,
+        rollout_path: None,
+    });
+
+    let mut saw_fetch = false;
+    while let Ok(event) = rx.try_recv() {
+        if let AppEvent::SlopFork(SlopForkEvent::FetchRemoteAutomationState {
+            thread_id: requested_thread_id,
+        }) = event
+        {
+            assert_eq!(requested_thread_id, thread_id.to_string());
+            saw_fetch = true;
+            break;
+        }
+    }
+    assert!(
+        saw_fetch,
+        "remote session should request automation/list bootstrap"
+    );
+}
+
+#[tokio::test]
+async fn remote_app_server_session_configured_requests_autoresearch_bootstrap() {
+    let (mut chat, _tx, mut rx, _op_rx) = make_chatwidget_manual_with_sender().await;
+    let thread_id = ThreadId::new();
+    chat.is_remote_app_server = true;
+    chat.thread_id = Some(thread_id);
+
+    chat.on_session_configured(codex_protocol::protocol::SessionConfiguredEvent {
+        session_id: thread_id,
+        forked_from_id: None,
+        thread_name: None,
+        model: "gpt-5".to_string(),
+        model_provider_id: chat.config.model_provider_id.clone(),
+        service_tier: None,
+        approval_policy: AskForApproval::default(),
+        approvals_reviewer: ApprovalsReviewer::default(),
+        sandbox_policy: chat.config.permissions.sandbox_policy.get().clone(),
+        cwd: chat.config.cwd.to_path_buf(),
+        reasoning_effort: None,
+        history_log_id: 0,
+        history_entry_count: 0,
+        initial_messages: None,
+        network_proxy: None,
+        rollout_path: None,
+    });
+
+    let mut saw_fetch = false;
+    while let Ok(event) = rx.try_recv() {
+        if let AppEvent::SlopFork(SlopForkEvent::FetchRemoteAutoresearchState {
+            thread_id: requested_thread_id,
+        }) = event
+        {
+            assert_eq!(requested_thread_id, thread_id.to_string());
+            saw_fetch = true;
+            break;
+        }
+    }
+    assert!(
+        saw_fetch,
+        "remote session should request autoresearch/read bootstrap"
+    );
+}
+
+#[tokio::test]
+async fn remote_app_server_session_configured_requests_pilot_bootstrap() {
+    let (mut chat, _tx, mut rx, _op_rx) = make_chatwidget_manual_with_sender().await;
+    let thread_id = ThreadId::new();
+    chat.is_remote_app_server = true;
+    chat.thread_id = Some(thread_id);
+
+    chat.on_session_configured(codex_protocol::protocol::SessionConfiguredEvent {
+        session_id: thread_id,
+        forked_from_id: None,
+        thread_name: None,
+        model: "gpt-5".to_string(),
+        model_provider_id: chat.config.model_provider_id.clone(),
+        service_tier: None,
+        approval_policy: AskForApproval::default(),
+        approvals_reviewer: ApprovalsReviewer::default(),
+        sandbox_policy: chat.config.permissions.sandbox_policy.get().clone(),
+        cwd: chat.config.cwd.to_path_buf(),
+        reasoning_effort: None,
+        history_log_id: 0,
+        history_entry_count: 0,
+        initial_messages: None,
+        network_proxy: None,
+        rollout_path: None,
+    });
+
+    let mut saw_fetch = false;
+    while let Ok(event) = rx.try_recv() {
+        if let AppEvent::SlopFork(SlopForkEvent::FetchRemotePilotState {
+            thread_id: requested_thread_id,
+        }) = event
+        {
+            assert_eq!(requested_thread_id, thread_id.to_string());
+            saw_fetch = true;
+            break;
+        }
+    }
+    assert!(
+        saw_fetch,
+        "remote session should request pilot/read bootstrap"
+    );
+}
+
+#[tokio::test]
+async fn remote_pilot_start_emits_remote_start_event() {
+    let (mut chat, _tx, mut rx, _op_rx) = make_chatwidget_manual_with_sender().await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    chat.dispatch_command_with_args(
+        InlineCommand::Pilot,
+        "start --for 4h stabilize benchmark accuracy".to_string(),
+        Vec::new(),
+    );
+
+    let mut saw_event = false;
+    while let Ok(event) = rx.try_recv() {
+        if let AppEvent::SlopFork(SlopForkEvent::StartRemotePilot {
+            thread_id: requested_thread_id,
+            goal,
+            deadline_at,
+        }) = event
+        {
+            assert_eq!(requested_thread_id, thread_id.to_string());
+            assert_eq!(goal, "stabilize benchmark accuracy");
+            assert!(deadline_at.is_some());
+            saw_event = true;
+            break;
+        }
+    }
+    assert!(
+        saw_event,
+        "remote pilot start should route through app-server"
+    );
+}
+
+#[tokio::test]
+async fn remote_pilot_controls_emit_remote_control_events() {
+    let controls = [
+        ("pause", AppServerPilotControlAction::Pause),
+        ("resume", AppServerPilotControlAction::Resume),
+        ("wrap-up", AppServerPilotControlAction::WrapUp),
+        ("stop", AppServerPilotControlAction::Stop),
+    ];
+    for (input, expected_action) in controls {
+        let (mut chat, _tx, mut rx, _op_rx) = make_chatwidget_manual_with_sender().await;
+        let thread_id = ThreadId::new();
+        chat.thread_id = Some(thread_id);
+        chat.is_remote_app_server = true;
+
+        chat.dispatch_command_with_args(InlineCommand::Pilot, input.to_string(), Vec::new());
+
+        let mut saw_event = false;
+        while let Ok(event) = rx.try_recv() {
+            if let AppEvent::SlopFork(SlopForkEvent::ControlRemotePilot {
+                thread_id: requested_thread_id,
+                action,
+            }) = event
+            {
+                assert_eq!(requested_thread_id, thread_id.to_string());
+                assert_eq!(action, expected_action);
+                saw_event = true;
+                break;
+            }
+        }
+        assert!(
+            saw_event,
+            "remote pilot {input} should route through app-server"
+        );
+    }
+}
+
+#[tokio::test]
+async fn remote_autoresearch_status_uses_bootstrapped_server_state() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+    assert!(chat.on_remote_autoresearch_state_loaded(Some(sample_remote_autoresearch())));
+    assert!(chat.slop_fork_ui.remote_autoresearch_state_loaded());
+
+    chat.dispatch_command_with_args(
+        InlineCommand::Autoresearch,
+        "status".to_string(),
+        Vec::new(),
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = lines_to_single_string(cells.last().expect("autoresearch status output"));
+    assert!(rendered.contains("Status: running"));
+    assert!(rendered.contains("Mode: scientist"));
+    assert!(rendered.contains("map promising OCR hypotheses"));
+    assert!(rendered.contains("Compared two new OCR families."));
+}
+
+#[tokio::test]
+async fn stale_remote_autoresearch_bootstrap_loaded_event_is_ignored() {
+    let (mut chat, sender, _event_rx, _op_rx) = make_chatwidget_manual_with_sender().await;
+    let thread_id = ThreadId::new();
+    let thread_id_text = thread_id.to_string();
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+
+    let mut app_server_state = SlopForkAppServerState::default();
+    app_server_state.seed_pending_remote_autoresearch_bootstrap(thread_id_text.clone(), 3);
+    assert!(chat.slop_fork_ui.cached_remote_autoresearch_run().is_none());
+    assert!(!chat.slop_fork_ui.remote_autoresearch_state_loaded());
+
+    let handled = app_server_state.handle_app_event(
+        &mut chat,
+        None,
+        &sender,
+        SlopForkEvent::RemoteAutoresearchStateLoaded {
+            thread_id: thread_id_text,
+            request_nonce: 2,
+            source: crate::slop_fork::RemoteStateLoadSource::Bootstrap,
+            report_error: true,
+            result: Ok(Some(sample_remote_autoresearch())),
+        },
+    );
+
+    assert!(handled.is_none());
+    assert!(chat.slop_fork_ui.cached_remote_autoresearch_run().is_none());
+    assert!(!chat.slop_fork_ui.remote_autoresearch_state_loaded());
+}
+
+#[tokio::test]
+async fn remote_autoresearch_supported_commands_emit_remote_events() {
+    let cases = [
+        (
+            "pause",
+            AppServerAutoresearchControlAction::Pause,
+            None::<&str>,
+        ),
+        (
+            "resume",
+            AppServerAutoresearchControlAction::Resume,
+            None::<&str>,
+        ),
+        (
+            "wrap-up",
+            AppServerAutoresearchControlAction::WrapUp,
+            None::<&str>,
+        ),
+        (
+            "stop",
+            AppServerAutoresearchControlAction::Stop,
+            None::<&str>,
+        ),
+        (
+            "clear",
+            AppServerAutoresearchControlAction::Clear,
+            None::<&str>,
+        ),
+        (
+            "discover OCR transfer failures",
+            AppServerAutoresearchControlAction::Discover,
+            Some("OCR transfer failures"),
+        ),
+    ];
+    for (input, expected_action, expected_focus) in cases {
+        let (mut chat, _tx, mut rx, _op_rx) = make_chatwidget_manual_with_sender().await;
+        let thread_id = ThreadId::new();
+        chat.thread_id = Some(thread_id);
+        chat.is_remote_app_server = true;
+
+        chat.dispatch_command_with_args(InlineCommand::Autoresearch, input.to_string(), Vec::new());
+
+        let mut saw_event = false;
+        while let Ok(event) = rx.try_recv() {
+            if let AppEvent::SlopFork(SlopForkEvent::ControlRemoteAutoresearch {
+                thread_id: requested_thread_id,
+                action,
+                focus,
+            }) = event
+            {
+                assert_eq!(requested_thread_id, thread_id.to_string());
+                assert_eq!(action, expected_action);
+                assert_eq!(focus.as_deref(), expected_focus);
+                saw_event = true;
+                break;
+            }
+        }
+        assert!(
+            saw_event,
+            "remote autoresearch command {input} should route through app-server"
+        );
+    }
+}
+
+#[tokio::test]
+async fn remote_autoresearch_start_emits_remote_start_event() {
+    let (mut chat, _tx, mut rx, _op_rx) = make_chatwidget_manual_with_sender().await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    chat.dispatch_command_with_args(
+        InlineCommand::Autoresearch,
+        "start --mode scientist --max-runs 12 map OCR hypotheses".to_string(),
+        Vec::new(),
+    );
+
+    let mut saw_event = false;
+    while let Ok(event) = rx.try_recv() {
+        if let AppEvent::SlopFork(SlopForkEvent::StartRemoteAutoresearch {
+            thread_id: requested_thread_id,
+            goal,
+            max_runs,
+            mode,
+        }) = event
+        {
+            assert_eq!(requested_thread_id, thread_id.to_string());
+            assert_eq!(goal, "map OCR hypotheses");
+            assert_eq!(max_runs, Some(12));
+            assert_eq!(mode, AppServerAutoresearchMode::Scientist);
+            saw_event = true;
+            break;
+        }
+    }
+    assert!(
+        saw_event,
+        "remote autoresearch start should route through app-server"
+    );
+}
+
+#[tokio::test]
+async fn remote_autoresearch_updated_caches_started_cycle() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    let mut run = sample_remote_autoresearch();
+    run.pending_cycle_kind = None;
+    run.active_cycle_kind = Some(AppServerAutoresearchCycleKind::Research);
+    run.active_turn_id = Some("turn-autoresearch-1".to_string());
+    run.last_submitted_turn_id = Some("turn-autoresearch-1".to_string());
+    run.updated_at = 22;
+    run.status_message = Some("Autoresearch started a research cycle.".to_string());
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    chat.handle_server_notification(
+        ServerNotification::AutoresearchUpdated(AutoresearchUpdatedNotification {
+            thread_id: thread_id.to_string(),
+            update_type: AppServerAutoresearchUpdateType::CycleStarted,
+            run: Some(run),
+            message: Some("Autoresearch started a research cycle.".to_string()),
+        }),
+        /*replay_kind*/ None,
+    );
+    drain_insert_history(&mut rx);
+
+    let cached_run = chat
+        .slop_fork_ui
+        .cached_remote_autoresearch_run()
+        .cloned()
+        .expect("remote autoresearch run cached");
+    assert_eq!(
+        cached_run.active_turn_id.as_deref(),
+        Some("turn-autoresearch-1")
+    );
+    assert_eq!(
+        cached_run.active_cycle_kind,
+        Some(AppServerAutoresearchCycleKind::Research)
+    );
+}
+
+#[tokio::test]
+async fn remote_autoresearch_updated_caches_completed_cycle() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    let mut run = sample_remote_autoresearch();
+    run.pending_cycle_kind = Some(AppServerAutoresearchCycleKind::Discovery);
+    run.active_cycle_kind = None;
+    run.active_turn_id = None;
+    run.last_submitted_turn_id = Some("turn-autoresearch-1".to_string());
+    run.updated_at = 30;
+    run.last_cycle_summary = Some("Compared two OCR families.".to_string());
+    run.last_agent_message = Some("Compared two OCR families.".to_string());
+    run.status_message = Some("Autoresearch queued a bounded discovery pass.".to_string());
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    chat.handle_server_notification(
+        ServerNotification::AutoresearchUpdated(AutoresearchUpdatedNotification {
+            thread_id: thread_id.to_string(),
+            update_type: AppServerAutoresearchUpdateType::CycleCompleted,
+            run: Some(run),
+            message: Some("Autoresearch queued a bounded discovery pass.".to_string()),
+        }),
+        /*replay_kind*/ None,
+    );
+    drain_insert_history(&mut rx);
+
+    let cached_run = chat
+        .slop_fork_ui
+        .cached_remote_autoresearch_run()
+        .cloned()
+        .expect("remote autoresearch run cached");
+    assert_eq!(cached_run.active_turn_id, None);
+    assert_eq!(
+        cached_run.pending_cycle_kind,
+        Some(AppServerAutoresearchCycleKind::Discovery)
+    );
+}
+
+#[tokio::test]
+async fn late_remote_autoresearch_bootstrap_does_not_override_live_update() {
+    let (mut chat, sender, _event_rx, _op_rx) = make_chatwidget_manual_with_sender().await;
+    let thread_id = ThreadId::new();
+    let thread_id_text = thread_id.to_string();
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+
+    chat.handle_server_notification(
+        ServerNotification::AutoresearchUpdated(AutoresearchUpdatedNotification {
+            thread_id: thread_id_text.clone(),
+            update_type: AppServerAutoresearchUpdateType::CycleStarted,
+            run: Some(sample_remote_autoresearch()),
+            message: Some("live autoresearch update".to_string()),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let mut app_server_state = SlopForkAppServerState::default();
+    app_server_state.seed_pending_remote_autoresearch_bootstrap(thread_id_text.clone(), 4);
+    let handled = app_server_state.handle_app_event(
+        &mut chat,
+        None,
+        &sender,
+        SlopForkEvent::RemoteAutoresearchStateLoaded {
+            thread_id: thread_id_text,
+            request_nonce: 4,
+            source: crate::slop_fork::RemoteStateLoadSource::Bootstrap,
+            report_error: true,
+            result: Ok(None),
+        },
+    );
+
+    assert!(handled.is_none());
+    let cached_run = chat
+        .slop_fork_ui
+        .cached_remote_autoresearch_run()
+        .cloned()
+        .expect("live remote autoresearch run remains cached");
+    assert_eq!(cached_run.goal, "map promising OCR hypotheses");
+}
+
+#[tokio::test]
+async fn explicit_remote_autoresearch_readback_is_accepted_after_live_update() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+    chat.arm_remote_autoresearch_state_reload();
+
+    chat.handle_server_notification(
+        ServerNotification::AutoresearchUpdated(AutoresearchUpdatedNotification {
+            thread_id: thread_id.to_string(),
+            update_type: AppServerAutoresearchUpdateType::CycleStarted,
+            run: Some(sample_remote_autoresearch()),
+            message: Some("live autoresearch update".to_string()),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let mut refreshed_run = sample_remote_autoresearch();
+    refreshed_run.goal = "authoritative autoresearch state".to_string();
+    refreshed_run.updated_at = 999;
+    assert!(chat.on_remote_autoresearch_state_loaded(Some(refreshed_run.clone())));
+
+    let cached_run = chat
+        .slop_fork_ui
+        .cached_remote_autoresearch_run()
+        .cloned()
+        .expect("authoritative remote autoresearch run cached");
+    assert_eq!(cached_run.goal, refreshed_run.goal);
+    assert_eq!(cached_run.updated_at, refreshed_run.updated_at);
+}
+
+#[tokio::test]
+async fn authoritative_remote_autoresearch_action_result_is_accepted_on_equal_timestamp() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+    chat.arm_remote_autoresearch_state_reload();
+
+    let mut live_run = sample_remote_autoresearch();
+    live_run.updated_at = 50;
+    live_run.goal = "live autoresearch state".to_string();
+    chat.handle_server_notification(
+        ServerNotification::AutoresearchUpdated(AutoresearchUpdatedNotification {
+            thread_id: thread_id.to_string(),
+            update_type: AppServerAutoresearchUpdateType::Updated,
+            run: Some(live_run),
+            message: Some("live autoresearch update".to_string()),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let mut authoritative_run = sample_remote_autoresearch();
+    authoritative_run.updated_at = 50;
+    authoritative_run.goal = "authoritative autoresearch state".to_string();
+    assert!(chat.on_remote_autoresearch_action_state_loaded(Some(authoritative_run.clone())));
+
+    let cached_run = chat
+        .slop_fork_ui
+        .cached_remote_autoresearch_run()
+        .cloned()
+        .expect("authoritative remote autoresearch run cached");
+    assert_eq!(cached_run.goal, authoritative_run.goal);
+}
+
+#[tokio::test]
+async fn stale_remote_autoresearch_readback_is_ignored_after_newer_live_update() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+    chat.arm_remote_autoresearch_state_reload();
+
+    let mut live_run = sample_remote_autoresearch();
+    live_run.updated_at = 50;
+    live_run.goal = "newer live autoresearch state".to_string();
+    chat.handle_server_notification(
+        ServerNotification::AutoresearchUpdated(AutoresearchUpdatedNotification {
+            thread_id: thread_id.to_string(),
+            update_type: AppServerAutoresearchUpdateType::Updated,
+            run: Some(live_run.clone()),
+            message: Some("live autoresearch update".to_string()),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let mut stale_run = sample_remote_autoresearch();
+    stale_run.updated_at = 11;
+    stale_run.goal = "stale autoresearch readback".to_string();
+    assert!(!chat.on_remote_autoresearch_state_loaded(Some(stale_run)));
+
+    let cached_run = chat
+        .slop_fork_ui
+        .cached_remote_autoresearch_run()
+        .cloned()
+        .expect("newer live autoresearch run remains cached");
+    assert_eq!(cached_run.goal, live_run.goal);
+    assert_eq!(cached_run.updated_at, live_run.updated_at);
+}
+
+#[tokio::test]
+async fn stale_empty_remote_autoresearch_readback_is_ignored_after_newer_live_update() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+    chat.arm_remote_autoresearch_state_reload();
+
+    let mut live_run = sample_remote_autoresearch();
+    live_run.updated_at = 50;
+    live_run.goal = "newer live autoresearch state".to_string();
+    chat.handle_server_notification(
+        ServerNotification::AutoresearchUpdated(AutoresearchUpdatedNotification {
+            thread_id: thread_id.to_string(),
+            update_type: AppServerAutoresearchUpdateType::Updated,
+            run: Some(live_run.clone()),
+            message: Some("live autoresearch update".to_string()),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    assert!(!chat.on_remote_autoresearch_state_loaded(None));
+
+    let cached_run = chat
+        .slop_fork_ui
+        .cached_remote_autoresearch_run()
+        .cloned()
+        .expect("newer live autoresearch run remains cached");
+    assert_eq!(cached_run.goal, live_run.goal);
+    assert_eq!(cached_run.updated_at, live_run.updated_at);
+}
+
+#[tokio::test]
+async fn remote_autoresearch_load_error_reports_unavailable_status() {
+    let (mut chat, sender, mut rx, _op_rx) = make_chatwidget_manual_with_sender().await;
+    let thread_id = ThreadId::new();
+    let thread_id_text = thread_id.to_string();
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+
+    let mut app_server_state = SlopForkAppServerState::default();
+    app_server_state.seed_pending_remote_autoresearch_bootstrap(thread_id_text.clone(), 9);
+    let handled = app_server_state.handle_app_event(
+        &mut chat,
+        None,
+        &sender,
+        SlopForkEvent::RemoteAutoresearchStateLoaded {
+            thread_id: thread_id_text,
+            request_nonce: 9,
+            source: crate::slop_fork::RemoteStateLoadSource::Bootstrap,
+            report_error: true,
+            result: Err("autoresearch/read failed".to_string()),
+        },
+    );
+
+    assert!(handled.is_none());
+    assert!(!chat.slop_fork_ui.remote_autoresearch_state_loaded());
+    drain_insert_history(&mut rx);
+    chat.dispatch_command_with_args(
+        InlineCommand::Autoresearch,
+        "status".to_string(),
+        Vec::new(),
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = lines_to_single_string(cells.last().expect("autoresearch status output"));
+    assert!(rendered.contains("Autoresearch remote status is unavailable."));
+}
+
+#[tokio::test]
+async fn remote_autoresearch_action_failure_reports_unavailable_status() {
+    let (mut chat, sender, mut rx, _op_rx) = make_chatwidget_manual_with_sender().await;
+    let thread_id = ThreadId::new();
+    let thread_id_text = thread_id.to_string();
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+    chat.arm_remote_autoresearch_state_reload();
+
+    let mut app_server_state = SlopForkAppServerState::default();
+    app_server_state.seed_pending_remote_autoresearch_bootstrap(thread_id_text.clone(), 12);
+    let handled = app_server_state.handle_app_event(
+        &mut chat,
+        None,
+        &sender,
+        SlopForkEvent::RemoteAutoresearchStateLoaded {
+            thread_id: thread_id_text,
+            request_nonce: 12,
+            source: crate::slop_fork::RemoteStateLoadSource::ActionResponse,
+            report_error: false,
+            result: Err("autoresearch request failed in TUI: boom".to_string()),
+        },
+    );
+
+    assert!(handled.is_none());
+    assert!(!chat.slop_fork_ui.remote_autoresearch_state_loaded());
+    drain_insert_history(&mut rx);
+    chat.dispatch_command_with_args(
+        InlineCommand::Autoresearch,
+        "status".to_string(),
+        Vec::new(),
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = lines_to_single_string(cells.last().expect("autoresearch status output"));
+    assert!(rendered.contains("Autoresearch remote status is unavailable."));
+}
+
+#[tokio::test]
+async fn replayed_remote_autoresearch_update_restores_cache_without_replaying_messages() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+
+    chat.handle_server_notification(
+        ServerNotification::AutoresearchUpdated(AutoresearchUpdatedNotification {
+            thread_id: thread_id.to_string(),
+            update_type: AppServerAutoresearchUpdateType::Updated,
+            run: Some(sample_remote_autoresearch()),
+            message: Some("replayed autoresearch update".to_string()),
+        }),
+        Some(ReplayKind::ThreadSnapshot),
+    );
+
+    let cached_run = chat
+        .slop_fork_ui
+        .cached_remote_autoresearch_run()
+        .cloned()
+        .expect("replayed autoresearch run should restore cache");
+    assert_eq!(cached_run.goal, "map promising OCR hypotheses");
+    assert!(chat.slop_fork_ui.remote_autoresearch_state_loaded());
+    assert!(drain_insert_history(&mut rx).is_empty());
+}
+
+#[tokio::test]
+async fn replayed_remote_autoresearch_update_does_not_cancel_bootstrap_refresh() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+
+    let mut replay_run = sample_remote_autoresearch();
+    replay_run.goal = "replayed autoresearch state".to_string();
+    chat.handle_server_notification(
+        ServerNotification::AutoresearchUpdated(AutoresearchUpdatedNotification {
+            thread_id: thread_id.to_string(),
+            update_type: AppServerAutoresearchUpdateType::Updated,
+            run: Some(replay_run),
+            message: Some("replayed autoresearch update".to_string()),
+        }),
+        Some(ReplayKind::ThreadSnapshot),
+    );
+
+    let mut bootstrap_run = sample_remote_autoresearch();
+    bootstrap_run.goal = "bootstrap autoresearch state".to_string();
+    bootstrap_run.updated_at = 999;
+    assert!(chat.on_remote_autoresearch_state_loaded(Some(bootstrap_run.clone())));
+
+    let cached_run = chat
+        .slop_fork_ui
+        .cached_remote_autoresearch_run()
+        .cloned()
+        .expect("bootstrap autoresearch run should replace replay cache");
+    assert_eq!(cached_run.goal, bootstrap_run.goal);
+}
+
+#[tokio::test]
+async fn remote_automation_management_commands_emit_remote_events() {
+    let (mut create_chat, _tx, mut create_rx, _op_rx) = make_chatwidget_manual_with_sender().await;
+    let create_thread_id = ThreadId::new();
+    create_chat.thread_id = Some(create_thread_id);
+    create_chat.is_remote_app_server = true;
+    create_chat.dispatch_command_with_args(
+        InlineCommand::Auto,
+        "on-complete check deploy".to_string(),
+        Vec::new(),
+    );
+    let mut saw_upsert = false;
+    while let Ok(event) = create_rx.try_recv() {
+        if let AppEvent::SlopFork(SlopForkEvent::UpsertRemoteAutomation {
+            thread_id,
+            scope,
+            automation,
+        }) = event
+        {
+            assert_eq!(thread_id, create_thread_id.to_string());
+            assert_eq!(scope, AppServerAutomationScope::Session);
+            assert!(matches!(
+                automation.message_source,
+                AppServerAutomationMessageSource::Static { .. }
+            ));
+            saw_upsert = true;
+            break;
+        }
+    }
+    assert!(
+        saw_upsert,
+        "remote automation create should route through app-server"
+    );
+
+    let (mut pause_chat, _tx, mut pause_rx, _op_rx) = make_chatwidget_manual_with_sender().await;
+    let pause_thread_id = ThreadId::new();
+    pause_chat.thread_id = Some(pause_thread_id);
+    pause_chat.is_remote_app_server = true;
+    pause_chat.dispatch_command_with_args(
+        InlineCommand::Auto,
+        "pause session:auto-1".to_string(),
+        Vec::new(),
+    );
+    let mut saw_set_enabled = false;
+    while let Ok(event) = pause_rx.try_recv() {
+        if let AppEvent::SlopFork(SlopForkEvent::SetRemoteAutomationEnabled {
+            thread_id,
+            runtime_id,
+            enabled,
+        }) = event
+        {
+            assert_eq!(thread_id, pause_thread_id.to_string());
+            assert_eq!(runtime_id, "session:auto-1");
+            assert!(!enabled);
+            saw_set_enabled = true;
+            break;
+        }
+    }
+    assert!(
+        saw_set_enabled,
+        "remote automation pause should route through app-server"
+    );
+
+    let (mut remove_chat, _tx, mut remove_rx, _op_rx) = make_chatwidget_manual_with_sender().await;
+    let remove_thread_id = ThreadId::new();
+    remove_chat.thread_id = Some(remove_thread_id);
+    remove_chat.is_remote_app_server = true;
+    remove_chat.dispatch_command_with_args(
+        InlineCommand::Auto,
+        "rm session:auto-1".to_string(),
+        Vec::new(),
+    );
+    let mut saw_delete = false;
+    while let Ok(event) = remove_rx.try_recv() {
+        if let AppEvent::SlopFork(SlopForkEvent::DeleteRemoteAutomation {
+            thread_id,
+            runtime_id,
+        }) = event
+        {
+            assert_eq!(thread_id, remove_thread_id.to_string());
+            assert_eq!(runtime_id, "session:auto-1");
+            saw_delete = true;
+            break;
+        }
+    }
+    assert!(
+        saw_delete,
+        "remote automation remove should route through app-server"
+    );
+}
+
+#[tokio::test]
+async fn ordinary_remote_turn_start_does_not_claim_pilot_cache() {
+    let codex_home = tempdir().unwrap();
+    let thread_id = ThreadId::new();
+    let thread_id_string = thread_id.to_string();
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.codex_home = codex_home.path().to_path_buf();
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    chat.handle_server_notification(
+        ServerNotification::PilotUpdated(PilotUpdatedNotification {
+            thread_id: thread_id_string.clone(),
+            update_type: PilotUpdateType::Updated,
+            run: Some(AppServerPilotRun {
+                goal: "leave ordinary turns alone".to_string(),
+                status: AppServerPilotStatus::Running,
+                started_at: 10,
+                deadline_at: None,
+                updated_at: 11,
+                iteration_count: 2,
+                pending_cycle_kind: None,
+                active_cycle_kind: None,
+                active_turn_id: None,
+                last_submitted_turn_id: None,
+                wrap_up_requested: false,
+                wrap_up_requested_at: None,
+                stop_requested_at: None,
+                last_error: None,
+                status_message: Some("Pilot is waiting for its own turn.".to_string()),
+                last_progress_at: Some(11),
+                last_cycle_completed_at: None,
+                last_cycle_summary: None,
+                last_cycle_kind: None,
+                last_agent_message: None,
+            }),
+            message: None,
+        }),
+        /*replay_kind*/ None,
+    );
+
+    chat.handle_server_notification(
+        ServerNotification::TurnStarted(TurnStartedNotification {
+            thread_id: thread_id_string,
+            turn: AppServerTurn {
+                id: "ordinary-user-turn".to_string(),
+                items: Vec::new(),
+                status: AppServerTurnStatus::InProgress,
+                error: None,
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let cached_run = chat
+        .slop_fork_ui
+        .cached_remote_pilot_run()
+        .cloned()
+        .expect("remote pilot run cached");
+    assert_eq!(cached_run.active_turn_id, None);
+    assert!(
+        !chat
+            .slop_fork_ui
+            .pilot_has_active_turn(&chat.slop_fork_context(), "ordinary-user-turn")
+    );
+}
+
+#[tokio::test]
+async fn remote_pilot_status_reports_idle_after_empty_bootstrap() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+    assert!(chat.on_remote_pilot_state_loaded(None));
+
+    assert!(chat.slop_fork_ui.remote_pilot_state_loaded());
+    chat.dispatch_command_with_args(InlineCommand::Pilot, "status".to_string(), Vec::new());
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = lines_to_single_string(cells.last().expect("pilot status output"));
+    assert!(rendered.contains("Status: idle"));
+    assert!(rendered.contains("no Pilot run is active"));
+    assert!(!rendered.contains("unavailable"));
+}
+
+#[tokio::test]
+async fn stale_remote_pilot_bootstrap_loaded_event_is_ignored() {
+    let (mut chat, sender, _event_rx, _op_rx) = make_chatwidget_manual_with_sender().await;
+    let thread_id = ThreadId::new();
+    let thread_id_text = thread_id.to_string();
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+
+    let mut app_server_state = SlopForkAppServerState::default();
+    app_server_state.seed_pending_remote_pilot_bootstrap(thread_id_text.clone(), 2);
+    assert!(chat.slop_fork_ui.cached_remote_pilot_run().is_none());
+    assert!(!chat.slop_fork_ui.remote_pilot_state_loaded());
+
+    let handled = app_server_state.handle_app_event(
+        &mut chat,
+        None,
+        &sender,
+        SlopForkEvent::RemotePilotStateLoaded {
+            thread_id: thread_id_text,
+            request_nonce: 1,
+            source: crate::slop_fork::RemoteStateLoadSource::Bootstrap,
+            report_error: true,
+            result: Ok(Some(AppServerPilotRun {
+                goal: "stale remote pilot state".to_string(),
+                status: AppServerPilotStatus::Running,
+                started_at: 10,
+                deadline_at: None,
+                updated_at: 11,
+                iteration_count: 1,
+                pending_cycle_kind: None,
+                active_cycle_kind: Some(AppServerPilotCycleKind::Continue),
+                active_turn_id: Some("turn-stale".to_string()),
+                last_submitted_turn_id: Some("turn-stale".to_string()),
+                wrap_up_requested: false,
+                wrap_up_requested_at: None,
+                stop_requested_at: None,
+                last_error: None,
+                status_message: Some("stale pilot update".to_string()),
+                last_progress_at: Some(11),
+                last_cycle_completed_at: None,
+                last_cycle_summary: None,
+                last_cycle_kind: None,
+                last_agent_message: None,
+            })),
+        },
+    );
+
+    assert!(handled.is_none());
+    assert!(chat.slop_fork_ui.cached_remote_pilot_run().is_none());
+    assert!(!chat.slop_fork_ui.remote_pilot_state_loaded());
+}
+
+#[tokio::test]
+async fn late_remote_pilot_bootstrap_does_not_override_live_update() {
+    let (mut chat, sender, _event_rx, _op_rx) = make_chatwidget_manual_with_sender().await;
+    let thread_id = ThreadId::new();
+    let thread_id_text = thread_id.to_string();
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+
+    chat.handle_server_notification(
+        ServerNotification::PilotUpdated(PilotUpdatedNotification {
+            thread_id: thread_id_text.clone(),
+            update_type: PilotUpdateType::Updated,
+            run: Some(AppServerPilotRun {
+                goal: "latest remote pilot state".to_string(),
+                status: AppServerPilotStatus::Running,
+                started_at: 10,
+                deadline_at: None,
+                updated_at: 11,
+                iteration_count: 1,
+                pending_cycle_kind: None,
+                active_cycle_kind: Some(AppServerPilotCycleKind::Continue),
+                active_turn_id: Some("turn-live".to_string()),
+                last_submitted_turn_id: Some("turn-live".to_string()),
+                wrap_up_requested: false,
+                wrap_up_requested_at: None,
+                stop_requested_at: None,
+                last_error: None,
+                status_message: Some("live pilot update".to_string()),
+                last_progress_at: Some(11),
+                last_cycle_completed_at: None,
+                last_cycle_summary: None,
+                last_cycle_kind: None,
+                last_agent_message: None,
+            }),
+            message: Some("live pilot update".to_string()),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let mut app_server_state = SlopForkAppServerState::default();
+    app_server_state.seed_pending_remote_pilot_bootstrap(thread_id_text.clone(), 5);
+    let handled = app_server_state.handle_app_event(
+        &mut chat,
+        None,
+        &sender,
+        SlopForkEvent::RemotePilotStateLoaded {
+            thread_id: thread_id_text,
+            request_nonce: 5,
+            source: crate::slop_fork::RemoteStateLoadSource::Bootstrap,
+            report_error: true,
+            result: Ok(None),
+        },
+    );
+
+    assert!(handled.is_none());
+    let cached_run = chat
+        .slop_fork_ui
+        .cached_remote_pilot_run()
+        .cloned()
+        .expect("live remote pilot run remains cached");
+    assert_eq!(cached_run.goal, "latest remote pilot state");
+    assert_eq!(cached_run.active_turn_id.as_deref(), Some("turn-live"));
+}
+
+#[tokio::test]
+async fn explicit_remote_pilot_readback_is_accepted_after_live_update() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+    chat.arm_remote_pilot_state_reload();
+
+    chat.handle_server_notification(
+        ServerNotification::PilotUpdated(PilotUpdatedNotification {
+            thread_id: thread_id.to_string(),
+            update_type: PilotUpdateType::Updated,
+            run: Some(AppServerPilotRun {
+                goal: "latest remote pilot state".to_string(),
+                status: AppServerPilotStatus::Running,
+                started_at: 10,
+                deadline_at: None,
+                updated_at: 11,
+                iteration_count: 1,
+                pending_cycle_kind: None,
+                active_cycle_kind: Some(AppServerPilotCycleKind::Continue),
+                active_turn_id: Some("turn-live".to_string()),
+                last_submitted_turn_id: Some("turn-live".to_string()),
+                wrap_up_requested: false,
+                wrap_up_requested_at: None,
+                stop_requested_at: None,
+                last_error: None,
+                status_message: Some("live pilot update".to_string()),
+                last_progress_at: Some(11),
+                last_cycle_completed_at: None,
+                last_cycle_summary: None,
+                last_cycle_kind: None,
+                last_agent_message: None,
+            }),
+            message: Some("live pilot update".to_string()),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let refreshed_run = AppServerPilotRun {
+        goal: "authoritative remote pilot state".to_string(),
+        status: AppServerPilotStatus::Running,
+        started_at: 10,
+        deadline_at: None,
+        updated_at: 999,
+        iteration_count: 2,
+        pending_cycle_kind: None,
+        active_cycle_kind: Some(AppServerPilotCycleKind::Continue),
+        active_turn_id: Some("turn-live".to_string()),
+        last_submitted_turn_id: Some("turn-live".to_string()),
+        wrap_up_requested: false,
+        wrap_up_requested_at: None,
+        stop_requested_at: None,
+        last_error: None,
+        status_message: Some("authoritative pilot readback".to_string()),
+        last_progress_at: Some(999),
+        last_cycle_completed_at: None,
+        last_cycle_summary: None,
+        last_cycle_kind: None,
+        last_agent_message: None,
+    };
+    assert!(chat.on_remote_pilot_state_loaded(Some(refreshed_run.clone())));
+
+    let cached_run = chat
+        .slop_fork_ui
+        .cached_remote_pilot_run()
+        .cloned()
+        .expect("authoritative remote pilot run cached");
+    assert_eq!(cached_run.goal, refreshed_run.goal);
+    assert_eq!(cached_run.updated_at, refreshed_run.updated_at);
+}
+
+#[tokio::test]
+async fn authoritative_remote_pilot_action_result_is_accepted_on_equal_timestamp() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+    chat.arm_remote_pilot_state_reload();
+
+    let live_run = AppServerPilotRun {
+        goal: "live pilot state".to_string(),
+        status: AppServerPilotStatus::Running,
+        started_at: 10,
+        deadline_at: None,
+        updated_at: 50,
+        iteration_count: 1,
+        pending_cycle_kind: None,
+        active_cycle_kind: Some(AppServerPilotCycleKind::Continue),
+        active_turn_id: Some("turn-live".to_string()),
+        last_submitted_turn_id: Some("turn-live".to_string()),
+        wrap_up_requested: false,
+        wrap_up_requested_at: None,
+        stop_requested_at: None,
+        last_error: None,
+        status_message: Some("live pilot update".to_string()),
+        last_progress_at: Some(50),
+        last_cycle_completed_at: None,
+        last_cycle_summary: None,
+        last_cycle_kind: None,
+        last_agent_message: None,
+    };
+    chat.handle_server_notification(
+        ServerNotification::PilotUpdated(PilotUpdatedNotification {
+            thread_id: thread_id.to_string(),
+            update_type: PilotUpdateType::Updated,
+            run: Some(live_run),
+            message: Some("live pilot update".to_string()),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let authoritative_run = AppServerPilotRun {
+        goal: "authoritative pilot state".to_string(),
+        status: AppServerPilotStatus::Running,
+        started_at: 10,
+        deadline_at: None,
+        updated_at: 50,
+        iteration_count: 2,
+        pending_cycle_kind: None,
+        active_cycle_kind: Some(AppServerPilotCycleKind::Continue),
+        active_turn_id: Some("turn-live".to_string()),
+        last_submitted_turn_id: Some("turn-live".to_string()),
+        wrap_up_requested: false,
+        wrap_up_requested_at: None,
+        stop_requested_at: None,
+        last_error: None,
+        status_message: Some("authoritative pilot update".to_string()),
+        last_progress_at: Some(50),
+        last_cycle_completed_at: None,
+        last_cycle_summary: None,
+        last_cycle_kind: None,
+        last_agent_message: None,
+    };
+    assert!(chat.on_remote_pilot_action_state_loaded(Some(authoritative_run.clone())));
+
+    let cached_run = chat
+        .slop_fork_ui
+        .cached_remote_pilot_run()
+        .cloned()
+        .expect("authoritative remote pilot run cached");
+    assert_eq!(cached_run.goal, authoritative_run.goal);
+}
+
+#[tokio::test]
+async fn stale_remote_pilot_readback_is_ignored_after_newer_live_update() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+    chat.arm_remote_pilot_state_reload();
+
+    let live_run = AppServerPilotRun {
+        goal: "newer live pilot state".to_string(),
+        status: AppServerPilotStatus::Running,
+        started_at: 10,
+        deadline_at: None,
+        updated_at: 50,
+        iteration_count: 2,
+        pending_cycle_kind: None,
+        active_cycle_kind: Some(AppServerPilotCycleKind::Continue),
+        active_turn_id: Some("turn-live".to_string()),
+        last_submitted_turn_id: Some("turn-live".to_string()),
+        wrap_up_requested: false,
+        wrap_up_requested_at: None,
+        stop_requested_at: None,
+        last_error: None,
+        status_message: Some("live pilot update".to_string()),
+        last_progress_at: Some(50),
+        last_cycle_completed_at: None,
+        last_cycle_summary: None,
+        last_cycle_kind: None,
+        last_agent_message: None,
+    };
+    chat.handle_server_notification(
+        ServerNotification::PilotUpdated(PilotUpdatedNotification {
+            thread_id: thread_id.to_string(),
+            update_type: PilotUpdateType::Updated,
+            run: Some(live_run.clone()),
+            message: Some("live pilot update".to_string()),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let stale_run = AppServerPilotRun {
+        goal: "stale pilot readback".to_string(),
+        status: AppServerPilotStatus::Running,
+        started_at: 10,
+        deadline_at: None,
+        updated_at: 11,
+        iteration_count: 1,
+        pending_cycle_kind: None,
+        active_cycle_kind: Some(AppServerPilotCycleKind::Continue),
+        active_turn_id: Some("turn-stale".to_string()),
+        last_submitted_turn_id: Some("turn-stale".to_string()),
+        wrap_up_requested: false,
+        wrap_up_requested_at: None,
+        stop_requested_at: None,
+        last_error: None,
+        status_message: Some("stale pilot readback".to_string()),
+        last_progress_at: Some(11),
+        last_cycle_completed_at: None,
+        last_cycle_summary: None,
+        last_cycle_kind: None,
+        last_agent_message: None,
+    };
+    assert!(!chat.on_remote_pilot_state_loaded(Some(stale_run)));
+
+    let cached_run = chat
+        .slop_fork_ui
+        .cached_remote_pilot_run()
+        .cloned()
+        .expect("newer live pilot run remains cached");
+    assert_eq!(cached_run.goal, live_run.goal);
+    assert_eq!(cached_run.updated_at, live_run.updated_at);
+}
+
+#[tokio::test]
+async fn stale_empty_remote_pilot_readback_is_ignored_after_newer_live_update() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+    chat.arm_remote_pilot_state_reload();
+
+    let live_run = AppServerPilotRun {
+        goal: "newer live pilot state".to_string(),
+        status: AppServerPilotStatus::Running,
+        started_at: 10,
+        deadline_at: None,
+        updated_at: 50,
+        iteration_count: 2,
+        pending_cycle_kind: None,
+        active_cycle_kind: Some(AppServerPilotCycleKind::Continue),
+        active_turn_id: Some("turn-live".to_string()),
+        last_submitted_turn_id: Some("turn-live".to_string()),
+        wrap_up_requested: false,
+        wrap_up_requested_at: None,
+        stop_requested_at: None,
+        last_error: None,
+        status_message: Some("live pilot update".to_string()),
+        last_progress_at: Some(50),
+        last_cycle_completed_at: None,
+        last_cycle_summary: None,
+        last_cycle_kind: None,
+        last_agent_message: None,
+    };
+    chat.handle_server_notification(
+        ServerNotification::PilotUpdated(PilotUpdatedNotification {
+            thread_id: thread_id.to_string(),
+            update_type: PilotUpdateType::Updated,
+            run: Some(live_run.clone()),
+            message: Some("live pilot update".to_string()),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    assert!(!chat.on_remote_pilot_state_loaded(None));
+
+    let cached_run = chat
+        .slop_fork_ui
+        .cached_remote_pilot_run()
+        .cloned()
+        .expect("newer live pilot run remains cached");
+    assert_eq!(cached_run.goal, live_run.goal);
+    assert_eq!(cached_run.updated_at, live_run.updated_at);
+}
+
+#[tokio::test]
+async fn remote_pilot_load_error_reports_unavailable_status() {
+    let (mut chat, sender, mut rx, _op_rx) = make_chatwidget_manual_with_sender().await;
+    let thread_id = ThreadId::new();
+    let thread_id_text = thread_id.to_string();
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+
+    let mut app_server_state = SlopForkAppServerState::default();
+    app_server_state.seed_pending_remote_pilot_bootstrap(thread_id_text.clone(), 10);
+    let handled = app_server_state.handle_app_event(
+        &mut chat,
+        None,
+        &sender,
+        SlopForkEvent::RemotePilotStateLoaded {
+            thread_id: thread_id_text,
+            request_nonce: 10,
+            source: crate::slop_fork::RemoteStateLoadSource::Bootstrap,
+            report_error: true,
+            result: Err("pilot/read failed".to_string()),
+        },
+    );
+
+    assert!(handled.is_none());
+    assert!(!chat.slop_fork_ui.remote_pilot_state_loaded());
+    drain_insert_history(&mut rx);
+    chat.dispatch_command_with_args(InlineCommand::Pilot, "status".to_string(), Vec::new());
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = lines_to_single_string(cells.last().expect("pilot status output"));
+    assert!(rendered.contains("Pilot remote status is unavailable."));
+}
+
+#[tokio::test]
+async fn remote_pilot_action_failure_reports_unavailable_status() {
+    let (mut chat, sender, mut rx, _op_rx) = make_chatwidget_manual_with_sender().await;
+    let thread_id = ThreadId::new();
+    let thread_id_text = thread_id.to_string();
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+    chat.arm_remote_pilot_state_reload();
+
+    let mut app_server_state = SlopForkAppServerState::default();
+    app_server_state.seed_pending_remote_pilot_bootstrap(thread_id_text.clone(), 13);
+    let handled = app_server_state.handle_app_event(
+        &mut chat,
+        None,
+        &sender,
+        SlopForkEvent::RemotePilotStateLoaded {
+            thread_id: thread_id_text,
+            request_nonce: 13,
+            source: crate::slop_fork::RemoteStateLoadSource::ActionResponse,
+            report_error: false,
+            result: Err("pilot request failed in TUI: boom".to_string()),
+        },
+    );
+
+    assert!(handled.is_none());
+    assert!(!chat.slop_fork_ui.remote_pilot_state_loaded());
+    drain_insert_history(&mut rx);
+    chat.dispatch_command_with_args(InlineCommand::Pilot, "status".to_string(), Vec::new());
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = lines_to_single_string(cells.last().expect("pilot status output"));
+    assert!(rendered.contains("Pilot remote status is unavailable."));
+}
+
+#[tokio::test]
+async fn replayed_remote_pilot_update_restores_cache_without_replaying_messages() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+
+    chat.handle_server_notification(
+        ServerNotification::PilotUpdated(PilotUpdatedNotification {
+            thread_id: thread_id.to_string(),
+            update_type: PilotUpdateType::Updated,
+            run: Some(AppServerPilotRun {
+                goal: "replayed remote pilot state".to_string(),
+                status: AppServerPilotStatus::Running,
+                started_at: 10,
+                deadline_at: None,
+                updated_at: 11,
+                iteration_count: 1,
+                pending_cycle_kind: None,
+                active_cycle_kind: Some(AppServerPilotCycleKind::Continue),
+                active_turn_id: Some("turn-live".to_string()),
+                last_submitted_turn_id: Some("turn-live".to_string()),
+                wrap_up_requested: false,
+                wrap_up_requested_at: None,
+                stop_requested_at: None,
+                last_error: None,
+                status_message: Some("replayed pilot update".to_string()),
+                last_progress_at: Some(11),
+                last_cycle_completed_at: None,
+                last_cycle_summary: None,
+                last_cycle_kind: None,
+                last_agent_message: None,
+            }),
+            message: Some("replayed pilot update".to_string()),
+        }),
+        Some(ReplayKind::ThreadSnapshot),
+    );
+
+    let cached_run = chat
+        .slop_fork_ui
+        .cached_remote_pilot_run()
+        .cloned()
+        .expect("replayed pilot run should restore cache");
+    assert_eq!(cached_run.goal, "replayed remote pilot state");
+    assert_eq!(cached_run.active_turn_id.as_deref(), Some("turn-live"));
+    assert!(chat.slop_fork_ui.remote_pilot_state_loaded());
+    assert!(drain_insert_history(&mut rx).is_empty());
+}
+
+#[tokio::test]
+async fn replayed_remote_pilot_update_does_not_cancel_bootstrap_refresh() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+
+    let replay_run = AppServerPilotRun {
+        goal: "replayed pilot state".to_string(),
+        status: AppServerPilotStatus::Running,
+        started_at: 10,
+        deadline_at: None,
+        updated_at: 11,
+        iteration_count: 1,
+        pending_cycle_kind: None,
+        active_cycle_kind: Some(AppServerPilotCycleKind::Continue),
+        active_turn_id: Some("turn-replay".to_string()),
+        last_submitted_turn_id: Some("turn-replay".to_string()),
+        wrap_up_requested: false,
+        wrap_up_requested_at: None,
+        stop_requested_at: None,
+        last_error: None,
+        status_message: Some("replayed pilot update".to_string()),
+        last_progress_at: Some(11),
+        last_cycle_completed_at: None,
+        last_cycle_summary: None,
+        last_cycle_kind: None,
+        last_agent_message: None,
+    };
+    chat.handle_server_notification(
+        ServerNotification::PilotUpdated(PilotUpdatedNotification {
+            thread_id: thread_id.to_string(),
+            update_type: PilotUpdateType::Updated,
+            run: Some(replay_run),
+            message: Some("replayed pilot update".to_string()),
+        }),
+        Some(ReplayKind::ThreadSnapshot),
+    );
+
+    let bootstrap_run = AppServerPilotRun {
+        goal: "bootstrap pilot state".to_string(),
+        status: AppServerPilotStatus::Running,
+        started_at: 10,
+        deadline_at: None,
+        updated_at: 999,
+        iteration_count: 2,
+        pending_cycle_kind: None,
+        active_cycle_kind: Some(AppServerPilotCycleKind::Continue),
+        active_turn_id: Some("turn-bootstrap".to_string()),
+        last_submitted_turn_id: Some("turn-bootstrap".to_string()),
+        wrap_up_requested: false,
+        wrap_up_requested_at: None,
+        stop_requested_at: None,
+        last_error: None,
+        status_message: Some("bootstrap pilot update".to_string()),
+        last_progress_at: Some(999),
+        last_cycle_completed_at: None,
+        last_cycle_summary: None,
+        last_cycle_kind: None,
+        last_agent_message: None,
+    };
+    assert!(chat.on_remote_pilot_state_loaded(Some(bootstrap_run.clone())));
+
+    let cached_run = chat
+        .slop_fork_ui
+        .cached_remote_pilot_run()
+        .cloned()
+        .expect("bootstrap pilot run should replace replay cache");
+    assert_eq!(cached_run.goal, bootstrap_run.goal);
+}
+
+#[tokio::test]
+async fn remote_automation_updated_caches_server_state_and_renders_auto_list() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    chat.handle_server_notification(
+        ServerNotification::AutomationUpdated(AutomationUpdatedNotification {
+            thread_id: thread_id.to_string(),
+            runtime_id: "session:auto-1".to_string(),
+            update_type: AutomationUpdateType::Upserted,
+            automation: Some(sample_remote_automation("session:auto-1")),
+            message: Some("automation synced from server".to_string()),
+        }),
+        /*replay_kind*/ None,
+    );
+    drain_insert_history(&mut rx);
+
+    chat.dispatch_command_with_args(InlineCommand::Auto, "list".to_string(), Vec::new());
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = lines_to_single_string(cells.last().expect("auto list output"));
+    assert!(rendered.contains("session:auto-1"));
+    assert!(rendered.contains("check deploy"));
+    assert_eq!(chat.slop_fork_ui.cached_pilot_runtime_state(), None);
+    assert_eq!(chat.slop_fork_ui.cached_remote_automations().len(), 1);
+}
+
+#[tokio::test]
+async fn remote_automation_state_loaded_event_replaces_partial_prebootstrap_cache() {
+    let (mut chat, sender, mut rx, _op_rx) = make_chatwidget_manual_with_sender().await;
+    let thread_id = ThreadId::new();
+    let thread_id_text = thread_id.to_string();
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+
+    chat.handle_server_notification(
+        ServerNotification::AutomationUpdated(AutomationUpdatedNotification {
+            thread_id: thread_id_text.clone(),
+            runtime_id: "session:auto-1".to_string(),
+            update_type: AutomationUpdateType::Upserted,
+            automation: Some(sample_remote_automation("session:auto-1")),
+            message: Some("live automation update".to_string()),
+        }),
+        /*replay_kind*/ None,
+    );
+    drain_insert_history(&mut rx);
+    assert_eq!(chat.slop_fork_ui.cached_remote_automations().len(), 1);
+
+    let mut app_server_state = SlopForkAppServerState::default();
+    app_server_state.seed_pending_remote_automation_bootstrap(thread_id_text.clone(), 7);
+
+    let handled = app_server_state.handle_app_event(
+        &mut chat,
+        None,
+        &sender,
+        SlopForkEvent::RemoteAutomationStateLoaded {
+            thread_id: thread_id_text,
+            request_nonce: 7,
+            result: Ok(vec![
+                sample_remote_automation("session:auto-1"),
+                sample_remote_automation("session:auto-2"),
+            ]),
+        },
+    );
+
+    assert!(handled.is_none());
+    assert_eq!(chat.slop_fork_ui.cached_remote_automations().len(), 2);
+    assert_eq!(
+        chat.slop_fork_ui.cached_remote_automations()[1].runtime_id,
+        "session:auto-2"
+    );
+}
+
+#[tokio::test]
+async fn remote_automation_bootstrap_does_not_overwrite_fresher_live_update() {
+    let (mut chat, sender, mut rx, _op_rx) = make_chatwidget_manual_with_sender().await;
+    let thread_id = ThreadId::new();
+    let thread_id_text = thread_id.to_string();
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+
+    let mut live_automation = sample_remote_automation("session:auto-1");
+    live_automation.run_count = 9;
+    live_automation.next_fire_at = Some(120);
+    chat.handle_server_notification(
+        ServerNotification::AutomationUpdated(AutomationUpdatedNotification {
+            thread_id: thread_id_text.clone(),
+            runtime_id: "session:auto-1".to_string(),
+            update_type: AutomationUpdateType::Upserted,
+            automation: Some(live_automation),
+            message: Some("live automation update".to_string()),
+        }),
+        /*replay_kind*/ None,
+    );
+    drain_insert_history(&mut rx);
+
+    let mut app_server_state = SlopForkAppServerState::default();
+    app_server_state.seed_pending_remote_automation_bootstrap(thread_id_text.clone(), 8);
+    let handled = app_server_state.handle_app_event(
+        &mut chat,
+        None,
+        &sender,
+        SlopForkEvent::RemoteAutomationStateLoaded {
+            thread_id: thread_id_text,
+            request_nonce: 8,
+            result: Ok(vec![
+                sample_remote_automation("session:auto-1"),
+                sample_remote_automation("session:auto-2"),
+            ]),
+        },
+    );
+
+    assert!(handled.is_none());
+    assert_eq!(chat.slop_fork_ui.cached_remote_automations().len(), 2);
+    let retained = chat
+        .slop_fork_ui
+        .cached_remote_automations()
+        .iter()
+        .find(|entry| entry.runtime_id == "session:auto-1")
+        .cloned()
+        .expect("live automation remains cached");
+    assert_eq!(retained.run_count, 9);
+    assert_eq!(retained.next_fire_at, Some(120));
+}
+
+#[tokio::test]
+async fn remote_automation_bootstrap_does_not_reintroduce_live_deleted_runtime() {
+    let (mut chat, sender, mut rx, _op_rx) = make_chatwidget_manual_with_sender().await;
+    let thread_id = ThreadId::new();
+    let thread_id_text = thread_id.to_string();
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+
+    chat.handle_server_notification(
+        ServerNotification::AutomationUpdated(AutomationUpdatedNotification {
+            thread_id: thread_id_text.clone(),
+            runtime_id: "session:auto-1".to_string(),
+            update_type: AutomationUpdateType::Upserted,
+            automation: Some(sample_remote_automation("session:auto-1")),
+            message: Some("live automation update".to_string()),
+        }),
+        /*replay_kind*/ None,
+    );
+    chat.handle_server_notification(
+        ServerNotification::AutomationUpdated(AutomationUpdatedNotification {
+            thread_id: thread_id_text.clone(),
+            runtime_id: "session:auto-1".to_string(),
+            update_type: AutomationUpdateType::Deleted,
+            automation: None,
+            message: Some("live automation deleted".to_string()),
+        }),
+        /*replay_kind*/ None,
+    );
+    drain_insert_history(&mut rx);
+    assert!(chat.slop_fork_ui.cached_remote_automations().is_empty());
+
+    let mut app_server_state = SlopForkAppServerState::default();
+    app_server_state.seed_pending_remote_automation_bootstrap(thread_id_text.clone(), 9);
+    let handled = app_server_state.handle_app_event(
+        &mut chat,
+        None,
+        &sender,
+        SlopForkEvent::RemoteAutomationStateLoaded {
+            thread_id: thread_id_text,
+            request_nonce: 9,
+            result: Ok(vec![
+                sample_remote_automation("session:auto-1"),
+                sample_remote_automation("session:auto-2"),
+            ]),
+        },
+    );
+
+    assert!(handled.is_none());
+    assert_eq!(chat.slop_fork_ui.cached_remote_automations().len(), 1);
+    assert_eq!(
+        chat.slop_fork_ui.cached_remote_automations()[0].runtime_id,
+        "session:auto-2"
+    );
+}
+
+#[tokio::test]
+async fn remote_automation_bootstrap_completes_full_state_after_live_delta() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+
+    chat.handle_server_notification(
+        ServerNotification::AutomationUpdated(AutomationUpdatedNotification {
+            thread_id: thread_id.to_string(),
+            runtime_id: "session:auto-1".to_string(),
+            update_type: AutomationUpdateType::Upserted,
+            automation: Some(sample_remote_automation("session:auto-1")),
+            message: Some("live automation update".to_string()),
+        }),
+        /*replay_kind*/ None,
+    );
+    drain_insert_history(&mut rx);
+
+    assert!(chat.on_remote_automation_state_loaded(vec![
+        sample_remote_automation("session:auto-1"),
+        sample_remote_automation("session:auto-2"),
+    ]));
+    assert_eq!(chat.slop_fork_ui.cached_remote_automations().len(), 2);
+    assert_eq!(
+        chat.slop_fork_ui.cached_remote_automations()[1].runtime_id,
+        "session:auto-2"
+    );
+}
+
+#[tokio::test]
+async fn remote_app_server_timer_automations_do_not_run_local_state() {
+    let dir = tempdir().unwrap();
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+
+    chat.dispatch_command_with_args(
+        InlineCommand::Auto,
+        "every --scope global 10m check deploy".to_string(),
+        Vec::new(),
+    );
+
+    let state_path =
+        codex_core::slop_fork::automation::automation_state_path(&chat.config.codex_home);
+    let mut state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&state_path).expect("state file"))
+            .expect("automation state json");
+    state["threads"][&thread_id.to_string()]["runtime_states"]["global:auto-1"]["next_fire_at"] =
+        serde_json::json!(Local::now().timestamp() - 1);
+    std::fs::write(
+        &state_path,
+        serde_json::to_string_pretty(&state).expect("serialize automation state"),
+    )
+    .expect("rewrite automation state");
+
+    chat.is_remote_app_server = true;
+    let effects = chat
+        .slop_fork_ui
+        .on_session_configured(&chat.slop_fork_context());
+    chat.apply_slop_fork_effects(effects);
+    chat.poll_timer_automations();
+
+    assert_eq!(op_rx.try_recv(), Err(TryRecvError::Empty));
+}
+
+#[tokio::test]
+async fn autoresearch_rpc_failure_rolls_back_dispatched_submission_state() {
+    let codex_home = tempdir().unwrap();
+    let workdir = tempdir().unwrap();
+    let thread_id = ThreadId::new();
+    let thread_id_string = thread_id.to_string();
+    let prepared_workspace = AutoresearchWorkspace::prepare(
+        codex_home.path(),
+        thread_id_string.as_str(),
+        workdir.path(),
+    )
+    .expect("prepare workspace");
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.codex_home = codex_home.path().to_path_buf();
+    chat.config.cwd = workdir.path().to_path_buf().abs();
+    chat.thread_id = Some(thread_id);
+
+    let mut runtime = AutoresearchRuntime::load(codex_home.path(), thread_id_string.as_str())
+        .expect("load autoresearch runtime");
+    assert!(
+        runtime
+            .start(
+                "improve benchmark accuracy".to_string(),
+                AutoresearchMode::Optimize,
+                workdir.path().to_path_buf(),
+                prepared_workspace.workspace,
+                Some(3),
+                Local::now(),
+            )
+            .unwrap()
+    );
+    assert!(
+        runtime
+            .prepare_cycle_submission(Local::now())
+            .unwrap()
+            .is_some()
+    );
+    assert!(runtime.note_submission_dispatched().unwrap());
+
+    chat.bottom_pane.set_task_running(/*running*/ true);
+    chat.on_autoresearch_turn_submission_rpc_failed();
+
+    let state = AutoresearchRuntime::load(codex_home.path(), thread_id_string.as_str())
+        .expect("reload autoresearch runtime")
+        .state()
+        .cloned()
+        .expect("autoresearch state after rollback");
+    assert_eq!(state.pending_cycle_kind, None);
+    assert_eq!(state.submission_dispatched_at, None);
+    assert_eq!(state.active_turn_id, None);
+    assert_eq!(
+        state.status_message.as_deref(),
+        Some("Autoresearch submission failed before the turn could start.")
+    );
+    assert_eq!(chat.bottom_pane.is_task_running(), false);
 }
 
 #[tokio::test]
@@ -13839,6 +16442,91 @@ async fn on_complete_automation_submits_prompt_when_task_finishes() {
         }
         other => panic!("expected Op::UserTurn from on-complete automation, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn remote_app_server_turn_completion_does_not_run_local_on_complete_automation() {
+    let dir = tempdir().unwrap();
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.thread_id = Some(ThreadId::new());
+    chat.codex_op_target = super::CodexOpTarget::AppEvent;
+    chat.app_server_owns_slop_fork_follow_ups = true;
+    chat.is_remote_app_server = true;
+
+    chat.dispatch_command_with_args(
+        InlineCommand::Auto,
+        "on-complete continue working on this".to_string(),
+        Vec::new(),
+    );
+
+    let thread_id = chat.thread_id.expect("thread id");
+    chat.pending_turn_copyable_output = Some("server handled the follow-up".to_string());
+    chat.handle_server_notification(
+        ServerNotification::TurnCompleted(TurnCompletedNotification {
+            thread_id: thread_id.to_string(),
+            turn: AppServerTurn {
+                id: "turn-automation-1".to_string(),
+                items: Vec::new(),
+                status: AppServerTurnStatus::Completed,
+                error: None,
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            AppEvent::CodexOp(Op::UserTurn { .. })
+            | AppEvent::SubmitThreadOp {
+                op: Op::UserTurn { .. },
+                ..
+            } => panic!("unexpected local automation submission: {event:?}"),
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test]
+async fn app_event_turn_completion_still_runs_local_on_complete_automation_when_not_remote() {
+    let dir = tempdir().unwrap();
+    let (mut chat, _sender, mut event_rx, _op_rx) = make_chatwidget_manual_with_sender().await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.thread_id = Some(ThreadId::new());
+    chat.codex_op_target = super::CodexOpTarget::AppEvent;
+
+    chat.dispatch_command_with_args(
+        InlineCommand::Auto,
+        "on-complete continue working on this".to_string(),
+        Vec::new(),
+    );
+
+    let thread_id = chat.thread_id.expect("thread id");
+    chat.pending_turn_copyable_output = Some("server handled the follow-up".to_string());
+    chat.handle_server_notification(
+        ServerNotification::TurnCompleted(TurnCompletedNotification {
+            thread_id: thread_id.to_string(),
+            turn: AppServerTurn {
+                id: "turn-automation-1".to_string(),
+                items: Vec::new(),
+                status: AppServerTurnStatus::Completed,
+                error: None,
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let mut saw_follow_up = false;
+    while let Ok(event) = event_rx.try_recv() {
+        if matches!(event, AppEvent::CodexOp(Op::UserTurn { .. })) {
+            saw_follow_up = true;
+            break;
+        }
+    }
+    assert!(
+        saw_follow_up,
+        "local automation should still fire in normal AppEvent mode"
+    );
 }
 
 async fn run_automation_notification_suppression_case(

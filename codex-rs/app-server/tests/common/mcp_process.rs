@@ -12,6 +12,9 @@ use tokio::process::ChildStdout;
 
 use anyhow::Context;
 use codex_app_server_protocol::AppsListParams;
+use codex_app_server_protocol::AutoresearchControlParams;
+use codex_app_server_protocol::AutoresearchReadParams;
+use codex_app_server_protocol::AutoresearchStartParams;
 use codex_app_server_protocol::CancelLoginAccountParams;
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientNotification;
@@ -48,6 +51,9 @@ use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::LoginAccountParams;
 use codex_app_server_protocol::MockExperimentalMethodParams;
 use codex_app_server_protocol::ModelListParams;
+use codex_app_server_protocol::PilotControlParams;
+use codex_app_server_protocol::PilotReadParams;
+use codex_app_server_protocol::PilotStartParams;
 use codex_app_server_protocol::PluginInstallParams;
 use codex_app_server_protocol::PluginListParams;
 use codex_app_server_protocol::PluginReadParams;
@@ -445,6 +451,60 @@ impl McpProcess {
     ) -> anyhow::Result<i64> {
         let params = Some(serde_json::to_value(params)?);
         self.send_request("thread/read", params).await
+    }
+
+    /// Send a `pilot/read` JSON-RPC request.
+    pub async fn send_pilot_read_request(
+        &mut self,
+        params: PilotReadParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("pilot/read", params).await
+    }
+
+    /// Send a `pilot/start` JSON-RPC request.
+    pub async fn send_pilot_start_request(
+        &mut self,
+        params: PilotStartParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("pilot/start", params).await
+    }
+
+    /// Send a `pilot/control` JSON-RPC request.
+    pub async fn send_pilot_control_request(
+        &mut self,
+        params: PilotControlParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("pilot/control", params).await
+    }
+
+    /// Send an `autoresearch/read` JSON-RPC request.
+    pub async fn send_autoresearch_read_request(
+        &mut self,
+        params: AutoresearchReadParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("autoresearch/read", params).await
+    }
+
+    /// Send an `autoresearch/start` JSON-RPC request.
+    pub async fn send_autoresearch_start_request(
+        &mut self,
+        params: AutoresearchStartParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("autoresearch/start", params).await
+    }
+
+    /// Send an `autoresearch/control` JSON-RPC request.
+    pub async fn send_autoresearch_control_request(
+        &mut self,
+        params: AutoresearchControlParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("autoresearch/control", params).await
     }
 
     /// Send a `model/list` JSON-RPC request.

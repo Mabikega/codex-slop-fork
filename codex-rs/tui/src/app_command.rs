@@ -105,6 +105,12 @@ pub(crate) enum AppCommandView<'a> {
     Review {
         review_request: &'a ReviewRequest,
     },
+    SlopForkPilotTurn {
+        prompt: &'a str,
+    },
+    SlopForkAutoresearchTurn {
+        prompt: &'a str,
+    },
     Other(&'a Op),
 }
 
@@ -394,6 +400,10 @@ impl AppCommand {
                 num_turns: *num_turns,
             },
             Op::Review { review_request } => AppCommandView::Review { review_request },
+            Op::SlopForkPilotTurn { prompt } => AppCommandView::SlopForkPilotTurn { prompt },
+            Op::SlopForkAutoresearchTurn { prompt } => {
+                AppCommandView::SlopForkAutoresearchTurn { prompt }
+            }
             op => AppCommandView::Other(op),
         }
     }

@@ -79,6 +79,7 @@ mod server_request_error;
 mod slop_fork_automation;
 mod slop_fork_autoresearch;
 mod slop_fork_pilot;
+mod slop_fork_runtime_events;
 mod thread_state;
 mod thread_status;
 mod transport;
