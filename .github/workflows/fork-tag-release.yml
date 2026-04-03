@@ -32,6 +32,7 @@ jobs:
       version: ${{ steps.plan.outputs.version }}
       release_tag: ${{ steps.plan.outputs.release_tag }}
       release_title: ${{ steps.plan.outputs.release_title }}
+      release_prerelease: ${{ steps.plan.outputs.release_prerelease }}
       source_sha: ${{ steps.plan.outputs.source_sha }}
       source_ref: ${{ steps.plan.outputs.source_ref }}
       release_exists: ${{ steps.plan.outputs.release_exists }}
@@ -81,9 +82,19 @@ jobs:
           if [[ "${release_tag}" =~ ^codex-slop-fork-v(.+)$ ]]; then
             inferred_release_title="codex-slop-fork ${BASH_REMATCH[1]}"
           fi
+          release_prerelease="$(RELEASE_TAG="${release_tag}" python3 - <<'PY'
+          import os
+
+          tag = os.environ["RELEASE_TAG"]
+          prefix = "codex-slop-fork-v"
+          version = tag[len(prefix):] if tag.startswith(prefix) else tag
+          version_core = version.split("+", 1)[0]
+          print("true" if "-" in version_core else "false")
+          PY
+          )"
           normalized_tag_ref="$(git check-ref-format --normalize "refs/tags/${release_tag}" 2>/dev/null || true)"
           if [[ -z "${normalized_tag_ref}" ]]; then
-            printf '::error::release_tag is not a valid git tag name: %q (expected e.g. codex-slop-fork-v0.116.0)\n' "${raw_release_tag}"
+            printf '::error::release_tag is not a valid git tag name: %q (expected e.g. codex-slop-fork-v0.116.0 or codex-slop-fork-v0.116.0-rc.1)\n' "${raw_release_tag}"
             exit 1
           fi
           release_tag="${normalized_tag_ref#refs/tags/}"
@@ -117,6 +128,7 @@ jobs:
             echo "version=${version}"
             echo "release_tag=${release_tag}"
             echo "release_title=${release_title}"
+            echo "release_prerelease=${release_prerelease}"
             echo "source_sha=${source_sha}"
             echo "source_ref=${source_ref}"
             echo "release_exists=${release_exists}"
@@ -550,6 +562,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
           RELEASE_TITLE: ${{ needs.prepare.outputs.release_title }}
+          RELEASE_PRERELEASE: ${{ needs.prepare.outputs.release_prerelease }}
           RELEASE_EXISTS: ${{ needs.prepare.outputs.release_exists }}
           SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
         run: |
@@ -559,16 +572,24 @@ jobs:
             echo "::error::No release artifacts were downloaded."
             exit 1
           fi
+          create_release_flags=()
+          edit_release_flags=()
+          if [[ "${RELEASE_PRERELEASE}" == "true" ]]; then
+            create_release_flags+=(--prerelease --latest=false)
+            edit_release_flags+=(--prerelease)
+          fi
           if [[ "${RELEASE_EXISTS}" == "true" ]]; then
             gh release upload "${RELEASE_TAG}" "${release_files[@]}" --clobber --repo "${GH_REPO}"
             gh release edit "${RELEASE_TAG}" \
               --repo "${GH_REPO}" \
               --title "${RELEASE_TITLE}" \
-              --notes-file "${NOTES_PATH}"
+              --notes-file "${NOTES_PATH}" \
+              "${edit_release_flags[@]}"
           else
             gh release create "${RELEASE_TAG}" "${release_files[@]}" \
               --repo "${GH_REPO}" \
               --title "${RELEASE_TITLE}" \
               --notes-file "${NOTES_PATH}" \
+              "${create_release_flags[@]}" \
               --target "${SOURCE_SHA}"
           fi
