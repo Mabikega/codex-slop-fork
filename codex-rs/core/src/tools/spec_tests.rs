@@ -3,14 +3,6 @@ use crate::models_manager::manager::ModelsManager;
 use crate::models_manager::model_info::with_config_overrides;
 use crate::shell::Shell;
 use crate::shell::ShellType;
-use crate::slop_fork::autoresearch::tools::AUTORESEARCH_INIT_TOOL;
-use crate::slop_fork::autoresearch::tools::AUTORESEARCH_LOG_APPROACH_TOOL;
-use crate::slop_fork::autoresearch::tools::AUTORESEARCH_LOG_DISCOVERY_TOOL;
-use crate::slop_fork::autoresearch::tools::AUTORESEARCH_LOG_TOOL;
-use crate::slop_fork::autoresearch::tools::AUTORESEARCH_LOG_VALIDATION_TOOL;
-use crate::slop_fork::autoresearch::tools::AUTORESEARCH_REQUEST_DISCOVERY_TOOL;
-use crate::slop_fork::autoresearch::tools::AUTORESEARCH_RUN_PARALLEL_TOOL;
-use crate::slop_fork::autoresearch::tools::AUTORESEARCH_RUN_TOOL;
 use crate::tools::ToolRouter;
 use crate::tools::router::ToolRouterParams;
 use codex_app_server_protocol::AppInfo;
@@ -364,14 +356,6 @@ fn test_full_toolset_specs_for_gpt5_codex_unified_exec_web_search() {
         create_view_image_tool(ViewImageToolOptions {
             can_request_original_image_detail: config.can_request_original_image_detail,
         }),
-        AUTORESEARCH_INIT_TOOL.clone(),
-        AUTORESEARCH_RUN_TOOL.clone(),
-        AUTORESEARCH_LOG_TOOL.clone(),
-        AUTORESEARCH_LOG_APPROACH_TOOL.clone(),
-        AUTORESEARCH_REQUEST_DISCOVERY_TOOL.clone(),
-        AUTORESEARCH_LOG_DISCOVERY_TOOL.clone(),
-        AUTORESEARCH_LOG_VALIDATION_TOOL.clone(),
-        AUTORESEARCH_RUN_PARALLEL_TOOL.clone(),
         create_resume_agent_tool(),
     ] {
         expected.insert(spec.name().to_string(), spec);
