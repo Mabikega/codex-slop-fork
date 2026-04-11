@@ -112,6 +112,11 @@ fn normalize_lines_for_paragraph(lines: Vec<Line<'static>>, width: u16) -> Vec<L
     }
     normalized
 }
+mod hook_cell;
+
+pub(crate) use hook_cell::HookCell;
+pub(crate) use hook_cell::new_active_hook_cell;
+pub(crate) use hook_cell::new_completed_hook_cell;
 
 /// Represents an event to display in the conversation history. Returns its
 /// `Vec<Line<'static>>` representation to make it easier to display in a

@@ -113,16 +113,12 @@ mod ui_pilot;
 mod ui_rate_limits;
 
 pub(crate) use ui_login::PendingChatgptLogin;
-#[cfg(test)]
-pub(crate) use ui_login::PendingDeviceCodeState;
 use ui_rate_limits::SavedAccountRateLimitsRefreshState;
 pub(crate) use ui_rate_limits::TouchQuotaMode;
 pub(crate) use ui_rate_limits::fetch_rate_limits;
 pub(crate) use ui_rate_limits::has_saved_chatgpt_accounts;
 pub(crate) use ui_rate_limits::maybe_touch_active_account_cached_quotas;
 pub(crate) use ui_rate_limits::refresh_saved_account_rate_limits_once;
-#[cfg(test)]
-pub(crate) use ui_rate_limits::saved_account_rate_limit_refresh_is_due;
 pub(crate) use ui_rate_limits::touch_cached_quotas_for_saved_accounts;
 
 pub(crate) const LOGIN_POPUP_VIEW_ID: &str = "login-popup";
