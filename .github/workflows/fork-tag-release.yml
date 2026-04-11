@@ -3,6 +3,7 @@ name: fork-tag-release
 on:
   push:
     tags:
+      - "codex-slop-fork-[0-9]*"
       - "codex-slop-fork-v*"
   workflow_dispatch:
     inputs:
@@ -73,28 +74,32 @@ jobs:
           PY
           )"
           if [[ "${release_tag}" =~ ^codex-slop-fork[[:space:]]+(.+)$ ]]; then
-            release_tag="codex-slop-fork-v${BASH_REMATCH[1]}"
+            release_tag="codex-slop-fork-${BASH_REMATCH[1]}"
           fi
           if [[ -z "${release_tag}" ]]; then
             echo "::error::release_tag must not be empty."
             exit 1
           fi
-          if [[ "${release_tag}" =~ ^codex-slop-fork-v(.+)$ ]]; then
+          if [[ "${release_tag}" =~ ^codex-slop-fork-v?(.+)$ ]]; then
             inferred_release_title="codex-slop-fork ${BASH_REMATCH[1]}"
           fi
           release_prerelease="$(RELEASE_TAG="${release_tag}" python3 - <<'PY'
           import os
 
           tag = os.environ["RELEASE_TAG"]
-          prefix = "codex-slop-fork-v"
-          version = tag[len(prefix):] if tag.startswith(prefix) else tag
+          for prefix in ("codex-slop-fork-v", "codex-slop-fork-"):
+            if tag.startswith(prefix):
+              version = tag[len(prefix):]
+              break
+          else:
+            version = tag
           version_core = version.split("+", 1)[0]
           print("true" if "-" in version_core else "false")
           PY
           )"
           normalized_tag_ref="$(git check-ref-format --normalize "refs/tags/${release_tag}" 2>/dev/null || true)"
           if [[ -z "${normalized_tag_ref}" ]]; then
-            printf '::error::release_tag is not a valid git tag name: %q (expected e.g. codex-slop-fork-v0.116.0 or codex-slop-fork-v0.116.0-rc.1)\n' "${raw_release_tag}"
+            printf '::error::release_tag is not a valid git tag name: %q (expected e.g. codex-slop-fork-0.116.0, codex-slop-fork-v0.116.0, or codex-slop-fork-0.116.0-rc.1)\n' "${raw_release_tag}"
             exit 1
           fi
           release_tag="${normalized_tag_ref#refs/tags/}"
