@@ -36,6 +36,10 @@ libcap_version="2.75"
 libcap_sha256="de4e7e064c9ba451d5234dd46e897d7c71c96a9ebf9a0c445bc04f4742d83632"
 libcap_tarball_name="libcap-${libcap_version}.tar.xz"
 libcap_download_url="https://mirrors.edge.kernel.org/pub/linux/libs/security/linux-privs/libcap2/${libcap_tarball_name}"
+alsa_lib_version="1.2.15.3"
+alsa_lib_sha256="7b079d614d582cade7ab8db2364e65271d0877a37df8757ac4ac0c8970be861e"
+alsa_lib_tarball_name="alsa-lib-${alsa_lib_version}.tar.bz2"
+alsa_lib_download_url="https://www.alsa-project.org/files/pub/lib/${alsa_lib_tarball_name}"
 
 # Use the musl toolchain as the Rust linker to avoid Zig injecting its own CRT.
 if command -v "${arch}-linux-musl-gcc" >/dev/null; then
@@ -56,6 +60,10 @@ libcap_root="${tool_root}/libcap-${libcap_version}"
 libcap_src_root="${libcap_root}/src"
 libcap_prefix="${libcap_root}/prefix"
 libcap_pkgconfig_dir="${libcap_prefix}/lib/pkgconfig"
+alsa_lib_root="${tool_root}/alsa-lib-${alsa_lib_version}"
+alsa_lib_src_root="${alsa_lib_root}/src"
+alsa_lib_prefix="${alsa_lib_root}/prefix"
+alsa_lib_pkgconfig_dir="${alsa_lib_prefix}/lib/pkgconfig"
 
 if [[ ! -f "${libcap_prefix}/lib/libcap.a" ]]; then
   mkdir -p "${libcap_src_root}" "${libcap_prefix}/lib" "${libcap_prefix}/include/sys" "${libcap_prefix}/include/linux" "${libcap_pkgconfig_dir}"
@@ -231,6 +239,33 @@ if [[ -n "${sysroot}" && "${sysroot}" != "/" ]]; then
   echo "${boring_sysroot_var}=${sysroot}" >> "$GITHUB_ENV"
 fi
 
+if [[ ! -f "${alsa_lib_prefix}/lib/libasound.a" ]]; then
+  mkdir -p "${alsa_lib_root}" "${alsa_lib_src_root}"
+  alsa_lib_tarball="${alsa_lib_root}/${alsa_lib_tarball_name}"
+
+  curl -fsSL "${alsa_lib_download_url}" -o "${alsa_lib_tarball}"
+  echo "${alsa_lib_sha256}  ${alsa_lib_tarball}" | sha256sum -c -
+
+  tar -xjf "${alsa_lib_tarball}" -C "${alsa_lib_src_root}"
+  alsa_lib_source_dir="${alsa_lib_src_root}/alsa-lib-${alsa_lib_version}"
+  pushd "${alsa_lib_source_dir}" >/dev/null
+  CC="${cc}" \
+  CXX="${cxx}" \
+  AR=ar \
+  RANLIB=ranlib \
+  ./configure \
+    --host="${arch}-linux-musl" \
+    --prefix="${alsa_lib_prefix}" \
+    --disable-shared \
+    --enable-static \
+    --disable-python \
+    --disable-topology \
+    --disable-ucm
+  make -j"$(nproc)"
+  make install
+  popd >/dev/null
+fi
+
 cflags="-pthread"
 cxxflags="-pthread"
 if [[ "${TARGET}" == "aarch64-unknown-linux-musl" ]]; then
@@ -262,14 +297,15 @@ echo "CMAKE_ARGS=-DCMAKE_HAVE_THREADS_LIBRARY=1 -DCMAKE_USE_PTHREADS_INIT=1 -DCM
 
 # Allow pkg-config resolution during cross-compilation.
 echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
-pkg_config_path="${libcap_pkgconfig_dir}"
+pkg_config_target_path="${libcap_pkgconfig_dir}:${alsa_lib_pkgconfig_dir}"
+pkg_config_path="${pkg_config_target_path}"
 if [[ -n "${PKG_CONFIG_PATH:-}" ]]; then
   pkg_config_path="${pkg_config_path}:${PKG_CONFIG_PATH}"
 fi
 echo "PKG_CONFIG_PATH=${pkg_config_path}" >> "$GITHUB_ENV"
 pkg_config_path_var="PKG_CONFIG_PATH_${TARGET}"
 pkg_config_path_var="${pkg_config_path_var//-/_}"
-echo "${pkg_config_path_var}=${libcap_pkgconfig_dir}" >> "$GITHUB_ENV"
+echo "${pkg_config_path_var}=${pkg_config_target_path}" >> "$GITHUB_ENV"
 
 if [[ -n "${sysroot}" && "${sysroot}" != "/" ]]; then
   echo "PKG_CONFIG_SYSROOT_DIR=${sysroot}" >> "$GITHUB_ENV"
