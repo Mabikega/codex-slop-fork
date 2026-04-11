@@ -112,6 +112,45 @@ fn normalize_lines_for_paragraph(lines: Vec<Line<'static>>, width: u16) -> Vec<L
     }
     normalized
 }
+
+#[derive(Clone, Debug)]
+pub(crate) struct PreparedHistoryCellViewport {
+    normalized_lines: Vec<Line<'static>>,
+    line_count: u16,
+}
+
+impl PreparedHistoryCellViewport {
+    pub(crate) fn from_lines(lines: Vec<Line<'static>>, width: u16) -> Self {
+        let safe_width = clamp_ratatui_paragraph_width(width);
+        let normalized_lines = normalize_lines_for_paragraph(lines, width);
+        let line_count = Paragraph::new(Text::from(normalized_lines.clone()))
+            .wrap(Wrap { trim: false })
+            .line_count(safe_width)
+            .try_into()
+            .unwrap_or(0);
+        Self {
+            normalized_lines,
+            line_count,
+        }
+    }
+
+    pub(crate) fn desired_height(&self) -> u16 {
+        self.line_count
+    }
+
+    pub(crate) fn render(&self, area: Rect, buf: &mut Buffer) {
+        let paragraph =
+            Paragraph::new(Text::from(self.normalized_lines.clone())).wrap(Wrap { trim: false });
+        let y = if area.height == 0 {
+            0
+        } else {
+            let overflow = usize::from(self.line_count).saturating_sub(usize::from(area.height));
+            u16::try_from(overflow).unwrap_or(u16::MAX)
+        };
+        paragraph.scroll((y, 0)).render(area, buf);
+    }
+}
+
 mod hook_cell;
 
 pub(crate) use hook_cell::HookCell;
@@ -134,6 +173,15 @@ pub(crate) trait HistoryCell: std::fmt::Debug + Send + Sync + Any {
     /// Returns the logical lines for the main chat viewport.
     fn display_lines(&self, width: u16) -> Vec<Line<'static>>;
 
+    /// Prepares the viewport representation for height measurement and rendering.
+    ///
+    /// The default implementation builds the display lines once, normalizes them for ratatui's
+    /// paragraph width limits, and precomputes the wrapped row count so callers can reuse the
+    /// result across layout and render steps in the same frame.
+    fn prepare_viewport(&self, width: u16) -> PreparedHistoryCellViewport {
+        PreparedHistoryCellViewport::from_lines(self.display_lines(width), width)
+    }
+
     /// Returns the number of viewport rows needed to render this cell.
     ///
     /// The default delegates to `Paragraph::line_count` with
@@ -142,13 +190,7 @@ pub(crate) trait HistoryCell: std::fmt::Debug + Send + Sync + Any {
     /// for lines containing URL-like tokens that are wider than the
     /// terminal — the logical line count would undercount.
     fn desired_height(&self, width: u16) -> u16 {
-        let safe_width = clamp_ratatui_paragraph_width(width);
-        let lines = normalize_lines_for_paragraph(self.display_lines(width), width);
-        Paragraph::new(Text::from(lines))
-            .wrap(Wrap { trim: false })
-            .line_count(safe_width)
-            .try_into()
-            .unwrap_or(0)
+        self.prepare_viewport(width).desired_height()
     }
 
     /// Returns lines for the transcript overlay (`Ctrl+T`).
@@ -208,18 +250,7 @@ pub(crate) trait HistoryCell: std::fmt::Debug + Send + Sync + Any {
 
 impl Renderable for Box<dyn HistoryCell> {
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        let lines = normalize_lines_for_paragraph(self.display_lines(area.width), area.width);
-        let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
-        let safe_width = clamp_ratatui_paragraph_width(area.width);
-        let y = if area.height == 0 {
-            0
-        } else {
-            let overflow = paragraph
-                .line_count(safe_width)
-                .saturating_sub(usize::from(area.height));
-            u16::try_from(overflow).unwrap_or(u16::MAX)
-        };
-        paragraph.scroll((y, 0)).render(area, buf);
+        self.prepare_viewport(area.width).render(area, buf);
     }
     fn desired_height(&self, width: u16) -> u16 {
         HistoryCell::desired_height(self.as_ref(), width)

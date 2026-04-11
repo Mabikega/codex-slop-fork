@@ -25,6 +25,8 @@
 //! the final answer. During streaming we hide the status row to avoid duplicate
 //! progress indicators; once commentary completes and stream queues drain, we
 //! re-show it so users still see turn-in-progress state between output bursts.
+use std::cell::Cell;
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -358,18 +360,15 @@ use crate::history_cell::HistoryCell;
 use crate::history_cell::HookCell;
 use crate::history_cell::McpToolCallCell;
 use crate::history_cell::PlainHistoryCell;
+use crate::history_cell::PreparedHistoryCellViewport;
 use crate::history_cell::WebSearchCell;
 use crate::key_hint;
 use crate::key_hint::KeyBinding;
 #[cfg(test)]
 use crate::markdown::append_markdown;
-use crate::render::Insets;
 use crate::render::renderable::ColumnRenderable;
-use crate::render::renderable::FlexRenderable;
 use crate::render::renderable::MAX_RATATUI_PARAGRAPH_WIDTH;
 use crate::render::renderable::Renderable;
-use crate::render::renderable::RenderableExt;
-use crate::render::renderable::RenderableItem;
 use crate::slash_command::SlashCommand;
 use crate::status::RateLimitSnapshotDisplay;
 use crate::status_indicator_widget::STATUS_DETAILS_DEFAULT_MAX_LINES;
@@ -752,6 +751,34 @@ impl PendingGuardianReviewStatus {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ChatWidgetLayoutCache {
+    width: u16,
+    pass_revision: u64,
+    active_cell_revision: u64,
+    bottom_pane_revision: u64,
+    has_active_cell: bool,
+    active_cell_height: u16,
+    show_active_hook_cell: bool,
+    active_hook_cell_height: u16,
+    bottom_pane_height: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ChatWidgetLayout {
+    active_cell_inner: Rect,
+    active_hook_cell_inner: Rect,
+    bottom_pane_inner: Rect,
+}
+
+#[derive(Clone, Debug)]
+struct ActiveCellViewportCache {
+    width: u16,
+    pass_revision: u64,
+    active_cell_revision: u64,
+    viewport: Arc<PreparedHistoryCellViewport>,
+}
+
 /// Maintains the per-session UI state and interaction state machines for the chat screen.
 ///
 /// `ChatWidget` owns the state derived from the protocol event stream (history cells, streaming
@@ -781,6 +808,9 @@ pub(crate) struct ChatWidget {
     /// flushing. It is intentionally allowed to wrap, which implies a rare one-time cache collision
     /// where the overlay may briefly treat new tail content as already cached.
     active_cell_revision: u64,
+    layout_pass_revision: Cell<u64>,
+    layout_cache: Cell<Option<ChatWidgetLayoutCache>>,
+    active_cell_viewport_cache: RefCell<Option<ActiveCellViewportCache>>,
     config: Config,
     /// The unmasked collaboration mode settings (always Default mode).
     ///
@@ -966,7 +996,7 @@ pub(crate) struct ChatWidget {
     last_separator_elapsed_secs: Option<u64>,
     // Runtime metrics accumulated across delta snapshots for the active turn.
     turn_runtime_metrics: RuntimeMetricsSummary,
-    last_rendered_width: std::cell::Cell<Option<usize>>,
+    last_rendered_width: Cell<Option<usize>>,
     // Feedback sink for /feedback
     feedback: codex_feedback::CodexFeedback,
     // Current session rollout path (if known)
@@ -4291,6 +4321,8 @@ impl ChatWidget {
     }
 
     pub(crate) fn pre_draw_tick(&mut self) {
+        self.layout_pass_revision
+            .set(self.layout_pass_revision.get().wrapping_add(1));
         self.update_due_hook_visibility();
         self.schedule_hook_timer_if_needed();
         self.bottom_pane.pre_draw_tick();
@@ -4896,6 +4928,9 @@ impl ChatWidget {
             }),
             active_cell,
             active_cell_revision: 0,
+            layout_pass_revision: Cell::new(0),
+            layout_cache: Cell::new(None),
+            active_cell_viewport_cache: RefCell::new(None),
             config,
             skills_all: Vec::new(),
             skills_initial_state: None,
@@ -11895,31 +11930,120 @@ impl ChatWidget {
         self.token_info = None;
     }
 
-    fn as_renderable(&self) -> RenderableItem<'_> {
-        let active_cell_renderable = match &self.active_cell {
-            Some(cell) => RenderableItem::Borrowed(cell).inset(Insets::tlbr(
-                /*top*/ 1, /*left*/ 0, /*bottom*/ 0, /*right*/ 0,
-            )),
-            None => RenderableItem::Owned(Box::new(())),
+    fn cached_active_cell_viewport(&self, width: u16) -> Option<Arc<PreparedHistoryCellViewport>> {
+        let pass_revision = self.layout_pass_revision.get();
+        if let Some(cache) = self.active_cell_viewport_cache.borrow().as_ref()
+            && cache.width == width
+            && cache.pass_revision == pass_revision
+            && cache.active_cell_revision == self.active_cell_revision
+        {
+            return Some(Arc::clone(&cache.viewport));
+        }
+
+        let cell = self.active_cell.as_ref()?;
+        let viewport = Arc::new(cell.prepare_viewport(width));
+        *self.active_cell_viewport_cache.borrow_mut() = Some(ActiveCellViewportCache {
+            width,
+            pass_revision,
+            active_cell_revision: self.active_cell_revision,
+            viewport: Arc::clone(&viewport),
+        });
+        Some(viewport)
+    }
+
+    fn cached_layout(&self, width: u16) -> ChatWidgetLayoutCache {
+        let pass_revision = self.layout_pass_revision.get();
+        let bottom_pane_revision = self.bottom_pane.layout_revision();
+        if let Some(cache) = self.layout_cache.get()
+            && cache.width == width
+            && cache.pass_revision == pass_revision
+            && cache.active_cell_revision == self.active_cell_revision
+            && cache.bottom_pane_revision == bottom_pane_revision
+        {
+            return cache;
+        }
+
+        let active_hook_cell = self
+            .active_hook_cell
+            .as_ref()
+            .filter(|cell| cell.should_render());
+        let cache = ChatWidgetLayoutCache {
+            width,
+            pass_revision,
+            active_cell_revision: self.active_cell_revision,
+            bottom_pane_revision,
+            has_active_cell: self.active_cell.is_some(),
+            active_cell_height: self
+                .cached_active_cell_viewport(width)
+                .map_or(0, |viewport| viewport.desired_height()),
+            show_active_hook_cell: active_hook_cell.is_some(),
+            active_hook_cell_height: active_hook_cell
+                .map_or(0, |cell| Renderable::desired_height(cell, width)),
+            bottom_pane_height: self.bottom_pane.desired_height(width),
         };
-        let active_hook_cell_renderable = match &self.active_hook_cell {
-            Some(cell) if cell.should_render() => {
-                RenderableItem::Borrowed(cell).inset(Insets::tlbr(
-                    /*top*/ 1, /*left*/ 0, /*bottom*/ 0, /*right*/ 0,
-                ))
-            }
-            _ => RenderableItem::Owned(Box::new(())),
+        self.layout_cache.set(Some(cache));
+        cache
+    }
+
+    fn layout_for_area(&self, area: Rect) -> ChatWidgetLayout {
+        let cache = self.cached_layout(area.width);
+        let active_cell_total_height = if cache.has_active_cell {
+            cache.active_cell_height.saturating_add(1)
+        } else {
+            0
         };
-        let mut flex = FlexRenderable::new();
-        flex.push(/*flex*/ 1, active_cell_renderable);
-        flex.push(/*flex*/ 0, active_hook_cell_renderable);
-        flex.push(
-            /*flex*/ 0,
-            RenderableItem::Borrowed(&self.bottom_pane).inset(Insets::tlbr(
-                /*top*/ 1, /*left*/ 0, /*bottom*/ 0, /*right*/ 0,
-            )),
+        let active_hook_cell_total_height = if cache.show_active_hook_cell {
+            cache.active_hook_cell_height.saturating_add(1)
+        } else {
+            0
+        };
+        let bottom_pane_total_height = cache.bottom_pane_height.saturating_add(1);
+
+        let active_hook_outer_height = active_hook_cell_total_height.min(area.height);
+        let bottom_pane_outer_height =
+            bottom_pane_total_height.min(area.height.saturating_sub(active_hook_outer_height));
+        let active_cell_outer_height = active_cell_total_height.min(
+            area.height
+                .saturating_sub(active_hook_outer_height)
+                .saturating_sub(bottom_pane_outer_height),
         );
-        RenderableItem::Owned(Box::new(flex))
+
+        let active_cell_outer = Rect::new(area.x, area.y, area.width, active_cell_outer_height);
+        let active_hook_outer = Rect::new(
+            area.x,
+            area.y.saturating_add(active_cell_outer_height),
+            area.width,
+            active_hook_outer_height,
+        );
+        let bottom_pane_outer = Rect::new(
+            area.x,
+            area.y
+                .saturating_add(active_cell_outer_height)
+                .saturating_add(active_hook_outer_height),
+            area.width,
+            bottom_pane_outer_height,
+        );
+
+        ChatWidgetLayout {
+            active_cell_inner: Rect::new(
+                active_cell_outer.x,
+                active_cell_outer.y.saturating_add(1),
+                active_cell_outer.width,
+                active_cell_outer.height.saturating_sub(1),
+            ),
+            active_hook_cell_inner: Rect::new(
+                active_hook_outer.x,
+                active_hook_outer.y.saturating_add(1),
+                active_hook_outer.width,
+                active_hook_outer.height.saturating_sub(1),
+            ),
+            bottom_pane_inner: Rect::new(
+                bottom_pane_outer.x,
+                bottom_pane_outer.y.saturating_add(1),
+                bottom_pane_outer.width,
+                bottom_pane_outer.height.saturating_sub(1),
+            ),
+        }
     }
 }
 
@@ -11953,16 +12077,41 @@ impl Drop for ChatWidget {
 
 impl Renderable for ChatWidget {
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        self.as_renderable().render(area, buf);
+        let layout = self.layout_for_area(area);
+        if let Some(viewport) = self.cached_active_cell_viewport(area.width) {
+            viewport.render(layout.active_cell_inner, buf);
+        }
+        if let Some(cell) = self
+            .active_hook_cell
+            .as_ref()
+            .filter(|cell| cell.should_render())
+        {
+            cell.render(layout.active_hook_cell_inner, buf);
+        }
+        self.bottom_pane.render(layout.bottom_pane_inner, buf);
         self.last_rendered_width.set(Some(area.width as usize));
     }
 
     fn desired_height(&self, width: u16) -> u16 {
-        self.as_renderable().desired_height(width)
+        let cache = self.cached_layout(width);
+        let active_cell_total_height = if cache.has_active_cell {
+            cache.active_cell_height.saturating_add(1)
+        } else {
+            0
+        };
+        let active_hook_cell_total_height = if cache.show_active_hook_cell {
+            cache.active_hook_cell_height.saturating_add(1)
+        } else {
+            0
+        };
+        active_cell_total_height
+            .saturating_add(active_hook_cell_total_height)
+            .saturating_add(cache.bottom_pane_height.saturating_add(1))
     }
 
     fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
-        self.as_renderable().cursor_pos(area)
+        self.bottom_pane
+            .cursor_pos(self.layout_for_area(area).bottom_pane_inner)
     }
 }
 

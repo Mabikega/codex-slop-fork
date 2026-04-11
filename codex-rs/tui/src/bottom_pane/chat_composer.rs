@@ -362,6 +362,7 @@ pub(crate) struct ChatComposer {
     status_line_enabled: bool,
     // Agent label injected into the footer's contextual row when multi-agent mode is active.
     active_agent_label: Option<String>,
+    popup_sync_pending: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -485,6 +486,7 @@ impl ChatComposer {
             status_line_value: None,
             status_line_enabled: false,
             active_agent_label: None,
+            popup_sync_pending: false,
         };
         // Apply configuration via the setter to keep side-effects centralized.
         this.set_disable_paste_burst(disable_paste_burst);
@@ -503,6 +505,7 @@ impl ChatComposer {
 
     pub fn set_skill_mentions(&mut self, skills: Option<Vec<SkillMetadata>>) {
         self.skills = skills;
+        self.popup_sync_pending = true;
     }
 
     pub fn set_plugin_mentions(&mut self, plugins: Option<Vec<PluginCapabilitySummary>>) {
@@ -512,6 +515,7 @@ impl ChatComposer {
 
     pub fn set_plugins_command_enabled(&mut self, enabled: bool) {
         self.plugins_command_enabled = enabled;
+        self.popup_sync_pending = true;
     }
 
     /// Toggle composer-side image paste handling.
@@ -546,14 +550,17 @@ impl ChatComposer {
 
     pub fn set_collaboration_modes_enabled(&mut self, enabled: bool) {
         self.collaboration_modes_enabled = enabled;
+        self.popup_sync_pending = true;
     }
 
     pub fn set_connectors_enabled(&mut self, enabled: bool) {
         self.connectors_enabled = enabled;
+        self.popup_sync_pending = true;
     }
 
     pub fn set_fast_command_enabled(&mut self, enabled: bool) {
         self.fast_command_enabled = enabled;
+        self.popup_sync_pending = true;
     }
 
     pub fn set_collaboration_mode_indicator(
@@ -565,14 +572,17 @@ impl ChatComposer {
 
     pub fn set_personality_command_enabled(&mut self, enabled: bool) {
         self.personality_command_enabled = enabled;
+        self.popup_sync_pending = true;
     }
 
     pub fn set_realtime_conversation_enabled(&mut self, enabled: bool) {
         self.realtime_conversation_enabled = enabled;
+        self.popup_sync_pending = true;
     }
 
     pub fn set_audio_device_selection_enabled(&mut self, enabled: bool) {
         self.audio_device_selection_enabled = enabled;
+        self.popup_sync_pending = true;
     }
 
     /// Compatibility shim for tests that still toggle the removed steer mode flag.
@@ -1216,6 +1226,12 @@ impl ChatComposer {
     pub(crate) fn insert_str(&mut self, text: &str) {
         self.textarea.insert_str(text);
         self.sync_popups();
+    }
+
+    pub(crate) fn sync_popups_if_needed(&mut self) {
+        if self.popup_sync_pending {
+            self.sync_popups();
+        }
     }
 
     /// Handle a key event coming from the main UI.
@@ -2996,6 +3012,7 @@ impl ChatComposer {
     }
 
     pub(crate) fn sync_popups(&mut self) {
+        self.popup_sync_pending = false;
         self.sync_slash_command_elements();
         if !self.popups_enabled() {
             self.active_popup = ActivePopup::None;
@@ -3427,6 +3444,7 @@ impl ChatComposer {
     pub(crate) fn set_input_enabled(&mut self, enabled: bool, placeholder: Option<String>) {
         self.input_enabled = enabled;
         self.input_disabled_placeholder = if enabled { None } else { placeholder };
+        self.popup_sync_pending = true;
 
         // Avoid leaving interactive popups open while input is blocked.
         if !enabled && !matches!(self.active_popup, ActivePopup::None) {

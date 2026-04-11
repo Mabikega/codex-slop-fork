@@ -13,6 +13,7 @@
 //!
 //! Some UI is time-based rather than input-based, such as the transient "press again to quit"
 //! hint. The pane schedules redraws so those hints can expire even when the UI is otherwise idle.
+use std::cell::Cell;
 use std::path::PathBuf;
 
 use crate::app_event::ConnectorsSnapshot;
@@ -161,6 +162,14 @@ pub(crate) use experimental_features_view::ExperimentalFeaturesView;
 pub(crate) use list_selection_view::SelectionAction;
 pub(crate) use list_selection_view::SelectionItem;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BottomPaneHeightCache {
+    width: u16,
+    state_revision: u64,
+    pass_revision: u64,
+    height: u16,
+}
+
 /// Pane displayed in the lower half of the chat UI.
 ///
 /// This is the owning container for the prompt input (`ChatComposer`) and the view stack
@@ -197,6 +206,9 @@ pub(crate) struct BottomPane {
     pending_thread_approvals: PendingThreadApprovals,
     context_window_percent: Option<i64>,
     context_window_used_tokens: Option<i64>,
+    layout_revision: Cell<u64>,
+    layout_pass_revision: Cell<u64>,
+    desired_height_cache: Cell<Option<BottomPaneHeightCache>>,
 }
 
 pub(crate) struct BottomPaneParams {
@@ -248,6 +260,9 @@ impl BottomPane {
             animations_enabled,
             context_window_percent: None,
             context_window_used_tokens: None,
+            layout_revision: Cell::new(0),
+            layout_pass_revision: Cell::new(0),
+            desired_height_cache: Cell::new(None),
         }
     }
 
@@ -501,7 +516,6 @@ impl BottomPane {
             }
         } else {
             let needs_redraw = self.composer.handle_paste(pasted);
-            self.composer.sync_popups();
             if needs_redraw {
                 self.request_redraw();
             }
@@ -510,12 +524,13 @@ impl BottomPane {
 
     pub(crate) fn insert_str(&mut self, text: &str) {
         self.composer.insert_str(text);
-        self.composer.sync_popups();
         self.request_redraw();
     }
 
     pub(crate) fn pre_draw_tick(&mut self) {
-        self.composer.sync_popups();
+        self.layout_pass_revision
+            .set(self.layout_pass_revision.get().wrapping_add(1));
+        self.composer.sync_popups_if_needed();
     }
 
     /// Replace the composer text with `text`.
@@ -1044,11 +1059,17 @@ impl BottomPane {
 
     /// Height (terminal rows) required by the current bottom pane.
     pub(crate) fn request_redraw(&self) {
+        self.layout_revision
+            .set(self.layout_revision.get().wrapping_add(1));
         self.frame_requester.schedule_frame();
     }
 
     pub(crate) fn request_redraw_in(&self, dur: Duration) {
         self.frame_requester.schedule_frame_in(dur);
+    }
+
+    pub(crate) fn layout_revision(&self) -> u64 {
+        self.layout_revision.get()
     }
 
     // --- History helpers ---
@@ -1223,7 +1244,24 @@ impl Renderable for BottomPane {
         self.as_renderable().render(area, buf);
     }
     fn desired_height(&self, width: u16) -> u16 {
-        self.as_renderable().desired_height(width)
+        let state_revision = self.layout_revision.get();
+        let pass_revision = self.layout_pass_revision.get();
+        if let Some(cache) = self.desired_height_cache.get()
+            && cache.width == width
+            && cache.state_revision == state_revision
+            && cache.pass_revision == pass_revision
+        {
+            return cache.height;
+        }
+
+        let height = self.as_renderable().desired_height(width);
+        self.desired_height_cache.set(Some(BottomPaneHeightCache {
+            width,
+            state_revision,
+            pass_revision,
+            height,
+        }));
+        height
     }
     fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
         self.as_renderable().cursor_pos(area)
@@ -1973,6 +2011,93 @@ mod tests {
         ));
 
         assert_eq!(handle_calls.get(), 1);
+    }
+
+    #[test]
+    fn desired_height_is_cached_within_a_single_layout_pass() {
+        #[derive(Default)]
+        struct HeightCountingView {
+            desired_height_calls: Rc<Cell<usize>>,
+        }
+
+        impl Renderable for HeightCountingView {
+            fn render(&self, _area: Rect, _buf: &mut Buffer) {}
+
+            fn desired_height(&self, _width: u16) -> u16 {
+                self.desired_height_calls
+                    .set(self.desired_height_calls.get().saturating_add(1));
+                3
+            }
+        }
+
+        impl BottomPaneView for HeightCountingView {}
+
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let mut pane = BottomPane::new(BottomPaneParams {
+            app_event_tx: tx,
+            frame_requester: FrameRequester::test_dummy(),
+            has_input_focus: true,
+            enhanced_keys_supported: false,
+            placeholder_text: "Ask Codex to do anything".to_string(),
+            disable_paste_burst: false,
+            animations_enabled: true,
+            skills: Some(Vec::new()),
+        });
+
+        let desired_height_calls = Rc::new(Cell::new(0));
+        pane.push_view(Box::new(HeightCountingView {
+            desired_height_calls: Rc::clone(&desired_height_calls),
+        }));
+
+        pane.pre_draw_tick();
+        assert_eq!(pane.desired_height(/*width*/ 80), 3);
+        assert_eq!(pane.desired_height(/*width*/ 80), 3);
+        assert_eq!(desired_height_calls.get(), 1);
+
+        pane.pre_draw_tick();
+        assert_eq!(pane.desired_height(/*width*/ 80), 3);
+        assert_eq!(desired_height_calls.get(), 2);
+    }
+
+    #[test]
+    fn pre_draw_tick_does_not_repeat_file_search_sync_after_typing() {
+        let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let mut pane = BottomPane::new(BottomPaneParams {
+            app_event_tx: tx,
+            frame_requester: FrameRequester::test_dummy(),
+            has_input_focus: true,
+            enhanced_keys_supported: false,
+            placeholder_text: "Ask Codex to do anything".to_string(),
+            disable_paste_burst: true,
+            animations_enabled: true,
+            skills: Some(Vec::new()),
+        });
+
+        let _ = pane.handle_key_event(KeyEvent::new(KeyCode::Char('@'), KeyModifiers::NONE));
+        let _ = pane.handle_key_event(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+
+        let mut search_queries = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let AppEvent::StartFileSearch(query) = event {
+                search_queries.push(query);
+            }
+        }
+        assert!(
+            !search_queries.is_empty(),
+            "expected typing to trigger file search synchronization"
+        );
+
+        pane.pre_draw_tick();
+
+        let repeated_queries: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| match event {
+                AppEvent::StartFileSearch(query) => Some(query),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(repeated_queries, Vec::<String>::new());
     }
 
     #[test]

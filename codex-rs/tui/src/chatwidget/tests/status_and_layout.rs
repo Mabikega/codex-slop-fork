@@ -159,6 +159,47 @@ async fn helpers_are_available_and_do_not_panic() {
     let _ = &mut w;
 }
 
+#[derive(Debug)]
+struct CountingHistoryCell {
+    display_lines_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl HistoryCell for CountingHistoryCell {
+    fn display_lines(&self, _width: u16) -> Vec<ratatui::text::Line<'static>> {
+        self.display_lines_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        vec!["counted".into()]
+    }
+}
+
+#[tokio::test]
+async fn draw_reuses_active_cell_viewport_preparation_within_a_single_layout_pass() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let display_lines_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    chat.active_cell = Some(Box::new(CountingHistoryCell {
+        display_lines_calls: std::sync::Arc::clone(&display_lines_calls),
+    }));
+    chat.bump_active_cell_revision();
+
+    let area = ratatui::layout::Rect::new(0, 0, 80, 24);
+    chat.pre_draw_tick();
+    let _ = chat.desired_height(area.width);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    chat.render(area, &mut buf);
+    let _ = chat.cursor_pos(area);
+    assert_eq!(
+        display_lines_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+
+    chat.pre_draw_tick();
+    let _ = chat.desired_height(area.width);
+    assert_eq!(
+        display_lines_calls.load(std::sync::atomic::Ordering::SeqCst),
+        2
+    );
+}
+
 #[tokio::test]
 async fn prefetch_rate_limits_is_gated_on_chatgpt_auth_provider() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
