@@ -7,7 +7,6 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use chrono::DateTime;
 use chrono::Local;
 use fd_lock::RwLock as FileRwLock;
@@ -578,7 +577,6 @@ impl PilotTask {
     }
 }
 
-#[async_trait]
 impl SessionTask for PilotTask {
     fn kind(&self) -> TaskKind {
         TaskKind::Regular

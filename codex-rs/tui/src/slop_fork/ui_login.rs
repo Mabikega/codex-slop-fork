@@ -2095,9 +2095,9 @@ mod tests {
     use codex_core::slop_fork::account_rate_limits::StoredRateLimitSnapshot;
     use codex_core::slop_fork::auth_accounts::StoredAccount;
     use codex_login::token_data::IdTokenInfo;
-    use codex_login::token_data::KnownPlan;
-    use codex_login::token_data::PlanType;
     use codex_login::token_data::TokenData;
+    use codex_protocol::auth::KnownPlan;
+    use codex_protocol::auth::PlanType;
     use codex_protocol::protocol::RateLimitSnapshot;
     use codex_protocol::protocol::RateLimitWindow;
     use std::path::PathBuf;

@@ -734,9 +734,9 @@ mod tests {
     use crate::auth::AuthDotJson;
     use crate::slop_fork::auth_accounts::upsert_account;
     use codex_login::token_data::IdTokenInfo;
-    use codex_login::token_data::KnownPlan;
-    use codex_login::token_data::PlanType as TokenPlanType;
     use codex_login::token_data::TokenData;
+    use codex_protocol::auth::KnownPlan;
+    use codex_protocol::auth::PlanType as TokenPlanType;
     use codex_protocol::protocol::RateLimitWindow;
 
     fn fixed_now() -> DateTime<Utc> {

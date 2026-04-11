@@ -10,6 +10,7 @@ use codex_core::slop_fork::load_slop_fork_config;
 use tokio::task::JoinHandle;
 
 use crate::app_event::AppEvent;
+use crate::app_event::RateLimitRefreshOrigin;
 use crate::app_event_sender::AppEventSender;
 use crate::history_cell;
 
@@ -93,6 +94,7 @@ pub(crate) fn spawn_rate_limit_poller(
                     }
                 }
 
+                let mut fetched_snapshots = Vec::new();
                 for (snapshot, raw) in fetch_rate_limits(base_url.clone(), auth.clone()).await {
                     codex_core::slop_fork::record_rate_limit_snapshot_for_auth_with_raw(
                         &codex_home,
@@ -100,7 +102,13 @@ pub(crate) fn spawn_rate_limit_poller(
                         &snapshot,
                         Some(&raw),
                     );
-                    app_event_tx.send(AppEvent::RateLimitSnapshotFetched(snapshot.clone()));
+                    fetched_snapshots.push(snapshot);
+                }
+                if !fetched_snapshots.is_empty() {
+                    app_event_tx.send(AppEvent::RateLimitsLoaded {
+                        origin: RateLimitRefreshOrigin::StartupPrefetch,
+                        result: Ok(fetched_snapshots),
+                    });
                 }
 
                 let result = maybe_touch_active_account_cached_quotas(

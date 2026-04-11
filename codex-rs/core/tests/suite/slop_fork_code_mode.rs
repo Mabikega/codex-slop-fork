@@ -1,8 +1,8 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use anyhow::Result;
-use codex_core::config::types::McpServerConfig;
-use codex_core::config::types::McpServerTransportConfig;
+use codex_config::McpServerConfig;
+use codex_config::McpServerTransportConfig;
 use codex_features::Feature;
 use core_test_support::responses;
 use core_test_support::responses::ResponseMock;

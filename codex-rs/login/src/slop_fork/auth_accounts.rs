@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 
-use crate::auth::AuthCredentialsStoreMode;
+use crate::AuthCredentialsStoreMode;
 use crate::auth::AuthDotJson;
 use crate::auth::CodexAuth;
 use crate::auth::load_auth_dot_json;

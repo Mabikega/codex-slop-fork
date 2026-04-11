@@ -7,7 +7,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::auth::AuthCredentialsStoreMode;
+use crate::AuthCredentialsStoreMode;
 use crate::auth::AuthDotJson;
 use crate::auth::AuthManager;
 
@@ -223,10 +223,10 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::token_data::IdTokenInfo;
-    use crate::token_data::KnownPlan;
-    use crate::token_data::PlanType;
     use crate::token_data::TokenData;
     use codex_app_server_protocol::AuthMode;
+    use codex_protocol::auth::KnownPlan;
+    use codex_protocol::auth::PlanType;
 
     fn fake_jwt(email: &str, plan: &str, account_id: &str) -> String {
         #[derive(Serialize)]

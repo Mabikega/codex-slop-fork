@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::LazyLock;
 
-use async_trait::async_trait;
 use chrono::Local;
 use serde::Deserialize;
 
@@ -15,6 +14,7 @@ use super::ToolInvocation;
 use super::ToolKind;
 use super::ToolPayload;
 use super::ToolRegistryBuilder;
+use super::ToolSpec;
 use super::augment_tool_spec_for_code_mode;
 use super::load_active_state;
 use crate::slop_fork::autoresearch::AutoresearchApproachEntry;
@@ -25,97 +25,84 @@ use crate::slop_fork::autoresearch::load_validation_policy_settings;
 use crate::slop_fork::autoresearch::refresh_playbook_artifact;
 use crate::slop_fork::autoresearch::validation_gate_for_status;
 
-pub(crate) static AUTORESEARCH_LOG_APPROACH_TOOL: LazyLock<crate::client_common::tools::ToolSpec> =
-    LazyLock::new(|| {
-        let string_array = JsonSchema::Array {
-            items: Box::new(JsonSchema::String { description: None }),
-            description: None,
-        };
-        let properties = BTreeMap::from([
+pub(crate) static AUTORESEARCH_LOG_APPROACH_TOOL: LazyLock<ToolSpec> = LazyLock::new(|| {
+    let string_array = JsonSchema::array(JsonSchema::string(None), None);
+    let properties = BTreeMap::from([
             (
                 "approach_id".to_string(),
-                JsonSchema::String {
-                    description: Some(
-                        "Optional existing approach id. Omit to create a new tracked approach."
-                            .to_string(),
-                    ),
-                },
+                JsonSchema::string(Some(
+                    "Optional existing approach id. Omit to create a new tracked approach."
+                        .to_string(),
+                )),
             ),
             (
                 "title".to_string(),
-                JsonSchema::String {
-                    description: Some("Short human-readable approach title.".to_string()),
-                },
+                JsonSchema::string(Some("Short human-readable approach title.".to_string())),
             ),
             (
                 "family".to_string(),
-                JsonSchema::String {
-                    description: Some(
-                        "Coarse approach family such as ctc, seq2seq, distillation, or retrieval."
-                            .to_string(),
-                    ),
-                },
+                JsonSchema::string(Some(
+                    "Coarse approach family such as ctc, seq2seq, distillation, or retrieval."
+                        .to_string(),
+                )),
             ),
             (
                 "status".to_string(),
-                JsonSchema::String {
-                    description: Some(
-                        "One of proposed, planned, active, tested, promising, dead_end, winner, or archived."
-                            .to_string(),
-                    ),
-                },
+                JsonSchema::string(Some(
+                    "One of proposed, planned, active, tested, promising, dead_end, winner, or archived."
+                        .to_string(),
+                )),
             ),
             (
                 "summary".to_string(),
-                JsonSchema::String {
-                    description: Some("Concise summary of the current approach state.".to_string()),
-                },
+                JsonSchema::string(Some(
+                    "Concise summary of the current approach state.".to_string(),
+                )),
             ),
             (
                 "rationale".to_string(),
-                JsonSchema::String {
-                    description: Some("Why this approach is worth keeping in the portfolio.".to_string()),
-                },
+                JsonSchema::string(Some(
+                    "Why this approach is worth keeping in the portfolio.".to_string(),
+                )),
             ),
             ("risks".to_string(), string_array.clone()),
             ("sources".to_string(), string_array),
             (
                 "parent_approach_id".to_string(),
-                JsonSchema::String {
-                    description: Some("Optional parent approach id when this is a derivative.".to_string()),
-                },
+                JsonSchema::string(Some(
+                    "Optional parent approach id when this is a derivative.".to_string(),
+                )),
             ),
             (
                 "synthesis_parent_approach_ids".to_string(),
-                JsonSchema::Array {
-                    items: Box::new(JsonSchema::String { description: None }),
-                    description: Some(
+                JsonSchema::array(
+                    JsonSchema::string(None),
+                    Some(
                         "Optional parent pair when this candidate is a synthesized branch."
                             .to_string(),
                     ),
-                },
+                ),
             ),
         ]);
-        crate::client_common::tools::ToolSpec::Function(ResponsesApiTool {
-            name: "autoresearch_log_approach".to_string(),
-            description:
-                "Create or update a tracked research approach in the autoresearch portfolio."
-                    .to_string(),
-            strict: false,
-            defer_loading: None,
-            parameters: JsonSchema::Object {
-                properties,
-                required: Some(vec![
-                    "title".to_string(),
-                    "family".to_string(),
-                    "status".to_string(),
-                    "summary".to_string(),
-                ]),
-                additional_properties: Some(false.into()),
-            },
-            output_schema: None,
-        })
-    });
+    ToolSpec::Function(ResponsesApiTool {
+        name: "autoresearch_log_approach".to_string(),
+        description: "Create or update a tracked research approach in the autoresearch portfolio."
+            .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(
+            properties,
+            Some(vec![
+                "title".to_string(),
+                "family".to_string(),
+                "status".to_string(),
+                "summary".to_string(),
+            ]),
+            Some(false.into()),
+        ),
+        output_schema: None,
+    })
+});
 
 pub(crate) fn register_approach_tools(builder: &mut ToolRegistryBuilder, code_mode_enabled: bool) {
     builder.push_spec(augment_tool_spec_for_code_mode(
@@ -150,7 +137,6 @@ struct LogApproachArgs {
     synthesis_parent_approach_ids: Option<Vec<String>>,
 }
 
-#[async_trait]
 impl ToolHandler for AutoresearchLogApproachHandler {
     type Output = FunctionToolOutput;
 

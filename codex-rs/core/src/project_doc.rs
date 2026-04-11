@@ -22,12 +22,13 @@ use crate::config_loader::merge_toml_values;
 use crate::config_loader::project_root_markers_from_config;
 use crate::slop_fork::extend_project_doc_paths;
 use crate::slop_fork::load_project_doc_overlay;
-use crate::slop_fork::push_unique_project_doc_path;
 use codex_app_server_protocol::ConfigLayerSource;
+use codex_exec_server::Environment;
+use codex_exec_server::ExecutorFileSystem;
 use codex_features::Feature;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use dunce::canonicalize as normalize_path;
-use std::path::PathBuf;
-use tokio::io::AsyncReadExt;
+use std::io;
 use toml::Value as TomlValue;
 use tracing::error;
 
@@ -79,8 +80,19 @@ fn render_js_repl_instructions(config: &Config) -> Option<String> {
 
 /// Combines `Config::instructions` and `AGENTS.md` (if present) into a single
 /// string of instructions.
-pub(crate) async fn get_user_instructions(config: &Config) -> Option<String> {
-    let project_docs = read_project_docs(config).await;
+pub(crate) async fn get_user_instructions(
+    config: &Config,
+    environment: Option<&Environment>,
+) -> Option<String> {
+    let fs = environment?.get_filesystem();
+    get_user_instructions_with_fs(config, fs.as_ref()).await
+}
+
+pub(crate) async fn get_user_instructions_with_fs(
+    config: &Config,
+    fs: &dyn ExecutorFileSystem,
+) -> Option<String> {
+    let project_docs = read_project_docs_with_fs(config, fs).await;
 
     let mut output = String::new();
 
@@ -128,7 +140,18 @@ pub(crate) async fn get_user_instructions(config: &Config) -> Option<String> {
 /// concatenation of all discovered docs. If no documentation file is found the
 /// function returns `Ok(None)`. Unexpected I/O failures bubble up as `Err` so
 /// callers can decide how to handle them.
-pub async fn read_project_docs(config: &Config) -> std::io::Result<Option<String>> {
+pub async fn read_project_docs(
+    config: &Config,
+    environment: &Environment,
+) -> io::Result<Option<String>> {
+    let fs = environment.get_filesystem();
+    read_project_docs_with_fs(config, fs.as_ref()).await
+}
+
+async fn read_project_docs_with_fs(
+    config: &Config,
+    fs: &dyn ExecutorFileSystem,
+) -> io::Result<Option<String>> {
     let project_doc_overlay = load_project_doc_overlay(config)?;
     let max_total = config.project_doc_max_bytes;
 
@@ -142,7 +165,7 @@ pub async fn read_project_docs(config: &Config) -> std::io::Result<Option<String
         };
     }
 
-    let paths = discover_project_doc_paths(config)?;
+    let paths = discover_project_doc_paths(config, fs).await?;
     if paths.is_empty() {
         let mut inline_sections = project_doc_overlay.prefix_sections;
         inline_sections.extend(project_doc_overlay.suffix_sections);
@@ -161,16 +184,22 @@ pub async fn read_project_docs(config: &Config) -> std::io::Result<Option<String
             break;
         }
 
-        let file = match tokio::fs::File::open(&p).await {
-            Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e),
-        };
+        match fs.get_metadata(&p).await {
+            Ok(metadata) if !metadata.is_file => continue,
+            Ok(_) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err),
+        }
 
-        let size = file.metadata().await?.len();
-        let mut reader = tokio::io::BufReader::new(file).take(remaining);
-        let mut data: Vec<u8> = Vec::new();
-        reader.read_to_end(&mut data).await?;
+        let mut data = match fs.read_file(&p).await {
+            Ok(data) => data,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err),
+        };
+        let size = data.len() as u64;
+        if size > remaining {
+            data.truncate(remaining as usize);
+        }
 
         if size > remaining {
             tracing::warn!(
@@ -201,24 +230,18 @@ pub async fn read_project_docs(config: &Config) -> std::io::Result<Option<String
 /// contents. The list is ordered from project root to the current working
 /// directory (inclusive). Symlinks are allowed. When `project_doc_max_bytes`
 /// is zero, returns an empty list.
-pub fn discover_project_doc_paths(config: &Config) -> std::io::Result<Vec<PathBuf>> {
+pub async fn discover_project_doc_paths(
+    config: &Config,
+    fs: &dyn ExecutorFileSystem,
+) -> io::Result<Vec<AbsolutePathBuf>> {
     if config.project_doc_max_bytes == 0 {
         return Ok(Vec::new());
     }
-    let project_doc_overlay = load_project_doc_overlay(config)?;
-    discover_project_doc_paths_with_additional_filenames(
-        config,
-        &project_doc_overlay.additional_filenames,
-    )
-}
 
-fn discover_project_doc_paths_with_additional_filenames(
-    config: &Config,
-    additional_filenames: &[String],
-) -> std::io::Result<Vec<PathBuf>> {
-    let mut dir = config.cwd.to_path_buf();
+    let project_doc_overlay = load_project_doc_overlay(config)?;
+    let mut dir = config.cwd.clone();
     if let Ok(canon) = normalize_path(&dir) {
-        dir = canon;
+        dir = AbsolutePathBuf::try_from(canon)?;
     }
 
     let mut merged = TomlValue::Table(toml::map::Map::new());
@@ -243,14 +266,14 @@ fn discover_project_doc_paths_with_additional_filenames(
     if !project_root_markers.is_empty() {
         for ancestor in dir.ancestors() {
             for marker in &project_root_markers {
-                let marker_path = ancestor.join(marker);
-                let marker_exists = match std::fs::metadata(&marker_path) {
+                let marker_path = AbsolutePathBuf::try_from(ancestor.join(marker))?;
+                let marker_exists = match fs.get_metadata(&marker_path).await {
                     Ok(_) => true,
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-                    Err(e) => return Err(e),
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => false,
+                    Err(err) => return Err(err),
                 };
                 if marker_exists {
-                    project_root = Some(ancestor.to_path_buf());
+                    project_root = Some(AbsolutePathBuf::try_from(ancestor.to_path_buf())?);
                     break;
                 }
             }
@@ -260,11 +283,11 @@ fn discover_project_doc_paths_with_additional_filenames(
         }
     }
 
-    let search_dirs: Vec<PathBuf> = if let Some(root) = project_root {
+    let search_dirs: Vec<AbsolutePathBuf> = if let Some(root) = project_root {
         let mut dirs = Vec::new();
-        let mut cursor = dir.as_path();
+        let mut cursor = dir.clone();
         loop {
-            dirs.push(cursor.to_path_buf());
+            dirs.push(cursor.clone());
             if cursor == root {
                 break;
             }
@@ -279,26 +302,36 @@ fn discover_project_doc_paths_with_additional_filenames(
         vec![dir.clone()]
     };
 
-    let mut found: Vec<PathBuf> = Vec::new();
-    let primary_candidate_filenames = primary_candidate_filenames(config);
+    let mut found: Vec<AbsolutePathBuf> = Vec::new();
+    let candidate_filenames = candidate_filenames(config);
     for d in &search_dirs {
-        if let Some(primary_doc) = first_existing_doc_path(d, &primary_candidate_filenames)? {
-            push_unique_project_doc_path(&mut found, primary_doc);
+        for name in &candidate_filenames {
+            let candidate = d.join(name);
+            match fs.get_metadata(&candidate).await {
+                Ok(md) if md.is_file => {
+                    found.push(candidate);
+                    break;
+                }
+                Ok(_) => {}
+                Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                Err(err) => return Err(err),
+            }
         }
     }
     extend_project_doc_paths(
         config,
+        fs,
         &dir,
         &search_dirs,
-        &primary_candidate_filenames,
-        additional_filenames,
+        &candidate_filenames,
+        &project_doc_overlay.additional_filenames,
         &mut found,
-    )?;
+    )
+    .await?;
 
     Ok(found)
 }
-
-fn primary_candidate_filenames<'a>(config: &'a Config) -> Vec<&'a str> {
+fn candidate_filenames<'a>(config: &'a Config) -> Vec<&'a str> {
     let mut names: Vec<&'a str> =
         Vec::with_capacity(2 + config.project_doc_fallback_filenames.len());
     names.push(LOCAL_PROJECT_DOC_FILENAME);
@@ -313,29 +346,6 @@ fn primary_candidate_filenames<'a>(config: &'a Config) -> Vec<&'a str> {
         }
     }
     names
-}
-
-fn first_existing_doc_path(
-    directory: &std::path::Path,
-    candidate_filenames: &[&str],
-) -> std::io::Result<Option<PathBuf>> {
-    for name in candidate_filenames {
-        if let Some(path) = existing_doc_path(&directory.join(name))? {
-            return Ok(Some(path));
-        }
-    }
-    Ok(None)
-}
-
-fn existing_doc_path(path: &std::path::Path) -> std::io::Result<Option<PathBuf>> {
-    match std::fs::symlink_metadata(path) {
-        Ok(md) => {
-            let ft = md.file_type();
-            Ok((ft.is_file() || ft.is_symlink()).then(|| path.to_path_buf()))
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
-    }
 }
 
 #[cfg(test)]

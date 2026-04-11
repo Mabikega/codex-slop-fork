@@ -1,4 +1,6 @@
 use crate::config::Config;
+use codex_exec_server::ExecutorFileSystem;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use dunce::canonicalize as normalize_path;
 use serde::Deserialize;
 use serde::Serialize;
@@ -247,17 +249,18 @@ pub(crate) fn load_project_doc_overlay(
     })
 }
 
-pub(crate) fn extend_project_doc_paths(
+pub(crate) async fn extend_project_doc_paths(
     config: &Config,
-    sandbox_cwd: &Path,
-    search_dirs: &[PathBuf],
+    fs: &dyn ExecutorFileSystem,
+    sandbox_cwd: &AbsolutePathBuf,
+    search_dirs: &[AbsolutePathBuf],
     primary_filenames: &[&str],
     additional_filenames: &[String],
-    found: &mut Vec<PathBuf>,
+    found: &mut Vec<AbsolutePathBuf>,
 ) -> std::io::Result<()> {
     let additional_candidate_filenames =
         additional_candidate_filenames(additional_filenames, primary_filenames);
-    let mut seen_additional_paths: Vec<PathBuf> = Vec::new();
+    let mut seen_additional_paths: Vec<AbsolutePathBuf> = Vec::new();
     for directory in search_dirs {
         for name in &additional_candidate_filenames {
             let candidate_path = directory.join(name.as_str());
@@ -270,7 +273,7 @@ pub(crate) fn extend_project_doc_paths(
             seen_additional_paths.push(candidate_path.clone());
 
             if let Some(additional_doc) =
-                existing_additional_doc_path(config, sandbox_cwd, &candidate_path)?
+                existing_additional_doc_path(config, fs, sandbox_cwd, &candidate_path).await?
             {
                 push_unique_project_doc_path(found, additional_doc);
             }
@@ -280,7 +283,10 @@ pub(crate) fn extend_project_doc_paths(
     Ok(())
 }
 
-pub(crate) fn push_unique_project_doc_path(found: &mut Vec<PathBuf>, path: PathBuf) {
+pub(crate) fn push_unique_project_doc_path(
+    found: &mut Vec<AbsolutePathBuf>,
+    path: AbsolutePathBuf,
+) {
     if !found.iter().any(|existing| existing == &path) {
         found.push(path);
     }
@@ -329,11 +335,12 @@ fn additional_candidate_filenames(
     names
 }
 
-fn existing_additional_doc_path(
+async fn existing_additional_doc_path(
     config: &Config,
-    sandbox_cwd: &Path,
-    path: &Path,
-) -> std::io::Result<Option<PathBuf>> {
+    fs: &dyn ExecutorFileSystem,
+    sandbox_cwd: &AbsolutePathBuf,
+    path: &AbsolutePathBuf,
+) -> std::io::Result<Option<AbsolutePathBuf>> {
     if !project_doc_path_matches_readable_roots(config, sandbox_cwd, path) {
         tracing::warn!(
             "Skipping project doc `{}` because it is outside the filesystem sandbox policy.",
@@ -342,15 +349,15 @@ fn existing_additional_doc_path(
         return Ok(None);
     }
 
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            let file_type = metadata.file_type();
-            if !(file_type.is_file() || file_type.is_symlink()) {
-                return Ok(None);
-            }
-
-            let resolved_path = normalize_path(path).unwrap_or_else(|_| path.to_path_buf());
-            if !project_doc_path_matches_readable_roots(config, sandbox_cwd, &resolved_path) {
+    match fs.get_metadata(path).await {
+        Ok(metadata) if !metadata.is_file => Ok(None),
+        Ok(_) => {
+            let resolved_path = normalize_path(path)
+                .ok()
+                .and_then(|resolved| AbsolutePathBuf::try_from(resolved).ok());
+            if let Some(resolved_path) = resolved_path.as_ref()
+                && !project_doc_path_matches_readable_roots(config, sandbox_cwd, resolved_path)
+            {
                 tracing::warn!(
                     "Skipping project doc `{}` because it resolves outside the filesystem sandbox policy.",
                     path.display()
@@ -358,7 +365,7 @@ fn existing_additional_doc_path(
                 return Ok(None);
             }
 
-            Ok(Some(path.to_path_buf()))
+            Ok(Some(path.clone()))
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(err),

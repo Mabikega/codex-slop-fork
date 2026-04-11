@@ -29,12 +29,13 @@ use serde_json::Value as JsonValue;
 use crate::exec::ExecExpiration;
 use crate::exec::ExecParams;
 use crate::exec::process_exec_tool_call;
-use crate::protocol::SandboxPolicy;
 use crate::sandboxing::SandboxPermissions;
 use codex_git_utils::resolve_root_git_project_for_trust;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
+use codex_protocol::protocol::SandboxPolicy;
+use codex_utils_absolute_path::AbsolutePathBuf;
 
 const GLOBAL_AUTOMATIONS_FILE: &str = "codex-slop-fork-automations.toml";
 const AUTOMATION_STATE_FILE: &str = ".codex-slop-fork-automation-state.json";
@@ -319,17 +320,11 @@ pub async fn run_policy_command(
         "now": payload.now.to_rfc3339(),
     })
     .to_string();
-    let cwd = command
-        .cwd
-        .as_ref()
-        .map(|cwd| {
-            if cwd.is_absolute() {
-                cwd.clone()
-            } else {
-                execution.session_cwd.join(cwd)
-            }
-        })
-        .unwrap_or_else(|| execution.session_cwd.clone());
+    let cwd = match command.cwd.as_ref() {
+        Some(cwd) => AbsolutePathBuf::resolve_path_against_base(cwd, &execution.session_cwd),
+        None => AbsolutePathBuf::try_from(execution.session_cwd.clone())
+            .map_err(|err| format!("automation session cwd should be absolute: {err}"))?,
+    };
     let joined_command = shlex::try_join(command.command.iter().map(String::as_str))
         .map_err(|err| format!("Failed to serialize automation policy command: {err}"))?;
     let wrapped_command = if cfg!(windows) {

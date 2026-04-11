@@ -5,9 +5,8 @@ use crate::types::RateLimitStatusPayload;
 use crate::types::TurnAttemptsSiblingTurnsResponse;
 use anyhow::Result;
 use codex_client::build_reqwest_client_with_custom_ca;
-use codex_core::auth::CodexAuth;
-use codex_core::default_client::get_codex_user_agent;
-use codex_core::models_manager::client_version_to_whole;
+use codex_login::CodexAuth;
+use codex_login::default_client::get_codex_user_agent;
 use codex_protocol::account::PlanType as AccountPlanType;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelsResponse;
@@ -102,6 +101,15 @@ pub enum PathStyle {
     CodexApi,
     /// /wham/…
     ChatGptApi,
+}
+
+fn client_version_to_whole() -> String {
+    format!(
+        "{}.{}.{}",
+        env!("CARGO_PKG_VERSION_MAJOR"),
+        env!("CARGO_PKG_VERSION_MINOR"),
+        env!("CARGO_PKG_VERSION_PATCH")
+    )
 }
 
 impl PathStyle {
@@ -315,48 +323,6 @@ impl Client {
             .map_err(RequestError::from)
     }
 
-    pub async fn create_response(
-        &self,
-        request_body: &serde_json::Value,
-    ) -> std::result::Result<(), RequestError> {
-        let url = match self.path_style {
-            PathStyle::CodexApi => format!("{}/v1/responses", self.base_url),
-            PathStyle::ChatGptApi => format!("{}/codex/responses", self.base_url),
-        };
-        let req = self
-            .http
-            .post(&url)
-            .headers(self.headers())
-            .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
-            .json(request_body);
-        self.exec_request_detailed(req, "POST", &url).await?;
-        Ok(())
-    }
-
-    pub async fn list_models_detailed(&self) -> std::result::Result<Vec<ModelInfo>, RequestError> {
-        let client_version = client_version_to_whole();
-        let url = match self.path_style {
-            PathStyle::CodexApi => {
-                format!(
-                    "{}/api/codex/models?client_version={client_version}",
-                    self.base_url
-                )
-            }
-            PathStyle::ChatGptApi => {
-                format!(
-                    "{}/codex/models?client_version={client_version}",
-                    self.base_url
-                )
-            }
-        };
-        let req = self.http.get(&url).headers(self.headers());
-        let (body, ct) = self.exec_request_detailed(req, "GET", &url).await?;
-        let response = self
-            .decode_json::<ModelsResponse>(&url, &ct, &body)
-            .map_err(RequestError::from)?;
-        Ok(response.models)
-    }
-
     pub async fn list_tasks(
         &self,
         limit: Option<i32>,
@@ -449,6 +415,48 @@ impl Client {
             .map_err(RequestError::from)
     }
 
+    pub async fn create_response(
+        &self,
+        request_body: &serde_json::Value,
+    ) -> std::result::Result<(), RequestError> {
+        let url = match self.path_style {
+            PathStyle::CodexApi => format!("{}/v1/responses", self.base_url),
+            PathStyle::ChatGptApi => format!("{}/codex/responses", self.base_url),
+        };
+        let req = self
+            .http
+            .post(&url)
+            .headers(self.headers())
+            .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
+            .json(request_body);
+        self.exec_request_detailed(req, "POST", &url).await?;
+        Ok(())
+    }
+
+    pub async fn list_models_detailed(&self) -> std::result::Result<Vec<ModelInfo>, RequestError> {
+        let client_version = client_version_to_whole();
+        let url = match self.path_style {
+            PathStyle::CodexApi => {
+                format!(
+                    "{}/api/codex/models?client_version={client_version}",
+                    self.base_url
+                )
+            }
+            PathStyle::ChatGptApi => {
+                format!(
+                    "{}/codex/models?client_version={client_version}",
+                    self.base_url
+                )
+            }
+        };
+        let req = self.http.get(&url).headers(self.headers());
+        let (body, ct) = self.exec_request_detailed(req, "GET", &url).await?;
+        let response = self
+            .decode_json::<ModelsResponse>(&url, &ct, &body)
+            .map_err(RequestError::from)?;
+        Ok(response.models)
+    }
+
     /// Create a new task (user turn) by POSTing to the appropriate backend path
     /// based on `path_style`. Returns the created task id.
     pub async fn create_task(&self, request_body: serde_json::Value) -> Result<String> {
@@ -518,7 +526,6 @@ impl Client {
         snapshots
     }
 
-    #[cfg(test)]
     fn rate_limit_snapshots_from_payload(
         payload: RateLimitStatusPayload,
     ) -> Vec<RateLimitSnapshot> {
@@ -642,6 +649,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_backend_openapi_models::models::AdditionalRateLimitDetails;
     use pretty_assertions::assert_eq;
 
     #[test]
@@ -675,7 +683,7 @@ mod tests {
                 }))),
                 ..Default::default()
             }))),
-            additional_rate_limits: Some(Some(vec![crate::types::AdditionalRateLimitDetails {
+            additional_rate_limits: Some(Some(vec![AdditionalRateLimitDetails {
                 limit_name: "codex_other".to_string(),
                 metered_feature: "codex_other".to_string(),
                 rate_limit: Some(Some(Box::new(crate::types::RateLimitStatusDetails {
@@ -735,7 +743,7 @@ mod tests {
         let payload = RateLimitStatusPayload {
             plan_type: crate::types::PlanType::Plus,
             rate_limit: None,
-            additional_rate_limits: Some(Some(vec![crate::types::AdditionalRateLimitDetails {
+            additional_rate_limits: Some(Some(vec![AdditionalRateLimitDetails {
                 limit_name: "codex_other".to_string(),
                 metered_feature: "codex_other".to_string(),
                 rate_limit: None,

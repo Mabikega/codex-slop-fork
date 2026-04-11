@@ -705,9 +705,9 @@ mod tests {
     use super::*;
     use base64::Engine;
     use codex_login::token_data::IdTokenInfo;
-    use codex_login::token_data::KnownPlan;
-    use codex_login::token_data::PlanType;
     use codex_login::token_data::TokenData;
+    use codex_protocol::auth::KnownPlan;
+    use codex_protocol::auth::PlanType;
     use pretty_assertions::assert_eq;
     use serde::Serialize;
     use tempfile::tempdir;

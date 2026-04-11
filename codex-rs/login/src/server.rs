@@ -24,7 +24,6 @@ use std::sync::LazyLock;
 use std::thread;
 use std::time::Duration;
 
-use crate::auth::AuthCredentialsStoreMode;
 use crate::auth::AuthDotJson;
 use crate::default_client::originator;
 use crate::pkce::PkceCodes;
@@ -36,6 +35,7 @@ use base64::Engine;
 use chrono::Utc;
 use codex_app_server_protocol::AuthMode;
 use codex_client::build_reqwest_client_with_custom_ca;
+use codex_config::types::AuthCredentialsStoreMode;
 use codex_utils_template::Template;
 use rand::RngCore;
 use serde_json::Value as JsonValue;
@@ -1099,7 +1099,7 @@ mod tests {
     use pretty_assertions::assert_eq;
     use tempfile::tempdir;
 
-    use crate::auth::AuthCredentialsStoreMode;
+    use crate::AuthCredentialsStoreMode;
     use crate::auth::AuthDotJson;
     use crate::auth::save_auth;
     use crate::slop_fork::auth_accounts;

@@ -27,9 +27,9 @@ use crate::auth::AuthDotJson;
 use crate::auth::AuthManager;
 use crate::codex::Session;
 use crate::codex::TurnContext;
-use crate::error::CodexErr;
-use crate::protocol::EventMsg;
-use crate::protocol::WarningEvent;
+use codex_protocol::error::CodexErr;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::WarningEvent;
 
 pub(crate) use account_switching::RateLimitSwitchState;
 pub use auth_sync::ExternalAuthSyncOutcome;
@@ -38,7 +38,6 @@ pub(crate) use config::extend_project_doc_paths;
 pub(crate) use config::load_project_doc_overlay;
 pub use config::load_slop_fork_config;
 pub use config::maybe_load_slop_fork_config;
-pub(crate) use config::push_unique_project_doc_path;
 pub use config::update_slop_fork_config;
 pub use saved_account_auth::auth_for_saved_account_file;
 pub use saved_account_auth::refresh_saved_account_auth_from_authority;
@@ -380,15 +379,15 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::auth::AuthManager;
-    use crate::auth::CodexAuth;
     use crate::slop_fork::auth_accounts::upsert_account;
     use codex_app_server_protocol::AuthMode;
+    use codex_login::AuthManager;
+    use codex_login::CodexAuth;
     use codex_login::token_data::IdTokenInfo;
-    use codex_login::token_data::KnownPlan;
-    use codex_login::token_data::PlanType;
     use codex_login::token_data::TokenData;
     use codex_protocol::account::PlanType as AccountPlanType;
+    use codex_protocol::auth::KnownPlan;
+    use codex_protocol::auth::PlanType;
     use codex_protocol::protocol::RateLimitWindow;
 
     fn fixed_now() -> DateTime<Utc> {

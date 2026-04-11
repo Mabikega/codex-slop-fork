@@ -594,6 +594,7 @@ mod tests {
             visibility: ModelVisibility::List,
             supported_in_api: true,
             priority: 0,
+            additional_speed_tiers: Vec::new(),
             availability_nux: None,
             upgrade: None,
             base_instructions: String::new(),

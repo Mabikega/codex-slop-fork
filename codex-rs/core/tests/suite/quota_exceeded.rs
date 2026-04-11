@@ -108,6 +108,7 @@ async fn quota_exceeded_emits_single_error_event() -> Result<()> {
                 text_elements: Vec::new(),
             }],
             final_output_json_schema: None,
+            responsesapi_client_metadata: None,
         })
         .await
         .unwrap();
@@ -214,6 +215,7 @@ async fn usage_limit_switches_to_another_saved_account_and_retries_turn() -> Res
                 text_elements: Vec::new(),
             }],
             final_output_json_schema: None,
+            responsesapi_client_metadata: None,
         })
         .await
         .expect("submission should succeed after switching accounts");

@@ -2,7 +2,6 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::LazyLock;
 
-use async_trait::async_trait;
 use futures::future::join_all;
 use serde::Deserialize;
 use uuid::Uuid;
@@ -15,6 +14,7 @@ use super::ToolInvocation;
 use super::ToolKind;
 use super::ToolPayload;
 use super::ToolRegistryBuilder;
+use super::ToolSpec;
 use super::augment_tool_spec_for_code_mode;
 use super::enforce_autoresearch_script;
 use super::ensure_experiment_cycle;
@@ -30,59 +30,50 @@ use crate::slop_fork::autoresearch::AutoresearchResearchWorkspace;
 use crate::slop_fork::autoresearch::AutoresearchRuntime;
 use crate::slop_fork::autoresearch::PendingRunResult;
 
-pub(crate) static AUTORESEARCH_RUN_PARALLEL_TOOL: LazyLock<crate::client_common::tools::ToolSpec> =
-    LazyLock::new(|| {
-        let properties = std::collections::BTreeMap::from([
-            (
-                "command".to_string(),
-                JsonSchema::String {
-                    description: Some(
-                        "Shell command to benchmark in each isolated candidate workspace."
-                            .to_string(),
-                    ),
-                },
+pub(crate) static AUTORESEARCH_RUN_PARALLEL_TOOL: LazyLock<ToolSpec> = LazyLock::new(|| {
+    let properties = std::collections::BTreeMap::from([
+        (
+            "command".to_string(),
+            JsonSchema::string(Some(
+                "Shell command to benchmark in each isolated candidate workspace.".to_string(),
+            )),
+        ),
+        (
+            "approach_ids".to_string(),
+            JsonSchema::array(
+                JsonSchema::string(None),
+                Some(
+                    "Tracked approach ids to benchmark in isolated candidate workspaces."
+                        .to_string(),
+                ),
             ),
-            (
-                "approach_ids".to_string(),
-                JsonSchema::Array {
-                    items: Box::new(JsonSchema::String { description: None }),
-                    description: Some(
-                        "Tracked approach ids to benchmark in isolated candidate workspaces."
-                            .to_string(),
-                    ),
-                },
-            ),
-            (
-                "timeout_seconds".to_string(),
-                JsonSchema::Number {
-                    description: Some("Timeout for each benchmark command.".to_string()),
-                },
-            ),
-            (
-                "checks_timeout_seconds".to_string(),
-                JsonSchema::Number {
-                    description: Some(
-                        "Timeout for autoresearch.checks.sh in each candidate workspace."
-                            .to_string(),
-                    ),
-                },
-            ),
-        ]);
-        crate::client_common::tools::ToolSpec::Function(ResponsesApiTool {
+        ),
+        (
+            "timeout_seconds".to_string(),
+            JsonSchema::number(Some("Timeout for each benchmark command.".to_string())),
+        ),
+        (
+            "checks_timeout_seconds".to_string(),
+            JsonSchema::number(Some(
+                "Timeout for autoresearch.checks.sh in each candidate workspace.".to_string(),
+            )),
+        ),
+    ]);
+    ToolSpec::Function(ResponsesApiTool {
         name: "autoresearch_run_parallel".to_string(),
         description:
             "Run a bounded set of tracked approach snapshots in isolated candidate workspaces and return authenticated run tokens for later logging."
                 .to_string(),
         strict: false,
         defer_loading: None,
-        parameters: JsonSchema::Object {
+        parameters: JsonSchema::object(
             properties,
-            required: Some(vec!["command".to_string(), "approach_ids".to_string()]),
-            additional_properties: Some(false.into()),
-        },
+            Some(vec!["command".to_string(), "approach_ids".to_string()]),
+            Some(false.into()),
+        ),
         output_schema: None,
     })
-    });
+});
 
 pub(crate) fn register_parallel_tools(builder: &mut ToolRegistryBuilder, code_mode_enabled: bool) {
     builder.push_spec(augment_tool_spec_for_code_mode(
@@ -120,7 +111,6 @@ struct ParallelRunConfig<'a> {
     checks_timeout_seconds: u64,
 }
 
-#[async_trait]
 impl ToolHandler for AutoresearchRunParallelHandler {
     type Output = super::FunctionToolOutput;
 

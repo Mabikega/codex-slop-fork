@@ -371,7 +371,7 @@ impl SlopForkAutomationManager {
 async fn submit_follow_up_prompt(
     thread: &CodexThread,
     message: &str,
-) -> codex_core::error::Result<String> {
+) -> codex_protocol::error::Result<String> {
     thread
         .submit(Op::UserInput {
             items: vec![UserInput::Text {
@@ -379,6 +379,7 @@ async fn submit_follow_up_prompt(
                 text_elements: Vec::new(),
             }],
             final_output_json_schema: None,
+            responsesapi_client_metadata: None,
         })
         .await
 }

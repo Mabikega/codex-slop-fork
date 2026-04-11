@@ -32,8 +32,6 @@ pub(crate) use autoresearch_command::should_record_autoresearch_command_in_histo
 pub(crate) use event::LoginFlowKind;
 pub(crate) use event::LoginPopupKind;
 pub(crate) use event::LoginSettingsState;
-#[cfg(test)]
-pub(crate) use event::RemoteStateLoadSource;
 pub(crate) use event::SlopForkEvent;
 pub(crate) use external_auth::spawn_external_auth_sync_poller;
 #[cfg(test)]
@@ -58,13 +56,7 @@ pub(crate) use status_line::SavedAccountStatusLineFormatter;
 pub(crate) use ui::LOGIN_POPUP_VIEW_ID;
 #[cfg(test)]
 pub(crate) use ui::PendingChatgptLogin;
-#[cfg(test)]
-pub(crate) use ui::PendingDeviceCodeState;
 pub(crate) use ui::SlopForkRuntimeEvent;
 pub(crate) use ui::SlopForkUi;
 pub(crate) use ui::SlopForkUiContext;
 pub(crate) use ui::SlopForkUiEffect;
-#[cfg(test)]
-pub(crate) use ui::TouchQuotaMode;
-#[cfg(test)]
-pub(crate) use ui::saved_account_rate_limit_refresh_is_due;

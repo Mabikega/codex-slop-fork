@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::LazyLock;
 
-use async_trait::async_trait;
 use chrono::Local;
 use serde::Deserialize;
 
@@ -15,6 +14,7 @@ use super::ToolInvocation;
 use super::ToolKind;
 use super::ToolPayload;
 use super::ToolRegistryBuilder;
+use super::ToolSpec;
 use super::augment_tool_spec_for_code_mode;
 use super::load_active_state;
 use crate::slop_fork::autoresearch::AutoresearchDiscoveryEntry;
@@ -24,77 +24,63 @@ use crate::slop_fork::autoresearch::AutoresearchRunState;
 use crate::slop_fork::autoresearch::AutoresearchRuntime;
 use crate::slop_fork::autoresearch::refresh_playbook_artifact;
 
-pub(crate) static AUTORESEARCH_REQUEST_DISCOVERY_TOOL: LazyLock<
-    crate::client_common::tools::ToolSpec,
-> = LazyLock::new(|| {
+pub(crate) static AUTORESEARCH_REQUEST_DISCOVERY_TOOL: LazyLock<ToolSpec> = LazyLock::new(|| {
     let properties = BTreeMap::from([
             (
                 "reason".to_string(),
-                JsonSchema::String {
-                    description: Some(
-                        "Why a bounded discovery pass is needed. One of plateau, stage_complete, weak_assumption, architecture_search, portfolio_refresh, evaluation_gap, follow_up, or user_requested."
-                            .to_string(),
-                    ),
-                },
+                JsonSchema::string(Some(
+                    "Why a bounded discovery pass is needed. One of plateau, stage_complete, weak_assumption, architecture_search, portfolio_refresh, evaluation_gap, follow_up, or user_requested."
+                        .to_string(),
+                )),
             ),
             (
                 "focus".to_string(),
-                JsonSchema::String {
-                    description: Some(
-                        "Optional short focus for the discovery pass.".to_string(),
-                    ),
-                },
+                JsonSchema::string(Some("Optional short focus for the discovery pass.".to_string())),
             ),
         ]);
-    crate::client_common::tools::ToolSpec::Function(ResponsesApiTool {
+    ToolSpec::Function(ResponsesApiTool {
             name: "autoresearch_request_discovery".to_string(),
             description:
                 "Queue one bounded discovery pass for the next autoresearch cycle so the controller can audit the repo and do targeted external research. Only stop the current cycle when this returns a queued/success result; do not call autoresearch_log_discovery until the dedicated discovery cycle is active."
                     .to_string(),
             strict: false,
             defer_loading: None,
-            parameters: JsonSchema::Object {
+            parameters: JsonSchema::object(
                 properties,
-                required: Some(vec!["reason".to_string()]),
-                additional_properties: Some(false.into()),
-            },
+                Some(vec!["reason".to_string()]),
+                Some(false.into()),
+            ),
             output_schema: None,
         })
 });
 
-pub(crate) static AUTORESEARCH_LOG_DISCOVERY_TOOL: LazyLock<crate::client_common::tools::ToolSpec> =
-    LazyLock::new(|| {
-        let string_array = JsonSchema::Array {
-            items: Box::new(JsonSchema::String { description: None }),
-            description: None,
-        };
-        let properties = BTreeMap::from([
-            (
-                "summary".to_string(),
-                JsonSchema::String {
-                    description: Some("Concise synthesis of the discovery pass.".to_string()),
-                },
-            ),
-            ("recommendations".to_string(), string_array.clone()),
-            ("unknowns".to_string(), string_array.clone()),
-            ("sources".to_string(), string_array.clone()),
-            ("dead_ends".to_string(), string_array),
-        ]);
-        crate::client_common::tools::ToolSpec::Function(ResponsesApiTool {
+pub(crate) static AUTORESEARCH_LOG_DISCOVERY_TOOL: LazyLock<ToolSpec> = LazyLock::new(|| {
+    let string_array = JsonSchema::array(JsonSchema::string(None), None);
+    let properties = BTreeMap::from([
+        (
+            "summary".to_string(),
+            JsonSchema::string(Some("Concise synthesis of the discovery pass.".to_string())),
+        ),
+        ("recommendations".to_string(), string_array.clone()),
+        ("unknowns".to_string(), string_array.clone()),
+        ("sources".to_string(), string_array.clone()),
+        ("dead_ends".to_string(), string_array),
+    ]);
+    ToolSpec::Function(ResponsesApiTool {
             name: "autoresearch_log_discovery".to_string(),
             description:
                 "Record the result of an active bounded discovery pass in the autoresearch journal. Do not call this in the cycle that only queued discovery. After it succeeds, stop the turn immediately and do not run more tools or re-sync the repo."
                     .to_string(),
             strict: false,
             defer_loading: None,
-            parameters: JsonSchema::Object {
+            parameters: JsonSchema::object(
                 properties,
-                required: Some(vec!["summary".to_string()]),
-                additional_properties: Some(false.into()),
-            },
+                Some(vec!["summary".to_string()]),
+                Some(false.into()),
+            ),
             output_schema: None,
         })
-    });
+});
 
 pub(crate) fn register_discovery_tools(builder: &mut ToolRegistryBuilder, code_mode_enabled: bool) {
     for spec in [
@@ -149,7 +135,6 @@ fn already_logged_discovery_message() -> String {
     "Discovery is already logged for this active cycle. Stop now with a concise final synthesis. Do not call more tools or re-sync the repo in this turn.".to_string()
 }
 
-#[async_trait]
 impl ToolHandler for AutoresearchRequestDiscoveryHandler {
     type Output = FunctionToolOutput;
 
@@ -199,7 +184,6 @@ impl ToolHandler for AutoresearchRequestDiscoveryHandler {
     }
 }
 
-#[async_trait]
 impl ToolHandler for AutoresearchLogDiscoveryHandler {
     type Output = FunctionToolOutput;
 

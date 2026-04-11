@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::LazyLock;
 
-use async_trait::async_trait;
 use chrono::Local;
 use serde::Deserialize;
 
@@ -15,6 +14,7 @@ use super::ToolInvocation;
 use super::ToolKind;
 use super::ToolPayload;
 use super::ToolRegistryBuilder;
+use super::ToolSpec;
 use super::augment_tool_spec_for_code_mode;
 use super::load_active_state;
 use crate::slop_fork::autoresearch::AutoresearchJournal;
@@ -23,67 +23,56 @@ use crate::slop_fork::autoresearch::AutoresearchValidationOutcome;
 use crate::slop_fork::autoresearch::AutoresearchValidationType;
 use crate::slop_fork::autoresearch::refresh_playbook_artifact;
 
-pub(crate) static AUTORESEARCH_LOG_VALIDATION_TOOL: LazyLock<
-    crate::client_common::tools::ToolSpec,
-> = LazyLock::new(|| {
-    let string_array = JsonSchema::Array {
-        items: Box::new(JsonSchema::String { description: None }),
-        description: None,
-    };
+pub(crate) static AUTORESEARCH_LOG_VALIDATION_TOOL: LazyLock<ToolSpec> = LazyLock::new(|| {
+    let string_array = JsonSchema::array(JsonSchema::string(None), None);
     let properties = BTreeMap::from([
         (
             "approach_id".to_string(),
-            JsonSchema::String {
-                description: Some("Tracked approach id the validation applies to.".to_string()),
-            },
+            JsonSchema::string(Some(
+                "Tracked approach id the validation applies to.".to_string(),
+            )),
         ),
         (
             "validation_type".to_string(),
-            JsonSchema::String {
-                description: Some(
-                    "Validation type: rerun, holdout, adversarial, or evaluator_audit.".to_string(),
-                ),
-            },
+            JsonSchema::string(Some(
+                "Validation type: rerun, holdout, adversarial, or evaluator_audit.".to_string(),
+            )),
         ),
         (
             "outcome".to_string(),
-            JsonSchema::String {
-                description: Some("Validation outcome: pass, fail, or mixed.".to_string()),
-            },
+            JsonSchema::string(Some(
+                "Validation outcome: pass, fail, or mixed.".to_string(),
+            )),
         ),
         (
             "summary".to_string(),
-            JsonSchema::String {
-                description: Some("Concise summary of what the validation showed.".to_string()),
-            },
+            JsonSchema::string(Some(
+                "Concise summary of what the validation showed.".to_string(),
+            )),
         ),
         ("evidence".to_string(), string_array),
         (
             "metrics".to_string(),
-            JsonSchema::Object {
-                properties: BTreeMap::new(),
-                required: None,
-                additional_properties: Some(JsonSchema::Number { description: None }.into()),
-            },
+            JsonSchema::object(BTreeMap::new(), None, Some(JsonSchema::number(None).into())),
         ),
     ]);
-    crate::client_common::tools::ToolSpec::Function(ResponsesApiTool {
+    ToolSpec::Function(ResponsesApiTool {
         name: "autoresearch_log_validation".to_string(),
         description:
             "Record a validation step for a tracked research/scientist approach so promotion and wrap-up can rely on explicit evidence."
                 .to_string(),
         strict: false,
         defer_loading: None,
-        parameters: JsonSchema::Object {
+        parameters: JsonSchema::object(
             properties,
-            required: Some(vec![
+            Some(vec![
                 "approach_id".to_string(),
                 "validation_type".to_string(),
                 "outcome".to_string(),
                 "summary".to_string(),
             ]),
-            additional_properties: Some(false.into()),
-        },
+            Some(false.into()),
+        ),
         output_schema: None,
     })
 });
@@ -116,7 +105,6 @@ struct LogValidationArgs {
     metrics: BTreeMap<String, f64>,
 }
 
-#[async_trait]
 impl ToolHandler for AutoresearchLogValidationHandler {
     type Output = FunctionToolOutput;
 

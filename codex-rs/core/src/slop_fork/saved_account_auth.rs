@@ -40,9 +40,9 @@ mod tests {
     use crate::auth::login_with_api_key;
     use base64::Engine;
     use codex_login::token_data::IdTokenInfo;
-    use codex_login::token_data::KnownPlan as InternalKnownPlan;
-    use codex_login::token_data::PlanType as InternalPlanType;
     use codex_login::token_data::TokenData;
+    use codex_protocol::auth::KnownPlan as InternalKnownPlan;
+    use codex_protocol::auth::PlanType as InternalPlanType;
     use pretty_assertions::assert_eq;
     use tempfile::tempdir;
 

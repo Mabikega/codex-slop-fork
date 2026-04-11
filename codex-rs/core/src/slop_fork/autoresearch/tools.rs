@@ -12,19 +12,18 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::LazyLock;
 
-use async_trait::async_trait;
 use chrono::Local;
+use codex_protocol::exec_output::ExecToolCallOutput;
+use codex_tools::ResponsesApiTool;
+use codex_tools::ToolSpec;
 use codex_tools::augment_tool_spec_for_code_mode as augment_tool_spec_for_code_mode_impl;
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::client_common::tools::ResponsesApiTool;
-use crate::client_common::tools::ToolSpec;
 use crate::codex::Session;
 use crate::codex::TurnContext;
 use crate::exec::ExecExpiration;
 use crate::exec::ExecParams;
-use crate::exec::ExecToolCallOutput;
 use crate::exec::process_exec_tool_call;
 use crate::exec_env::create_env;
 use crate::function_tool::FunctionCallError;
@@ -36,6 +35,7 @@ use crate::tools::registry::ToolHandler;
 use crate::tools::registry::ToolKind;
 use crate::tools::registry::ToolRegistryBuilder;
 use crate::tools::spec::JsonSchema;
+use codex_utils_absolute_path::AbsolutePathBuf;
 
 use super::AUTORESEARCH_CHECKS_FILE;
 use super::AUTORESEARCH_SCRIPT_FILE;
@@ -53,17 +53,6 @@ use super::load_evaluation_governance_settings;
 use super::load_stage_progress;
 use super::refresh_playbook_artifact;
 
-#[cfg(test)]
-pub(crate) use approach_tools::AUTORESEARCH_LOG_APPROACH_TOOL;
-#[cfg(test)]
-pub(crate) use discovery_tools::AUTORESEARCH_LOG_DISCOVERY_TOOL;
-#[cfg(test)]
-pub(crate) use discovery_tools::AUTORESEARCH_REQUEST_DISCOVERY_TOOL;
-#[cfg(test)]
-pub(crate) use parallel_tools::AUTORESEARCH_RUN_PARALLEL_TOOL;
-#[cfg(test)]
-pub(crate) use validation_tools::AUTORESEARCH_LOG_VALIDATION_TOOL;
-
 pub(super) fn augment_tool_spec_for_code_mode(spec: ToolSpec, code_mode_enabled: bool) -> ToolSpec {
     if code_mode_enabled {
         augment_tool_spec_for_code_mode_impl(spec)
@@ -76,27 +65,25 @@ pub(crate) static AUTORESEARCH_INIT_TOOL: LazyLock<ToolSpec> = LazyLock::new(|| 
     let properties = BTreeMap::from([
         (
             "name".to_string(),
-            JsonSchema::String {
-                description: Some("Human-readable session name.".to_string()),
-            },
+            JsonSchema::string(Some("Human-readable session name.".to_string())),
         ),
         (
             "metric_name".to_string(),
-            JsonSchema::String {
-                description: Some("Primary metric name emitted by the benchmark.".to_string()),
-            },
+            JsonSchema::string(Some(
+                "Primary metric name emitted by the benchmark.".to_string(),
+            )),
         ),
         (
             "metric_unit".to_string(),
-            JsonSchema::String {
-                description: Some("Primary metric unit, such as s, ms, or kb.".to_string()),
-            },
+            JsonSchema::string(Some(
+                "Primary metric unit, such as s, ms, or kb.".to_string(),
+            )),
         ),
         (
             "direction".to_string(),
-            JsonSchema::String {
-                description: Some("Whether lower or higher values are better.".to_string()),
-            },
+            JsonSchema::string(Some(
+                "Whether lower or higher values are better.".to_string(),
+            )),
         ),
     ]);
     ToolSpec::Function(ResponsesApiTool {
@@ -106,11 +93,11 @@ pub(crate) static AUTORESEARCH_INIT_TOOL: LazyLock<ToolSpec> = LazyLock::new(|| 
                 .to_string(),
         strict: false,
         defer_loading: None,
-        parameters: JsonSchema::Object {
+        parameters: JsonSchema::object(
             properties,
-            required: Some(vec!["name".to_string(), "metric_name".to_string()]),
-            additional_properties: Some(false.into()),
-        },
+            Some(vec!["name".to_string(), "metric_name".to_string()]),
+            Some(false.into()),
+        ),
         output_schema: None,
     })
 });
@@ -119,21 +106,17 @@ pub(crate) static AUTORESEARCH_RUN_TOOL: LazyLock<ToolSpec> = LazyLock::new(|| {
     let properties = BTreeMap::from([
         (
             "command".to_string(),
-            JsonSchema::String {
-                description: Some("Shell command to benchmark.".to_string()),
-            },
+            JsonSchema::string(Some("Shell command to benchmark.".to_string())),
         ),
         (
             "timeout_seconds".to_string(),
-            JsonSchema::Number {
-                description: Some("Timeout for the benchmark command.".to_string()),
-            },
+            JsonSchema::number(Some("Timeout for the benchmark command.".to_string())),
         ),
         (
             "checks_timeout_seconds".to_string(),
-            JsonSchema::Number {
-                description: Some("Timeout for autoresearch.checks.sh when it exists.".to_string()),
-            },
+            JsonSchema::number(Some(
+                "Timeout for autoresearch.checks.sh when it exists.".to_string(),
+            )),
         ),
     ]);
     ToolSpec::Function(ResponsesApiTool {
@@ -142,11 +125,11 @@ pub(crate) static AUTORESEARCH_RUN_TOOL: LazyLock<ToolSpec> = LazyLock::new(|| {
             .to_string(),
         strict: false,
         defer_loading: None,
-        parameters: JsonSchema::Object {
+        parameters: JsonSchema::object(
             properties,
-            required: Some(vec!["command".to_string()]),
-            additional_properties: Some(false.into()),
-        },
+            Some(vec!["command".to_string()]),
+            Some(false.into()),
+        ),
         output_schema: None,
     })
 });
@@ -155,47 +138,39 @@ pub(crate) static AUTORESEARCH_LOG_TOOL: LazyLock<ToolSpec> = LazyLock::new(|| {
     let properties = BTreeMap::from([
         (
             "run_token".to_string(),
-            JsonSchema::String {
-                description: Some("Token returned by autoresearch_run.".to_string()),
-            },
+            JsonSchema::string(Some("Token returned by autoresearch_run.".to_string())),
         ),
         (
             "approach_id".to_string(),
-            JsonSchema::String {
-                description: Some(
-                    "Optional research/scientist approach id associated with this benchmark run."
-                        .to_string(),
-                ),
-            },
+            JsonSchema::string(Some(
+                "Optional research/scientist approach id associated with this benchmark run."
+                    .to_string(),
+            )),
         ),
         (
             "metric".to_string(),
-            JsonSchema::Number {
-                description: Some(
-                    "Optional fallback primary metric for discard/crash logging when autoresearch_run could not parse one."
-                        .to_string(),
-                ),
-            },
+            JsonSchema::number(Some(
+                "Optional fallback primary metric for discard/crash logging when autoresearch_run could not parse one."
+                    .to_string(),
+            )),
         ),
         (
             "status".to_string(),
-            JsonSchema::String {
-                description: Some("One of keep, discard, crash, checks_failed.".to_string()),
-            },
+            JsonSchema::string(Some(
+                "One of keep, discard, crash, checks_failed.".to_string(),
+            )),
         ),
         (
             "description".to_string(),
-            JsonSchema::String {
-                description: Some("Short description of the experiment.".to_string()),
-            },
+            JsonSchema::string(Some("Short description of the experiment.".to_string())),
         ),
         (
             "metrics".to_string(),
-            JsonSchema::Object {
-                properties: BTreeMap::new(),
-                required: None,
-                additional_properties: Some(JsonSchema::Number { description: None }.into()),
-            },
+            JsonSchema::object(
+                BTreeMap::new(),
+                None,
+                Some(JsonSchema::number(None).into()),
+            ),
         ),
     ]);
     ToolSpec::Function(ResponsesApiTool {
@@ -204,15 +179,15 @@ pub(crate) static AUTORESEARCH_LOG_TOOL: LazyLock<ToolSpec> = LazyLock::new(|| {
             .to_string(),
         strict: false,
         defer_loading: None,
-        parameters: JsonSchema::Object {
+        parameters: JsonSchema::object(
             properties,
-            required: Some(vec![
+            Some(vec![
                 "run_token".to_string(),
                 "status".to_string(),
                 "description".to_string(),
             ]),
-            additional_properties: Some(false.into()),
-        },
+            Some(false.into()),
+        ),
         output_schema: None,
     })
 });
@@ -280,7 +255,6 @@ struct ResolvedLoggedRun {
     result_json: String,
 }
 
-#[async_trait]
 impl ToolHandler for AutoresearchInitHandler {
     type Output = FunctionToolOutput;
 
@@ -372,7 +346,6 @@ impl ToolHandler for AutoresearchInitHandler {
     }
 }
 
-#[async_trait]
 impl ToolHandler for AutoresearchRunHandler {
     type Output = FunctionToolOutput;
 
@@ -508,7 +481,6 @@ impl ToolHandler for AutoresearchRunHandler {
     }
 }
 
-#[async_trait]
 impl ToolHandler for AutoresearchLogHandler {
     type Output = FunctionToolOutput;
 
@@ -830,7 +802,7 @@ async fn execute_command(
         command: session
             .user_shell()
             .derive_exec_args(command, /*use_login_shell*/ false),
-        cwd: workdir.to_path_buf(),
+        cwd: AbsolutePathBuf::resolve_path_against_base(workdir, &turn.cwd),
         expiration: ExecExpiration::Timeout(std::time::Duration::from_secs(timeout_seconds)),
         capture_policy: crate::exec::ExecCapturePolicy::ShellTool,
         env,
