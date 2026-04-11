@@ -34,6 +34,9 @@ pub fn sync_external_auth_if_enabled(auth_manager: &AuthManager) -> ExternalAuth
     auth_manager.set_cached_auth_from_fork(stored_auth.clone());
 
     if auth_identity(cached_auth.as_ref()) != auth_identity(stored_auth.as_ref()) {
+        if auth_manager.suppress_expected_external_auth_switch_for_fork(stored_auth.as_ref()) {
+            return ExternalAuthSyncOutcome::SwitchedAccounts;
+        }
         let display_labels =
             auth_accounts::load_account_display_labels(auth_manager.codex_home_path());
         let label = stored_auth
@@ -52,4 +55,112 @@ fn auth_identity(auth: Option<&CodexAuth>) -> Option<String> {
     auth_accounts::stored_account_id_for_auth(auth)
         .or_else(|| auth.get_account_id())
         .map(|id| format!("account:{id}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine;
+    use pretty_assertions::assert_eq;
+    use serde::Serialize;
+    use tempfile::tempdir;
+
+    use crate::AuthCredentialsStoreMode;
+    use crate::AuthManager;
+    use crate::auth::AuthDotJson;
+    use crate::token_data::IdTokenInfo;
+    use crate::token_data::TokenData;
+    use codex_app_server_protocol::AuthMode;
+    use codex_protocol::auth::KnownPlan;
+    use codex_protocol::auth::PlanType;
+
+    fn fake_jwt(email: &str, plan: &str, account_id: &str) -> String {
+        #[derive(Serialize)]
+        struct Header {
+            alg: &'static str,
+            typ: &'static str,
+        }
+
+        let header = Header {
+            alg: "none",
+            typ: "JWT",
+        };
+        let payload = serde_json::json!({
+            "email": email,
+            "https://api.openai.com/auth": {
+                "chatgpt_plan_type": plan,
+                "chatgpt_account_id": account_id,
+            }
+        });
+
+        fn b64url_no_pad(bytes: &[u8]) -> String {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+        }
+
+        let header_b64 = b64url_no_pad(&serde_json::to_vec(&header).expect("header"));
+        let payload_b64 = b64url_no_pad(&serde_json::to_vec(&payload).expect("payload"));
+        let signature_b64 = b64url_no_pad(b"sig");
+        format!("{header_b64}.{payload_b64}.{signature_b64}")
+    }
+
+    fn chatgpt_auth(account_id: &str, email: &str, plan: KnownPlan) -> AuthDotJson {
+        AuthDotJson {
+            auth_mode: Some(AuthMode::Chatgpt),
+            openai_api_key: None,
+            tokens: Some(TokenData {
+                id_token: IdTokenInfo {
+                    email: Some(email.to_string()),
+                    chatgpt_plan_type: Some(PlanType::Known(plan)),
+                    chatgpt_user_id: None,
+                    chatgpt_account_id: Some(account_id.to_string()),
+                    raw_jwt: fake_jwt(email, plan.raw_value(), account_id),
+                },
+                access_token: "access".to_string(),
+                refresh_token: "refresh".to_string(),
+                account_id: Some(account_id.to_string()),
+            }),
+            last_refresh: None,
+        }
+    }
+
+    #[test]
+    fn suppresses_notice_for_self_initiated_account_switch() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        std::fs::write(
+            dir.path().join("config-slop-fork.toml"),
+            "follow_external_account_switches = true\n",
+        )?;
+
+        let initial_auth = chatgpt_auth("acct-initial", "initial@example.com", KnownPlan::Plus);
+        let next_auth = chatgpt_auth("acct-next", "next@example.com", KnownPlan::Pro);
+        let next_account_id =
+            auth_accounts::upsert_account(dir.path(), &next_auth)?.expect("next account id");
+        crate::auth::save_auth(dir.path(), &initial_auth, AuthCredentialsStoreMode::File)?;
+
+        let initial_codex_auth = crate::auth::auth_for_saved_account(
+            dir.path(),
+            initial_auth,
+            AuthCredentialsStoreMode::File,
+        )?;
+        let auth_manager = AuthManager::from_auth_for_testing_with_home(
+            initial_codex_auth,
+            dir.path().to_path_buf(),
+        );
+
+        auth_manager.expect_external_auth_switch_for_account_for_fork(&next_account_id);
+        crate::auth::save_auth(dir.path(), &next_auth, AuthCredentialsStoreMode::File)?;
+
+        let outcome = sync_external_auth_if_enabled(auth_manager.as_ref());
+
+        assert_eq!(outcome, ExternalAuthSyncOutcome::SwitchedAccounts);
+        assert_eq!(
+            auth_manager.take_external_auth_switch_notice_for_fork(),
+            None
+        );
+        assert_eq!(
+            auth_identity(auth_manager.auth_cached().as_ref()),
+            Some(format!("account:{next_account_id}"))
+        );
+        Ok(())
+    }
 }

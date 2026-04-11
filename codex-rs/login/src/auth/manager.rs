@@ -959,6 +959,7 @@ impl AuthDotJson {
 struct CachedAuth {
     auth: Option<CodexAuth>,
     pending_external_auth_switch_notice: Option<String>,
+    pending_expected_external_auth_identity: Option<String>,
     /// Permanent refresh failure cached for the current auth snapshot so
     /// later refresh attempts for the same credentials fail fast without network.
     permanent_refresh_failure: Option<AuthScopedRefreshFailure>,
@@ -980,6 +981,10 @@ impl Debug for CachedAuth {
             .field(
                 "pending_external_auth_switch_notice",
                 &self.pending_external_auth_switch_notice,
+            )
+            .field(
+                "pending_expected_external_auth_identity",
+                &self.pending_expected_external_auth_identity,
             )
             .field(
                 "permanent_refresh_failure",
@@ -1281,6 +1286,7 @@ impl AuthManager {
             inner: RwLock::new(CachedAuth {
                 auth: managed_auth,
                 pending_external_auth_switch_notice: None,
+                pending_expected_external_auth_identity: None,
                 permanent_refresh_failure: None,
             }),
             enable_codex_api_key_env,
@@ -1296,6 +1302,7 @@ impl AuthManager {
         let cached = CachedAuth {
             auth: Some(auth),
             pending_external_auth_switch_notice: None,
+            pending_expected_external_auth_identity: None,
             permanent_refresh_failure: None,
         };
 
@@ -1315,6 +1322,7 @@ impl AuthManager {
         let cached = CachedAuth {
             auth: Some(auth),
             pending_external_auth_switch_notice: None,
+            pending_expected_external_auth_identity: None,
             permanent_refresh_failure: None,
         };
         Arc::new(Self {
@@ -1334,6 +1342,7 @@ impl AuthManager {
             inner: RwLock::new(CachedAuth {
                 auth: None,
                 pending_external_auth_switch_notice: None,
+                pending_expected_external_auth_identity: None,
                 permanent_refresh_failure: None,
             }),
             enable_codex_api_key_env: false,
@@ -1542,6 +1551,39 @@ impl AuthManager {
         }
     }
 
+    pub fn expect_external_auth_switch_for_account_for_fork(&self, account_id: &str) {
+        if let Ok(mut guard) = self.inner.write() {
+            guard.pending_expected_external_auth_identity = Some(format!("account:{account_id}"));
+        }
+    }
+
+    pub fn clear_expected_external_auth_switch_for_fork(&self) {
+        if let Ok(mut guard) = self.inner.write() {
+            guard.pending_expected_external_auth_identity = None;
+        }
+    }
+
+    pub fn suppress_expected_external_auth_switch_for_fork(
+        &self,
+        auth: Option<&CodexAuth>,
+    ) -> bool {
+        let expected_identity = auth_identity(auth);
+        self.inner
+            .write()
+            .ok()
+            .is_some_and(|mut guard| match expected_identity {
+                Some(expected_identity)
+                    if guard.pending_expected_external_auth_identity.as_deref()
+                        == Some(expected_identity.as_str()) =>
+                {
+                    guard.pending_expected_external_auth_identity = None;
+                    guard.pending_external_auth_switch_notice = None;
+                    true
+                }
+                _ => false,
+            })
+    }
+
     pub fn take_external_auth_switch_notice_for_fork(&self) -> Option<String> {
         self.inner
             .write()
@@ -1593,20 +1635,29 @@ impl AuthManager {
     }
 
     pub fn activate_saved_account(&self, account_id: &str) -> std::io::Result<bool> {
+        self.expect_external_auth_switch_for_account_for_fork(account_id);
         let Some(account) = crate::slop_fork::activate_saved_account(
             &self.codex_home,
             account_id,
             self.auth_credentials_store_mode,
         )?
         else {
+            self.clear_expected_external_auth_switch_for_fork();
             return Ok(false);
         };
-        let auth = auth_for_saved_account(
+        let auth = match auth_for_saved_account(
             &self.codex_home,
             account.auth,
             self.auth_credentials_store_mode,
-        )?;
+        ) {
+            Ok(auth) => auth,
+            Err(err) => {
+                self.clear_expected_external_auth_switch_for_fork();
+                return Err(err);
+            }
+        };
         self.set_cached_auth(Some(auth));
+        self.clear_expected_external_auth_switch_for_fork();
         Ok(true)
     }
 
@@ -1895,6 +1946,13 @@ impl AuthManager {
 
         Ok(())
     }
+}
+
+fn auth_identity(auth: Option<&CodexAuth>) -> Option<String> {
+    let auth = auth?;
+    crate::slop_fork::auth_accounts::stored_account_id_for_auth(auth)
+        .or_else(|| auth.get_account_id())
+        .map(|id| format!("account:{id}"))
 }
 
 #[cfg(test)]

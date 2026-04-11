@@ -34,6 +34,9 @@ pub fn sync_external_auth_if_enabled(auth_manager: &AuthManager) -> ExternalAuth
     auth_manager.set_cached_auth_from_fork(stored_auth.clone());
 
     if auth_identity(cached_auth.as_ref()) != auth_identity(stored_auth.as_ref()) {
+        if auth_manager.suppress_expected_external_auth_switch_for_fork(stored_auth.as_ref()) {
+            return ExternalAuthSyncOutcome::SwitchedAccounts;
+        }
         let display_labels =
             auth_accounts::load_account_display_labels(auth_manager.codex_home_path());
         let label = stored_auth
