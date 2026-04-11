@@ -83,22 +83,7 @@ mod app_event_sender;
 mod app_server_approval_conversions;
 mod app_server_session;
 mod ascii_animation;
-#[cfg(not(target_os = "linux"))]
 mod audio_device;
-#[cfg(target_os = "linux")]
-#[allow(dead_code)]
-mod audio_device {
-    use crate::app_event::RealtimeAudioDeviceKind;
-
-    pub(crate) fn list_realtime_audio_device_names(
-        kind: RealtimeAudioDeviceKind,
-    ) -> Result<Vec<String>, String> {
-        Err(format!(
-            "Failed to load realtime {} devices: voice input is unavailable in this build",
-            kind.noun()
-        ))
-    }
-}
 mod bottom_pane;
 mod chatwidget;
 mod cli;
@@ -161,62 +146,7 @@ pub use update_action::UpdateAction;
 mod update_prompt;
 mod updates;
 mod version;
-#[cfg(not(target_os = "linux"))]
 mod voice;
-#[cfg(target_os = "linux")]
-#[allow(dead_code)]
-mod voice {
-    use crate::app_event_sender::AppEventSender;
-    use codex_core::config::Config;
-    use codex_protocol::protocol::RealtimeAudioFrame;
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
-    use std::sync::atomic::AtomicU16;
-
-    pub struct VoiceCapture;
-
-    pub(crate) struct RecordingMeterState;
-
-    pub(crate) struct RealtimeAudioPlayer;
-
-    impl VoiceCapture {
-        pub fn start_realtime(_config: &Config, _tx: AppEventSender) -> Result<Self, String> {
-            Err("voice input is unavailable in this build".to_string())
-        }
-
-        pub fn stop(self) {}
-
-        pub fn stopped_flag(&self) -> Arc<AtomicBool> {
-            Arc::new(AtomicBool::new(true))
-        }
-
-        pub fn last_peak_arc(&self) -> Arc<AtomicU16> {
-            Arc::new(AtomicU16::new(0))
-        }
-    }
-
-    impl RecordingMeterState {
-        pub(crate) fn new() -> Self {
-            Self
-        }
-
-        pub(crate) fn next_text(&mut self, _peak: u16) -> String {
-            "⠤⠤⠤⠤".to_string()
-        }
-    }
-
-    impl RealtimeAudioPlayer {
-        pub(crate) fn start(_config: &Config) -> Result<Self, String> {
-            Err("voice output is unavailable in this build".to_string())
-        }
-
-        pub(crate) fn enqueue_frame(&self, _frame: &RealtimeAudioFrame) -> Result<(), String> {
-            Err("voice output is unavailable in this build".to_string())
-        }
-
-        pub(crate) fn clear(&self) {}
-    }
-}
 
 mod wrapping;
 
