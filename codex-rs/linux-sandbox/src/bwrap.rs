@@ -82,6 +82,7 @@ impl BwrapNetworkMode {
 pub(crate) struct BwrapArgs {
     pub args: Vec<String>,
     pub preserved_files: Vec<File>,
+    pub cleanup_paths: Vec<PathBuf>,
 }
 
 /// Wrap a command with bubblewrap so the filesystem is read-only by default,
@@ -103,6 +104,7 @@ pub(crate) fn create_bwrap_command_args(
             Ok(BwrapArgs {
                 args: command,
                 preserved_files: Vec::new(),
+                cleanup_paths: Vec::new(),
             })
         } else {
             Ok(create_bwrap_flags_full_filesystem(command, options))
@@ -142,6 +144,7 @@ fn create_bwrap_flags_full_filesystem(command: Vec<String>, options: BwrapOption
     BwrapArgs {
         args,
         preserved_files: Vec::new(),
+        cleanup_paths: Vec::new(),
     }
 }
 
@@ -156,6 +159,7 @@ fn create_bwrap_flags(
     let BwrapArgs {
         args: filesystem_args,
         preserved_files,
+        cleanup_paths,
     } = create_filesystem_args(file_system_sandbox_policy, sandbox_policy_cwd)?;
     let normalized_command_cwd = normalize_command_cwd_for_bwrap(command_cwd);
     let mut args = Vec::new();
@@ -187,6 +191,7 @@ fn create_bwrap_flags(
     Ok(BwrapArgs {
         args,
         preserved_files,
+        cleanup_paths,
     })
 }
 
@@ -282,6 +287,7 @@ fn create_filesystem_args(
         args
     };
     let mut preserved_files = Vec::new();
+    let mut cleanup_paths = Vec::new();
     let allowed_write_paths: Vec<PathBuf> = writable_roots
         .iter()
         .map(|writable_root| writable_root.root.as_path().to_path_buf())
@@ -314,6 +320,7 @@ fn create_filesystem_args(
         append_unreadable_root_args(
             &mut args,
             &mut preserved_files,
+            &mut cleanup_paths,
             unreadable_root,
             &allowed_write_paths,
         )?;
@@ -344,7 +351,12 @@ fn create_filesystem_args(
             .collect();
         read_only_subpaths.sort_by_key(|path| path_depth(path));
         for subpath in read_only_subpaths {
-            append_read_only_subpath_args(&mut args, &subpath, &allowed_write_paths);
+            append_read_only_subpath_args(
+                &mut args,
+                &mut cleanup_paths,
+                &subpath,
+                &allowed_write_paths,
+            );
         }
         let mut nested_unreadable_roots: Vec<PathBuf> = unreadable_roots
             .iter()
@@ -356,6 +368,7 @@ fn create_filesystem_args(
             append_unreadable_root_args(
                 &mut args,
                 &mut preserved_files,
+                &mut cleanup_paths,
                 &unreadable_root,
                 &allowed_write_paths,
             )?;
@@ -377,6 +390,7 @@ fn create_filesystem_args(
         append_unreadable_root_args(
             &mut args,
             &mut preserved_files,
+            &mut cleanup_paths,
             &unreadable_root,
             &allowed_write_paths,
         )?;
@@ -385,6 +399,7 @@ fn create_filesystem_args(
     Ok(BwrapArgs {
         args,
         preserved_files,
+        cleanup_paths,
     })
 }
 
@@ -424,6 +439,7 @@ fn append_mount_target_parent_dir_args(args: &mut Vec<String>, mount_target: &Pa
 
 fn append_read_only_subpath_args(
     args: &mut Vec<String>,
+    cleanup_paths: &mut Vec<PathBuf>,
     subpath: &Path,
     allowed_write_paths: &[PathBuf],
 ) {
@@ -438,9 +454,7 @@ fn append_read_only_subpath_args(
         if let Some(first_missing_component) = find_first_non_existent_component(subpath)
             && is_within_allowed_write_paths(&first_missing_component, allowed_write_paths)
         {
-            args.push("--ro-bind".to_string());
-            args.push("/dev/null".to_string());
-            args.push(path_to_string(&first_missing_component));
+            append_missing_path_mask_args(args, cleanup_paths, &first_missing_component);
         }
         return;
     }
@@ -455,6 +469,7 @@ fn append_read_only_subpath_args(
 fn append_unreadable_root_args(
     args: &mut Vec<String>,
     preserved_files: &mut Vec<File>,
+    cleanup_paths: &mut Vec<PathBuf>,
     unreadable_root: &Path,
     allowed_write_paths: &[PathBuf],
 ) -> Result<()> {
@@ -469,9 +484,7 @@ fn append_unreadable_root_args(
         if let Some(first_missing_component) = find_first_non_existent_component(unreadable_root)
             && is_within_allowed_write_paths(&first_missing_component, allowed_write_paths)
         {
-            args.push("--ro-bind".to_string());
-            args.push("/dev/null".to_string());
-            args.push(path_to_string(&first_missing_component));
+            append_missing_path_mask_args(args, cleanup_paths, &first_missing_component);
         }
         return Ok(());
     }
@@ -523,6 +536,17 @@ fn is_within_allowed_write_paths(path: &Path, allowed_write_paths: &[PathBuf]) -
     allowed_write_paths
         .iter()
         .any(|root| path.starts_with(root))
+}
+
+fn append_missing_path_mask_args(
+    args: &mut Vec<String>,
+    cleanup_paths: &mut Vec<PathBuf>,
+    missing_path: &Path,
+) {
+    args.push("--ro-bind".to_string());
+    args.push("/dev/null".to_string());
+    args.push(path_to_string(missing_path));
+    cleanup_paths.push(missing_path.to_path_buf());
 }
 
 /// Find the first symlink along `target_path` that is also under a writable root.
@@ -793,6 +817,30 @@ mod tests {
                 "/dev".to_string(),
                 "/dev".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn missing_protected_paths_are_marked_for_cleanup() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let workspace = temp_dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![],
+            read_only_access: Default::default(),
+            network_access: false,
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+        };
+
+        let args = create_filesystem_args(&FileSystemSandboxPolicy::from(&policy), &workspace)
+            .expect("filesystem args");
+        let dot_codex = workspace.join(".codex");
+
+        assert!(
+            args.cleanup_paths.iter().any(|path| path == &dot_codex),
+            "missing protected .codex should be tracked for cleanup: {:#?}",
+            args.cleanup_paths
         );
     }
 

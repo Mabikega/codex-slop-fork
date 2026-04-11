@@ -108,6 +108,18 @@ impl SlopForkPilotManager {
                 == Some(turn_id)
     }
 
+    fn has_pre_submission_tracking(&self, thread_id: &ThreadId) -> bool {
+        let thread_id = thread_id.to_string();
+        self.pre_submission_started_turns_guard()
+            .contains_key(&thread_id)
+            || self
+                .pre_submission_completed_turns_guard()
+                .contains_key(&thread_id)
+            || self
+                .pre_submission_aborted_turns_guard()
+                .contains_key(&thread_id)
+    }
+
     fn remember_pre_submission_turn_start_if_needed(
         &self,
         thread_id: &ThreadId,
@@ -270,6 +282,41 @@ impl SlopForkPilotManager {
         }))
     }
 
+    fn recover_submitted_turn_without_start(
+        runtime: &mut PilotRuntime,
+        turn_id: &str,
+    ) -> Result<bool, String> {
+        let Some(state) = runtime.state() else {
+            return Ok(false);
+        };
+        if state.active_turn_id.is_some()
+            || state.pending_cycle_kind.is_none()
+            || state.last_submitted_turn_id.as_deref() != Some(turn_id)
+        {
+            return Ok(false);
+        }
+        runtime
+            .activate_pending_cycle(turn_id.to_string())
+            .map_err(|err| format!("Failed to recover submitted Pilot turn without start: {err}"))
+    }
+
+    fn recover_lost_pre_submission_dispatch_if_needed(
+        &self,
+        runtime: &mut PilotRuntime,
+        thread_id: &ThreadId,
+    ) -> Result<bool, String> {
+        if !Self::is_pre_submission_pending(runtime.state())
+            || self.has_pre_submission_tracking(thread_id)
+        {
+            return Ok(false);
+        }
+        runtime
+            .clear_orphaned_cycle_if_idle_for_control(Local::now())
+            .map_err(|err| {
+                format!("Failed to clear stale pre-submission Pilot dispatch state: {err}")
+            })
+    }
+
     pub(crate) async fn owns_turn(
         &self,
         codex_home: &Path,
@@ -388,6 +435,7 @@ impl SlopForkPilotManager {
     ) -> Result<Option<PilotUpdatedNotification>, String> {
         let mut runtime = PilotRuntime::load(codex_home, thread_id.to_string())
             .map_err(|err| format!("Failed to load pilot state: {err}"))?;
+        let _ = self.recover_lost_pre_submission_dispatch_if_needed(&mut runtime, thread_id)?;
         let Some(plan) = runtime
             .prepare_cycle_submission(Local::now())
             .map_err(|err| format!("Failed to prepare Pilot follow-up: {err}"))?
@@ -557,6 +605,7 @@ impl SlopForkPilotManager {
             );
             return Ok(None);
         }
+        let _ = Self::recover_submitted_turn_without_start(&mut runtime, turn_id)?;
         let updated = runtime
             .complete_turn(turn_id, last_agent_message, Local::now())
             .map_err(|err| format!("Failed to update Pilot state: {err}"))?;
@@ -593,6 +642,9 @@ impl SlopForkPilotManager {
                 reason,
             );
             return Ok(None);
+        }
+        if let Some(turn_id) = turn_id {
+            let _ = Self::recover_submitted_turn_without_start(&mut runtime, turn_id)?;
         }
         let updated = runtime
             .abort_turn(turn_id, reason)
@@ -886,6 +938,147 @@ mod tests {
         assert_eq!(notification.update_type, PilotUpdateType::Paused);
         let state = runtime.state().cloned().expect("pilot state");
         assert_eq!(state.status, CorePilotStatus::Paused);
+        assert_eq!(state.active_turn_id, None);
+        assert_eq!(state.last_submitted_turn_id, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn turn_completed_recovers_submitted_turn_when_start_event_is_missing() -> Result<()> {
+        let dir = tempdir()?;
+        let thread_id = ThreadId::from_string("ad7f0408-99b8-4f6e-a46f-bd0eec433383")?;
+        let manager = SlopForkPilotManager::default();
+        let mut runtime = PilotRuntime::load(dir.path(), thread_id.to_string())?;
+
+        assert!(runtime.start(
+            "ship it".to_string(),
+            /*deadline_at*/ None,
+            Local::now(),
+        )?);
+        let _plan = runtime
+            .prepare_cycle_submission(Local::now())?
+            .expect("pilot cycle should be prepared");
+        assert!(runtime.note_turn_submitted("turn-pilot")?);
+
+        let notification = manager
+            .handle_turn_completed(dir.path(), &thread_id, "turn-pilot", "done")
+            .await
+            .map_err(anyhow::Error::msg)?
+            .expect("pilot completion should emit notification");
+
+        assert_eq!(notification.update_type, PilotUpdateType::CycleCompleted);
+        let state = PilotRuntime::load(dir.path(), thread_id.to_string())?
+            .state()
+            .cloned()
+            .expect("pilot state");
+        assert_eq!(state.active_turn_id, None);
+        assert_eq!(state.last_submitted_turn_id, None);
+        assert_eq!(state.last_agent_message.as_deref(), Some("done"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn turn_aborted_recovers_submitted_turn_when_start_event_is_missing() -> Result<()> {
+        let dir = tempdir()?;
+        let thread_id = ThreadId::from_string("ad7f0408-99b8-4f6e-a46f-bd0eec433384")?;
+        let manager = SlopForkPilotManager::default();
+        let mut runtime = PilotRuntime::load(dir.path(), thread_id.to_string())?;
+
+        assert!(runtime.start(
+            "ship it".to_string(),
+            /*deadline_at*/ None,
+            Local::now(),
+        )?);
+        let _plan = runtime
+            .prepare_cycle_submission(Local::now())?
+            .expect("pilot cycle should be prepared");
+        assert!(runtime.note_turn_submitted("turn-pilot")?);
+
+        let notification = manager
+            .handle_turn_aborted(dir.path(), &thread_id, Some("turn-pilot"), "aborted")
+            .await
+            .map_err(anyhow::Error::msg)?
+            .expect("pilot abort should emit notification");
+
+        assert_eq!(notification.update_type, PilotUpdateType::Paused);
+        let state = PilotRuntime::load(dir.path(), thread_id.to_string())?
+            .state()
+            .cloned()
+            .expect("pilot state");
+        assert_eq!(state.status, CorePilotStatus::Paused);
+        assert_eq!(state.active_turn_id, None);
+        assert_eq!(state.last_submitted_turn_id, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lost_pre_submission_dispatch_is_cleared_when_no_turn_was_observed() -> Result<()> {
+        let dir = tempdir()?;
+        let thread_id = ThreadId::from_string("ad7f0408-99b8-4f6e-a46f-bd0eec433385")?;
+        let manager = SlopForkPilotManager::default();
+        let mut runtime = PilotRuntime::load(dir.path(), thread_id.to_string())?;
+
+        assert!(runtime.start(
+            "ship it".to_string(),
+            /*deadline_at*/ None,
+            Local::now(),
+        )?);
+        let _plan = runtime
+            .prepare_cycle_submission(Local::now())?
+            .expect("pilot cycle should be prepared");
+        assert!(runtime.note_submission_dispatched()?);
+
+        assert!(
+            manager
+                .recover_lost_pre_submission_dispatch_if_needed(&mut runtime, &thread_id)
+                .map_err(anyhow::Error::msg)?
+        );
+
+        let state = runtime.state().cloned().expect("pilot state");
+        assert_eq!(state.status, CorePilotStatus::Running);
+        assert_eq!(state.pending_cycle_kind, None);
+        assert_eq!(state.submission_dispatched_at, None);
+        assert_eq!(state.active_turn_id, None);
+        assert_eq!(state.last_submitted_turn_id, None);
+        assert_eq!(
+            state.status_message.as_deref(),
+            Some("Pilot cleared stale cycle state after the thread became idle.")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lost_pre_submission_dispatch_is_not_cleared_when_turn_was_observed() -> Result<()> {
+        let dir = tempdir()?;
+        let thread_id = ThreadId::from_string("ad7f0408-99b8-4f6e-a46f-bd0eec433386")?;
+        let manager = SlopForkPilotManager::default();
+        let mut runtime = PilotRuntime::load(dir.path(), thread_id.to_string())?;
+
+        assert!(runtime.start(
+            "ship it".to_string(),
+            /*deadline_at*/ None,
+            Local::now(),
+        )?);
+        let _plan = runtime
+            .prepare_cycle_submission(Local::now())?
+            .expect("pilot cycle should be prepared");
+        assert!(runtime.note_submission_dispatched()?);
+
+        let notification = manager
+            .handle_turn_started(dir.path(), &thread_id, "turn-pilot")
+            .await
+            .map_err(anyhow::Error::msg)?;
+        assert!(notification.is_none());
+
+        assert!(
+            !manager
+                .recover_lost_pre_submission_dispatch_if_needed(&mut runtime, &thread_id)
+                .map_err(anyhow::Error::msg)?
+        );
+
+        let state = runtime.state().cloned().expect("pilot state");
+        assert_eq!(state.pending_cycle_kind, Some(CorePilotCycleKind::Continue));
+        assert!(state.submission_dispatched_at.is_some());
         assert_eq!(state.active_turn_id, None);
         assert_eq!(state.last_submitted_turn_id, None);
         Ok(())

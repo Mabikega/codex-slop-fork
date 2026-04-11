@@ -464,14 +464,23 @@ impl PilotRuntime {
             let Some(state) = state.as_mut() else {
                 return Ok(false);
             };
-            if let Some(turn_id) = turn_id
-                && state.active_turn_id.as_deref() != Some(turn_id)
-            {
+            if let Some(turn_id) = turn_id {
+                let matches_active_turn = state.active_turn_id.as_deref() == Some(turn_id);
+                let matches_pending_turn = state.pending_cycle_kind.is_some()
+                    && state
+                        .last_submitted_turn_id
+                        .as_deref()
+                        .is_none_or(|id| id == turn_id);
+                if !matches_active_turn && !matches_pending_turn {
+                    return Ok(false);
+                }
+            }
+            let had_active_cycle =
+                state.active_turn_id.is_some() || state.pending_cycle_kind.is_some();
+            if !had_active_cycle {
                 return Ok(false);
             }
-            if state.active_turn_id.is_none() {
-                return Ok(false);
-            }
+            state.pending_cycle_kind = None;
             state.active_turn_id = None;
             state.active_cycle_kind = None;
             state.submission_dispatched_at = None;
@@ -481,7 +490,8 @@ impl PilotRuntime {
             }
             state.last_error = Some(reason.to_string());
             state.updated_at = Local::now().timestamp();
-            state.status_message = Some(reason.to_string());
+            state.status_message =
+                Some("Pilot paused because the active turn was aborted.".to_string());
             Ok(true)
         })
     }
@@ -1081,6 +1091,42 @@ mod tests {
                 .state()
                 .and_then(|state| state.active_turn_id.as_deref()),
             Some("turn-pilot")
+        );
+    }
+
+    #[test]
+    fn abort_turn_clears_pending_cycle_before_turn_started() {
+        let dir = tempdir().unwrap();
+        let thread_id = "thread-1";
+        let state = PilotRunState {
+            status: PilotStatus::Running,
+            pending_cycle_kind: Some(PilotCycleKind::Continue),
+            submission_dispatched_at: Some(Local::now().timestamp()),
+            last_submitted_turn_id: Some("turn-pilot".to_string()),
+            ..PilotRunState::default()
+        };
+        save_thread_state(dir.path(), thread_id, Some(&state)).unwrap();
+        let mut runtime = PilotRuntime::load(dir.path(), thread_id).unwrap();
+
+        let aborted = runtime
+            .abort_turn(Some("turn-pilot"), "interrupted before start")
+            .unwrap();
+        assert!(aborted);
+        let paused_state = runtime
+            .state()
+            .cloned()
+            .expect("pilot state after pre-start abort");
+        assert_eq!(
+            paused_state,
+            PilotRunState {
+                status: PilotStatus::Paused,
+                last_error: Some("interrupted before start".to_string()),
+                status_message: Some(
+                    "Pilot paused because the active turn was aborted.".to_string()
+                ),
+                updated_at: paused_state.updated_at,
+                ..PilotRunState::default()
+            }
         );
     }
 

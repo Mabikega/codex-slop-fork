@@ -1,0 +1,17 @@
+---
+source: tui/src/chatwidget/tests.rs
+expression: popup
+---
+  Delete Expired Accounts
+  Choose which expired saved account to delete from ~/.codex/.accounts/. This cannot be undone.
+  This session: none
+
+› 1. Delete all expired accounts                              Delete all 2 expired saved accounts
+                                                              permanently. Press enter again on the next
+                                                              screen if you really want to remove them.
+  2. expired-bulk-b@example.com (Pro) [subscription ran out]  Delete chatgpt-e45874b9700f2882 irrecoverably
+                                                              · subscription ran out
+  3. expired-bulk-a@example.com (Pro) [subscription ran out]  Delete chatgpt-2a060dc23dd77c15 irrecoverably
+                                                              · subscription ran out
+
+  Press enter to confirm or esc to go back

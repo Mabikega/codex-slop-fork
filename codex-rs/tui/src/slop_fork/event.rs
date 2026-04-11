@@ -32,9 +32,17 @@ pub(crate) enum LoginPopupKind {
     Root,
     UseAccount,
     RemoveAccount,
+    RemoveExpiredAccounts,
+    ConfirmRemoveSavedAccounts,
     RenameAccountFiles,
     AccountLimits,
     Settings,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SavedAccountDeletionRequest {
+    pub(crate) account_ids: Vec<String>,
+    pub(crate) return_kind: LoginPopupKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,12 +83,18 @@ pub(crate) enum SlopForkEvent {
     ActivateSavedAccount {
         account_id: String,
     },
+    ConfirmSavedAccountDeletion {
+        request: SavedAccountDeletionRequest,
+    },
     RenameAllSavedAccountFiles,
     RenameSavedAccountFile {
         path: PathBuf,
     },
     RemoveSavedAccount {
         account_id: String,
+    },
+    RemoveSavedAccounts {
+        account_ids: Vec<String>,
     },
     AutomationPolicyEvaluated {
         thread_id: String,

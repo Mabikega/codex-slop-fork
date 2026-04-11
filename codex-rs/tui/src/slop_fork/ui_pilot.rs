@@ -8,6 +8,8 @@ use crate::slop_fork::pilot_command::PilotCommand;
 use crate::slop_fork::pilot_command::parse_pilot_command;
 use crate::slop_fork::pilot_command::pilot_usage;
 
+const PILOT_PENDING_START_RECOVERY_GRACE_SECS: i64 = 2;
+
 impl SlopForkUi {
     pub(crate) fn show_pilot_usage(&self) -> Vec<SlopForkUiEffect> {
         vec![SlopForkUiEffect::AddPlainHistoryLines(
@@ -208,6 +210,40 @@ impl SlopForkUi {
         self.ensure_pilot_runtime(ctx)
             .ok()
             .is_some_and(|runtime| runtime.is_active_turn(turn_id))
+    }
+
+    pub(crate) fn pilot_owns_turn_abort(
+        &mut self,
+        ctx: &SlopForkUiContext,
+        turn_id: Option<&str>,
+    ) -> bool {
+        if ctx.remote_app_server {
+            return self
+                .remote_pilot_run
+                .as_ref()
+                .is_some_and(|run| pilot_run_owns_turn_abort(run, turn_id));
+        }
+        let awaiting_pilot_turn_start = self.awaiting_pilot_turn_start;
+        self.ensure_pilot_runtime(ctx).ok().is_some_and(|runtime| {
+            runtime.state().is_some_and(|state| {
+                state.active_turn_id.is_some()
+                    && turn_id
+                        .is_none_or(|turn_id| state.active_turn_id.as_deref() == Some(turn_id))
+            }) || (awaiting_pilot_turn_start
+                && runtime.state().is_some_and(|state| {
+                    state.pending_cycle_kind.is_some()
+                        && state.active_turn_id.is_none()
+                        && turn_id.is_none_or(|turn_id| {
+                            state
+                                .last_submitted_turn_id
+                                .as_deref()
+                                .is_none_or(|submitted_turn_id| submitted_turn_id == turn_id)
+                        })
+                }))
+        }) || self
+            .remote_pilot_run
+            .as_ref()
+            .is_some_and(|run| pilot_run_owns_turn_abort(run, turn_id))
     }
 
     fn pilot_start(
@@ -532,6 +568,9 @@ impl SlopForkUi {
             Ok(runtime) => runtime,
             Err(err) => return vec![SlopForkUiEffect::AddErrorMessage(err)],
         };
+        if let Err(err) = recover_idle_stale_pilot_state(ctx, runtime) {
+            return vec![SlopForkUiEffect::AddErrorMessage(err)];
+        }
         let next_cycle = match runtime.prepare_cycle_submission(Local::now()) {
             Ok(plan) => plan,
             Err(err) => {
@@ -544,6 +583,32 @@ impl SlopForkUi {
             return Vec::new();
         };
         vec![pilot_cycle_effect(next_cycle)]
+    }
+
+    pub(crate) fn pilot_frame_effects(
+        &mut self,
+        ctx: &SlopForkUiContext,
+        _now: DateTime<Local>,
+    ) -> Vec<SlopForkUiEffect> {
+        if ctx.remote_app_server || ctx.task_running || ctx.thread_id.is_none() {
+            return Vec::new();
+        }
+        let Ok(runtime) = self.ensure_pilot_runtime(ctx) else {
+            return Vec::new();
+        };
+        let should_retry_while_idle = runtime.state().is_some_and(|state| {
+            state.status == PilotStatus::Running
+                && state.active_turn_id.is_none()
+                && (state.pending_cycle_kind.is_some() || state.submission_dispatched_at.is_some())
+        });
+        should_retry_while_idle
+            .then_some(SlopForkUiEffect::ScheduleFrameIn(
+                std::time::Duration::from_secs(
+                    u64::try_from(PILOT_PENDING_START_RECOVERY_GRACE_SECS).unwrap_or(2),
+                ),
+            ))
+            .into_iter()
+            .collect()
     }
 
     fn pilot_status_output(&mut self, ctx: &SlopForkUiContext) -> Vec<SlopForkUiEffect> {
@@ -715,6 +780,18 @@ impl SlopForkUi {
     }
 }
 
+fn pilot_run_owns_turn_abort(run: &AppServerPilotRun, turn_id: Option<&str>) -> bool {
+    (run.pending_cycle_kind.is_some()
+        && run.active_turn_id.is_none()
+        && turn_id.is_none_or(|turn_id| {
+            run.last_submitted_turn_id
+                .as_deref()
+                .is_none_or(|submitted_turn_id| submitted_turn_id == turn_id)
+        }))
+        || (run.active_turn_id.is_some()
+            && turn_id.is_none_or(|turn_id| run.active_turn_id.as_deref() == Some(turn_id)))
+}
+
 fn pilot_cycle_effect(next_cycle: PilotCyclePlan) -> SlopForkUiEffect {
     SlopForkUiEffect::SubmitPilotTurn {
         prompt: next_cycle.prompt,
@@ -769,7 +846,16 @@ fn recover_idle_stale_pilot_state(
     if ctx.task_running {
         return Ok(false);
     }
+    if runtime.state().is_some_and(|state| {
+        state.pending_cycle_kind.is_some()
+            && state.active_turn_id.is_none()
+            && state.submission_dispatched_at.is_some_and(|ts| {
+                Local::now().timestamp() - ts < PILOT_PENDING_START_RECOVERY_GRACE_SECS
+            })
+    }) {
+        return Ok(false);
+    }
     runtime
-        .clear_orphaned_cycle_if_idle(Local::now())
+        .clear_orphaned_cycle_if_idle_for_control(Local::now())
         .map_err(|err| format!("Failed to recover stale Pilot state: {err}"))
 }

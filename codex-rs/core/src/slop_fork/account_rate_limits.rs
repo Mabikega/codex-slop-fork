@@ -78,6 +78,7 @@ pub struct StoredQuotaWindow {
 pub struct StoredRateLimitSnapshot {
     pub account_id: String,
     pub plan: Option<String>,
+    pub workspace_deactivated: bool,
     pub snapshot: Option<RateLimitSnapshot>,
     pub five_hour_window: StoredQuotaWindow,
     pub weekly_window: StoredQuotaWindow,
@@ -99,6 +100,8 @@ struct StoredRateLimitSnapshotsFile {
 struct StoredRateLimitSnapshotFile {
     #[serde(default)]
     plan: Option<String>,
+    #[serde(default)]
+    workspace_deactivated: bool,
     #[serde(default)]
     snapshot: Option<RateLimitSnapshot>,
     #[serde(default)]
@@ -122,6 +125,7 @@ impl StoredRateLimitSnapshotFile {
         StoredRateLimitSnapshot {
             account_id,
             plan: self.plan,
+            workspace_deactivated: self.workspace_deactivated,
             snapshot: self.snapshot,
             five_hour_window: self.five_hour_window,
             weekly_window: self.weekly_window,
@@ -382,6 +386,7 @@ pub fn record_rate_limit_snapshot_with_raw(
         {
             stored.last_usage_limit_hit_at = None;
         }
+        stored.workspace_deactivated = false;
         stored.observed_at = Some(observed_at);
         stored.snapshot = Some(snapshot.clone());
         stored.five_hour_window = stored_quota_window(
@@ -406,6 +411,25 @@ pub fn record_rate_limit_snapshot_with_raw(
             .as_ref()
             .and_then(|window| window.resets_at)
             .and_then(|seconds| DateTime::<Utc>::from_timestamp(seconds, 0));
+    })
+}
+
+pub fn record_workspace_deactivated(
+    codex_home: &Path,
+    account_id: &str,
+    plan: Option<&str>,
+    observed_at: DateTime<Utc>,
+) -> std::io::Result<()> {
+    update_snapshot_file(codex_home, account_id, plan, |stored| {
+        stored.workspace_deactivated = true;
+        stored.snapshot = None;
+        stored.five_hour_window = StoredQuotaWindow::default();
+        stored.weekly_window = StoredQuotaWindow::default();
+        stored.observed_at = Some(observed_at);
+        stored.primary_next_reset_at = None;
+        stored.secondary_next_reset_at = None;
+        stored.last_usage_limit_hit_at = None;
+        stored.last_refresh_attempt_at = Some(observed_at);
     })
 }
 
@@ -807,6 +831,7 @@ mod tests {
             StoredRateLimitSnapshot {
                 account_id: "acct-1".to_string(),
                 plan: Some("pro".to_string()),
+                workspace_deactivated: false,
                 snapshot: Some(snapshot),
                 five_hour_window: StoredQuotaWindow {
                     used_percent: Some(25),
@@ -876,6 +901,7 @@ mod tests {
         let legacy_file = legacy_dir.join("acct-1.json");
         let legacy_contents = serde_json::to_string_pretty(&StoredRateLimitSnapshotFile {
             plan: Some("pro".to_string()),
+            workspace_deactivated: false,
             snapshot: Some(snapshot.clone()),
             five_hour_window: StoredQuotaWindow::default(),
             weekly_window: StoredQuotaWindow::default(),
@@ -918,6 +944,7 @@ mod tests {
             StoredRateLimitSnapshot {
                 account_id: "acct-1".to_string(),
                 plan: Some("team".to_string()),
+                workspace_deactivated: false,
                 snapshot: None,
                 five_hour_window: StoredQuotaWindow::default(),
                 weekly_window: StoredQuotaWindow::default(),

@@ -13,6 +13,8 @@ use crate::auth::AuthDotJson;
 use crate::auth::CodexAuth;
 use crate::auth::load_auth_dot_json;
 use crate::path_utils::write_atomically;
+use codex_login::token_data::parse_chatgpt_jwt_claims;
+use codex_login::token_data::parse_chatgpt_subscription_active_until;
 
 use super::account_rate_limits;
 use super::config::SlopForkConfig;
@@ -356,6 +358,35 @@ pub fn current_active_account_id(
     Ok(stored_account_id(&auth))
 }
 
+pub fn saved_account_subscription_ran_out(
+    account: &StoredAccount,
+    snapshot: Option<&account_rate_limits::StoredRateLimitSnapshot>,
+) -> bool {
+    if !account.auth.is_chatgpt_mode() {
+        return false;
+    }
+
+    if snapshot.is_some_and(|snapshot| snapshot.workspace_deactivated) {
+        return true;
+    }
+    if auth_chatgpt_subscription_active_until_indicates_expired(&account.auth, snapshot, Utc::now())
+    {
+        return true;
+    }
+
+    let Some(snapshot_plan) = snapshot
+        .and_then(|snapshot| snapshot.plan.as_deref())
+        .map(normalized_chatgpt_plan)
+    else {
+        return false;
+    };
+    if snapshot_plan != "free" {
+        return false;
+    }
+
+    auth_chatgpt_plan_type_raw(&account.auth).is_some_and(|saved_plan| saved_plan != "free")
+}
+
 pub fn ensure_current_active_account_saved(
     codex_home: &Path,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
@@ -433,6 +464,51 @@ fn load_current_active_auth(
         return Ok(None);
     }
     load_auth_dot_json(codex_home, auth_credentials_store_mode)
+}
+
+fn auth_chatgpt_plan_type_raw(auth: &AuthDotJson) -> Option<String> {
+    auth.tokens
+        .as_ref()
+        .and_then(|tokens| {
+            tokens.id_token.get_chatgpt_plan_type_raw().or_else(|| {
+                parse_chatgpt_jwt_claims(&tokens.id_token.raw_jwt)
+                    .ok()
+                    .and_then(|claims| claims.get_chatgpt_plan_type_raw())
+            })
+        })
+        .map(normalized_chatgpt_plan)
+}
+
+fn auth_chatgpt_subscription_active_until(auth: &AuthDotJson) -> Option<DateTime<Utc>> {
+    auth.tokens.as_ref().and_then(|tokens| {
+        parse_chatgpt_subscription_active_until(&tokens.id_token.raw_jwt)
+            .ok()
+            .flatten()
+    })
+}
+
+fn auth_chatgpt_subscription_active_until_indicates_expired(
+    auth: &AuthDotJson,
+    snapshot: Option<&account_rate_limits::StoredRateLimitSnapshot>,
+    now: DateTime<Utc>,
+) -> bool {
+    let Some(active_until) = auth_chatgpt_subscription_active_until(auth) else {
+        return false;
+    };
+    if now <= active_until {
+        return false;
+    }
+
+    !snapshot.is_some_and(|snapshot| {
+        snapshot.snapshot.is_some()
+            && snapshot
+                .observed_at
+                .is_some_and(|observed_at| observed_at > active_until)
+    })
+}
+
+fn normalized_chatgpt_plan(plan: impl AsRef<str>) -> String {
+    plan.as_ref().trim().to_ascii_lowercase()
 }
 
 #[derive(Debug)]
@@ -665,6 +741,41 @@ mod tests {
         format!("{header_b64}.{payload_b64}.{signature_b64}")
     }
 
+    fn fake_jwt_with_active_until(
+        email: &str,
+        plan: &str,
+        account_id: &str,
+        active_until: &str,
+    ) -> String {
+        #[derive(Serialize)]
+        struct Header {
+            alg: &'static str,
+            typ: &'static str,
+        }
+
+        let header = Header {
+            alg: "none",
+            typ: "JWT",
+        };
+        let payload = serde_json::json!({
+            "email": email,
+            "https://api.openai.com/auth": {
+                "chatgpt_plan_type": plan,
+                "chatgpt_account_id": account_id,
+                "chatgpt_subscription_active_until": active_until,
+            }
+        });
+
+        fn b64url_no_pad(bytes: &[u8]) -> String {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+        }
+
+        let header_b64 = b64url_no_pad(&serde_json::to_vec(&header).expect("header"));
+        let payload_b64 = b64url_no_pad(&serde_json::to_vec(&payload).expect("payload"));
+        let signature_b64 = b64url_no_pad(b"sig");
+        format!("{header_b64}.{payload_b64}.{signature_b64}")
+    }
+
     fn chatgpt_auth(account_id: &str, email: &str) -> AuthDotJson {
         AuthDotJson {
             auth_mode: Some(AuthMode::Chatgpt),
@@ -746,6 +857,71 @@ mod tests {
 
         assert_eq!(saved.auth, auth);
         Ok(())
+    }
+
+    #[test]
+    fn saved_account_subscription_ran_out_uses_fresh_snapshot_plan() {
+        let auth = chatgpt_auth("acct-1", "person@example.com");
+        let account = StoredAccount {
+            id: stored_account_id(&auth).expect("saved account id"),
+            path: PathBuf::from("acct-1.json"),
+            auth,
+            modified_at: None,
+        };
+        let snapshot = account_rate_limits::StoredRateLimitSnapshot {
+            account_id: account.id.clone(),
+            plan: Some("free".to_string()),
+            workspace_deactivated: false,
+            snapshot: None,
+            five_hour_window: account_rate_limits::StoredQuotaWindow::default(),
+            weekly_window: account_rate_limits::StoredQuotaWindow::default(),
+            observed_at: None,
+            primary_next_reset_at: None,
+            secondary_next_reset_at: None,
+            last_refresh_attempt_at: None,
+            last_usage_limit_hit_at: None,
+        };
+
+        assert_eq!(
+            saved_account_subscription_ran_out(&account, Some(&snapshot)),
+            true
+        );
+    }
+
+    #[test]
+    fn saved_account_subscription_ran_out_uses_expired_subscription_until_without_snapshot() {
+        let auth = AuthDotJson {
+            auth_mode: Some(AuthMode::Chatgpt),
+            openai_api_key: None,
+            tokens: Some(TokenData {
+                id_token: IdTokenInfo {
+                    email: Some("person@example.com".to_string()),
+                    chatgpt_plan_type: Some(PlanType::Known(KnownPlan::Team)),
+                    chatgpt_user_id: None,
+                    chatgpt_account_id: Some("acct-1".to_string()),
+                    raw_jwt: fake_jwt_with_active_until(
+                        "person@example.com",
+                        "team",
+                        "acct-1",
+                        "2026-04-05T23:08:23+00:00",
+                    ),
+                },
+                access_token: "access".to_string(),
+                refresh_token: "refresh".to_string(),
+                account_id: Some("acct-1".to_string()),
+            }),
+            last_refresh: None,
+        };
+        let account = StoredAccount {
+            id: stored_account_id(&auth).expect("saved account id"),
+            path: PathBuf::from("acct-1.json"),
+            auth,
+            modified_at: None,
+        };
+
+        assert!(saved_account_subscription_ran_out(
+            &account, /*snapshot*/ None
+        ));
     }
 
     #[test]

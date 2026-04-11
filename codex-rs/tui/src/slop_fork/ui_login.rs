@@ -25,6 +25,13 @@ pub(crate) enum PendingDeviceCodeState {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SavedAccountPopupMode {
+    Use,
+    RemoveAll,
+    RemoveExpired,
+}
+
 impl SlopForkUi {
     #[cfg(test)]
     pub(crate) fn set_pending_chatgpt_login_for_test(
@@ -53,6 +60,9 @@ impl SlopForkUi {
         if matches!(kind, LoginPopupKind::Root) && self.pending_chatgpt_login.is_some() {
             return self.pending_login_popup_effects(ctx);
         }
+        if !matches!(kind, LoginPopupKind::ConfirmRemoveSavedAccounts) {
+            self.pending_saved_account_deletion = None;
+        }
 
         self.active_login_popup_kind = Some(kind);
         match kind {
@@ -67,7 +77,7 @@ impl SlopForkUi {
                     ))]
                 }),
             LoginPopupKind::UseAccount => self
-                .login_account_popup_params(ctx, /*activate*/ true)
+                .login_account_popup_params(ctx, SavedAccountPopupMode::Use)
                 .map(Box::new)
                 .map(SlopForkUiEffect::ShowOrReplaceSelection)
                 .map(|effect| vec![effect])
@@ -77,7 +87,27 @@ impl SlopForkUi {
                     ))]
                 }),
             LoginPopupKind::RemoveAccount => self
-                .login_account_popup_params(ctx, /*activate*/ false)
+                .login_account_popup_params(ctx, SavedAccountPopupMode::RemoveAll)
+                .map(Box::new)
+                .map(SlopForkUiEffect::ShowOrReplaceSelection)
+                .map(|effect| vec![effect])
+                .unwrap_or_else(|err| {
+                    vec![SlopForkUiEffect::AddErrorMessage(format!(
+                        "Failed to open accounts menu: {err}"
+                    ))]
+                }),
+            LoginPopupKind::RemoveExpiredAccounts => self
+                .login_account_popup_params(ctx, SavedAccountPopupMode::RemoveExpired)
+                .map(Box::new)
+                .map(SlopForkUiEffect::ShowOrReplaceSelection)
+                .map(|effect| vec![effect])
+                .unwrap_or_else(|err| {
+                    vec![SlopForkUiEffect::AddErrorMessage(format!(
+                        "Failed to open accounts menu: {err}"
+                    ))]
+                }),
+            LoginPopupKind::ConfirmRemoveSavedAccounts => self
+                .saved_account_delete_confirmation_popup_params(ctx)
                 .map(Box::new)
                 .map(SlopForkUiEffect::ShowOrReplaceSelection)
                 .map(|effect| vec![effect])
@@ -114,7 +144,7 @@ impl SlopForkUi {
                     accounts,
                     display_labels,
                     rename_suggestions,
-                    _,
+                    rate_limit_snapshots,
                 ) = match self.login_popup_state(ctx) {
                     Ok(state) => state,
                     Err(err) => {
@@ -128,11 +158,13 @@ impl SlopForkUi {
                     session_account_id.as_deref(),
                     &accounts,
                     &display_labels,
+                    &rate_limit_snapshots,
                 );
                 let shared_active_account_label = self.login_account_label(
                     shared_active_account_id.as_deref(),
                     &accounts,
                     &display_labels,
+                    &rate_limit_snapshots,
                 );
                 let header = self.login_popup_header(
                     "Account Settings",
@@ -297,6 +329,7 @@ impl SlopForkUi {
         ctx: &SlopForkUiContext,
         account_id: &str,
     ) -> Vec<SlopForkUiEffect> {
+        self.pending_saved_account_deletion = None;
         let display_labels = auth_accounts::load_account_display_labels(&ctx.codex_home);
         let label = auth_accounts::find_account(&ctx.codex_home, account_id)
             .ok()
@@ -319,6 +352,62 @@ impl SlopForkUi {
                 "Failed to remove account: {err}"
             ))],
         }
+    }
+
+    pub(crate) fn confirm_saved_account_deletion(
+        &mut self,
+        ctx: &SlopForkUiContext,
+        request: SavedAccountDeletionRequest,
+    ) -> Vec<SlopForkUiEffect> {
+        self.pending_saved_account_deletion = Some(request);
+        self.open_login_popup(ctx, LoginPopupKind::ConfirmRemoveSavedAccounts)
+    }
+
+    pub(crate) fn remove_saved_accounts(
+        &mut self,
+        ctx: &SlopForkUiContext,
+        account_ids: &[String],
+    ) -> Vec<SlopForkUiEffect> {
+        self.pending_saved_account_deletion = None;
+        let display_labels = auth_accounts::load_account_display_labels(&ctx.codex_home);
+        let mut removed_labels = Vec::new();
+        let mut missing_count = 0usize;
+        for account_id in account_ids {
+            let label = auth_accounts::find_account(&ctx.codex_home, account_id)
+                .ok()
+                .flatten()
+                .map(|account| display_labels.label_for_account(&account))
+                .unwrap_or_else(|| account_id.clone());
+            match ctx.auth_manager.remove_saved_account(account_id) {
+                Ok(true) => removed_labels.push(label),
+                Ok(false) => missing_count += 1,
+                Err(err) => {
+                    return vec![SlopForkUiEffect::AddErrorMessage(format!(
+                        "Failed to remove account: {err}"
+                    ))];
+                }
+            }
+        }
+
+        if removed_labels.is_empty() {
+            return vec![SlopForkUiEffect::AddErrorMessage(
+                "No saved accounts matched the requested deletion.".to_string(),
+            )];
+        }
+
+        self.active_login_popup_kind = None;
+        let message = match removed_labels.as_slice() {
+            [label] => format!("Removed saved account {label}."),
+            _ => format!("Removed {} saved accounts.", removed_labels.len()),
+        };
+        let hint = (missing_count > 0).then_some(format!(
+            "{missing_count} requested account(s) were already missing."
+        ));
+        vec![SlopForkUiEffect::AuthStateChanged {
+            message: hint.map_or(message.clone(), |hint| format!("{message} {hint}")),
+            is_error: false,
+            is_warning: false,
+        }]
     }
 
     pub(crate) fn rename_saved_account_file(
@@ -448,13 +537,24 @@ impl SlopForkUi {
             session_account_id.as_deref(),
             &accounts,
             &display_labels,
+            &rate_limit_snapshots,
         );
         let shared_active_account_label = self.login_account_label(
             shared_active_account_id.as_deref(),
             &accounts,
             &display_labels,
+            &rate_limit_snapshots,
         );
         let saved_accounts = accounts.len();
+        let expired_count = accounts
+            .iter()
+            .filter(|account| {
+                auth_accounts::saved_account_subscription_ran_out(
+                    account,
+                    rate_limit_snapshots.get(&account.id),
+                )
+            })
+            .count();
 
         let mut items = vec![
             SelectionItem {
@@ -505,7 +605,14 @@ impl SlopForkUi {
             },
             SelectionItem {
                 name: "Remove account".to_string(),
-                description: Some("Delete a saved auth blob from ~/.codex/.accounts/.".to_string()),
+                description: Some(match expired_count {
+                    0 => "Delete a saved auth blob from ~/.codex/.accounts/.".to_string(),
+                    1 => "Delete a saved auth blob from ~/.codex/.accounts/. 1 saved account subscription ran out."
+                        .to_string(),
+                    count => format!(
+                        "Delete saved auth blobs from ~/.codex/.accounts/. {count} saved account subscriptions ran out."
+                    ),
+                }),
                 is_disabled: accounts.is_empty(),
                 disabled_reason: accounts
                     .is_empty()
@@ -547,6 +654,30 @@ impl SlopForkUi {
                 ..Default::default()
             },
         ];
+        if expired_count > 0 {
+            items.insert(
+                6,
+                SelectionItem {
+                    name: "Delete expired accounts".to_string(),
+                    description: Some(match expired_count {
+                        1 => {
+                            "Delete the 1 saved account whose subscription ran out. This cannot be undone."
+                                .to_string()
+                        }
+                        count => format!(
+                            "Delete the {count} saved accounts whose subscriptions ran out. This cannot be undone."
+                        ),
+                    }),
+                    actions: vec![Box::new(|tx| {
+                        tx.send(AppEvent::SlopFork(SlopForkEvent::OpenLoginPopup {
+                            kind: LoginPopupKind::RemoveExpiredAccounts,
+                        }));
+                    })],
+                    dismiss_on_select: true,
+                    ..Default::default()
+                },
+            );
+        }
 
         if let Some(shared_active_account_id) = shared_active_account_id.as_deref()
             && session_account_id.as_deref() != Some(shared_active_account_id)
@@ -555,7 +686,11 @@ impl SlopForkUi {
                 .find(|account| account.id == shared_active_account_id)
         {
             let account_id = account.id.clone();
-            let label = display_labels.label_for_account(account);
+            let label = self.saved_account_label(
+                account,
+                &display_labels,
+                rate_limit_snapshots.get(&account.id),
+            );
             items.insert(
                 4,
                 SelectionItem {
@@ -632,7 +767,7 @@ impl SlopForkUi {
     fn login_account_popup_params(
         &self,
         ctx: &SlopForkUiContext,
-        activate: bool,
+        mode: SavedAccountPopupMode,
     ) -> std::io::Result<SelectionViewParams> {
         let (
             _,
@@ -648,47 +783,109 @@ impl SlopForkUi {
             session_account_id.as_deref(),
             &accounts,
             &display_labels,
+            &rate_limit_snapshots,
         );
         let shared_active_account_label = self.login_account_label(
             shared_active_account_id.as_deref(),
             &accounts,
             &display_labels,
+            &rate_limit_snapshots,
         );
         let now = Utc::now();
-        let title = if activate {
-            "Switch Account"
-        } else {
-            "Remove Account"
+        let (title, subtitle) = match mode {
+            SavedAccountPopupMode::Use => (
+                "Switch Account",
+                "Choose which saved account should become ~/.codex/auth.json.",
+            ),
+            SavedAccountPopupMode::RemoveAll => (
+                "Remove Account",
+                "Choose which saved account to delete from ~/.codex/.accounts/. This cannot be undone.",
+            ),
+            SavedAccountPopupMode::RemoveExpired => (
+                "Delete Expired Accounts",
+                "Choose which expired saved account to delete from ~/.codex/.accounts/. This cannot be undone.",
+            ),
         };
-        let subtitle = if activate {
-            "Choose which saved account should become ~/.codex/auth.json."
-        } else {
-            "Choose which saved account to delete from ~/.codex/.accounts/."
+        let activate = mode == SavedAccountPopupMode::Use;
+
+        let filtered_accounts = match mode {
+            SavedAccountPopupMode::RemoveExpired => accounts
+                .into_iter()
+                .filter(|account| {
+                    auth_accounts::saved_account_subscription_ran_out(
+                        account,
+                        rate_limit_snapshots.get(&account.id),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            SavedAccountPopupMode::Use | SavedAccountPopupMode::RemoveAll => accounts,
         };
 
-        let mut items = if accounts.is_empty() {
+        let items = if filtered_accounts.is_empty() {
             vec![SelectionItem {
-                name: "No saved accounts".to_string(),
-                description: Some("Run a login flow first to create one.".to_string()),
+                name: if mode == SavedAccountPopupMode::RemoveExpired {
+                    "No expired saved accounts".to_string()
+                } else {
+                    "No saved accounts".to_string()
+                },
+                description: Some(if mode == SavedAccountPopupMode::RemoveExpired {
+                    "Refresh saved-account limits if you expected an expired account here."
+                        .to_string()
+                } else {
+                    "Run a login flow first to create one.".to_string()
+                }),
                 is_disabled: true,
                 ..Default::default()
             }]
         } else {
-            accounts
-                .into_iter()
-                .map(|account| {
+            let mut items = Vec::new();
+            if mode == SavedAccountPopupMode::RemoveExpired && filtered_accounts.len() > 1 {
+                let expired_account_ids = filtered_accounts
+                    .iter()
+                    .map(|account| account.id.clone())
+                    .collect::<Vec<_>>();
+                let count = expired_account_ids.len();
+                items.push(SelectionItem {
+                    name: "Delete all expired accounts".to_string(),
+                    description: Some(format!(
+                        "Delete all {count} expired saved accounts permanently."
+                    )),
+                    selected_description: Some(format!(
+                        "Delete all {count} expired saved accounts permanently. Press enter again on the next screen if you really want to remove them."
+                    )),
+                    actions: vec![Box::new(move |tx| {
+                        tx.send(AppEvent::SlopFork(SlopForkEvent::ConfirmSavedAccountDeletion {
+                            request: SavedAccountDeletionRequest {
+                                account_ids: expired_account_ids.clone(),
+                                return_kind: LoginPopupKind::RemoveExpiredAccounts,
+                            },
+                        }));
+                    })],
+                    dismiss_on_select: true,
+                    search_value: Some("delete all expired accounts".to_string()),
+                    ..Default::default()
+                });
+            }
+            items.extend(filtered_accounts.into_iter().map(|account| {
                     let account_id = account.id.clone();
-                    let account_label = display_labels.label_for_account(&account);
-                    let summary = self.login_account_rate_limit_summary(
-                        &account,
-                        rate_limit_snapshots.get(&account_id),
-                        now,
-                    );
+                    let stored_snapshot = rate_limit_snapshots.get(&account_id);
+                    let account_label =
+                        self.saved_account_label(&account, &display_labels, stored_snapshot);
+                    let summary =
+                        self.login_account_rate_limit_summary(&account, stored_snapshot, now);
                     let summary_spans = styled_saved_account_limit_summary(&summary);
+                    let subscription_ran_out =
+                        auth_accounts::saved_account_subscription_ran_out(&account, stored_snapshot);
+                    let is_current = session_account_id.as_deref() == Some(account_id.as_str());
                     let description = if activate {
                         Some(summary.clone())
                     } else {
-                        Some(format!("Delete {account_id} · {summary}"))
+                        let delete_target = if subscription_ran_out {
+                            format!("Delete {account_id} irrecoverably")
+                        } else {
+                            format!("Delete {account_id}")
+                        };
+                        Some(format!("{delete_target} · {summary}"))
                     };
                     let (selected_description, selected_description_spans) = if activate {
                         (
@@ -699,7 +896,19 @@ impl SlopForkUi {
                             ),
                         )
                     } else {
-                        (None, None)
+                        let selection_hint = if subscription_ran_out && is_current {
+                            ". Subscription ran out. Press enter to delete this saved account permanently. If another saved account is available, Codex switches away first."
+                        } else if subscription_ran_out {
+                            ". Subscription ran out. Press enter to delete this saved account permanently."
+                        } else if is_current {
+                            ". This account is currently active. Press enter to delete it permanently. This cannot be undone."
+                        } else {
+                            ". Press enter to delete this saved account permanently. This cannot be undone."
+                        };
+                        (
+                            Some(format!("{summary}{selection_hint}")),
+                            append_summary_suffix_spans(&summary_spans, selection_hint),
+                        )
                     };
                     let actions: Vec<SelectionAction> = if activate {
                         vec![Box::new({
@@ -708,6 +917,20 @@ impl SlopForkUi {
                                 tx.send(AppEvent::SlopFork(SlopForkEvent::ActivateSavedAccount {
                                     account_id: account_id.clone(),
                                 }));
+                            }
+                        })]
+                    } else if mode == SavedAccountPopupMode::RemoveExpired {
+                        vec![Box::new({
+                            let account_id = account_id.clone();
+                            move |tx| {
+                                tx.send(AppEvent::SlopFork(
+                                    SlopForkEvent::ConfirmSavedAccountDeletion {
+                                        request: SavedAccountDeletionRequest {
+                                            account_ids: vec![account_id.clone()],
+                                            return_kind: LoginPopupKind::RemoveExpiredAccounts,
+                                        },
+                                    },
+                                ));
                             }
                         })]
                     } else {
@@ -726,26 +949,15 @@ impl SlopForkUi {
                         description_spans: activate.then_some(summary_spans).flatten(),
                         selected_description,
                         selected_description_spans,
-                        is_current: session_account_id.as_deref() == Some(account_id.as_str()),
+                        is_current,
                         actions,
                         dismiss_on_select: true,
                         search_value: Some(format!("{account_id} {account_label} {summary}")),
                         ..Default::default()
                     }
-                })
-                .collect()
+                }));
+            items
         };
-
-        if !activate && items.iter().any(|item| item.is_current) {
-            for item in &mut items {
-                if item.is_current {
-                    item.selected_description = Some(
-                        "This account is currently active. Removing it also logs it out."
-                            .to_string(),
-                    );
-                }
-            }
-        }
 
         Ok(SelectionViewParams {
             view_id: Some(LOGIN_POPUP_VIEW_ID),
@@ -763,6 +975,147 @@ impl SlopForkUi {
                 tx.send(AppEvent::SlopFork(SlopForkEvent::OpenLoginPopup {
                     kind: LoginPopupKind::Root,
                 }));
+            })),
+            items,
+            ..Default::default()
+        })
+    }
+
+    fn saved_account_delete_confirmation_popup_params(
+        &self,
+        ctx: &SlopForkUiContext,
+    ) -> std::io::Result<SelectionViewParams> {
+        let Some(request) = self.pending_saved_account_deletion.as_ref() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "No saved-account deletion is pending.",
+            ));
+        };
+        let (
+            _,
+            session_account_id,
+            shared_active_account_id,
+            accounts,
+            display_labels,
+            rename_suggestions,
+            rate_limit_snapshots,
+        ) = self.login_popup_state(ctx)?;
+        let session_account_label = self.session_login_account_label(
+            ctx,
+            session_account_id.as_deref(),
+            &accounts,
+            &display_labels,
+            &rate_limit_snapshots,
+        );
+        let shared_active_account_label = self.login_account_label(
+            shared_active_account_id.as_deref(),
+            &accounts,
+            &display_labels,
+            &rate_limit_snapshots,
+        );
+        let now = Utc::now();
+        let targeted_accounts = request
+            .account_ids
+            .iter()
+            .filter_map(|account_id| {
+                accounts
+                    .iter()
+                    .find(|account| account.id == *account_id)
+                    .map(|account| (account, rate_limit_snapshots.get(account_id)))
+            })
+            .collect::<Vec<_>>();
+        let active_is_targeted = session_account_id
+            .as_deref()
+            .is_some_and(|account_id| request.account_ids.iter().any(|id| id == account_id));
+        let count = request.account_ids.len();
+        let subtitle = if count == 1 {
+            "Delete this expired saved account from ~/.codex/.accounts/. This cannot be undone."
+        } else {
+            "Delete these expired saved accounts from ~/.codex/.accounts/. This cannot be undone."
+        };
+
+        let mut items = Vec::new();
+        let confirm_name = if count == 1 {
+            "Yes, delete permanently".to_string()
+        } else {
+            format!("Yes, delete all {count}")
+        };
+        let confirm_description = if active_is_targeted {
+            "Delete the selected expired accounts permanently. If another saved account remains, Codex switches away first."
+                .to_string()
+        } else {
+            "Delete the selected expired accounts permanently. This cannot be undone.".to_string()
+        };
+        items.push(SelectionItem {
+            name: confirm_name,
+            description: Some(confirm_description),
+            actions: vec![Box::new({
+                let account_ids = request.account_ids.clone();
+                move |tx| {
+                    tx.send(AppEvent::SlopFork(SlopForkEvent::RemoveSavedAccounts {
+                        account_ids: account_ids.clone(),
+                    }));
+                }
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+        items.push(SelectionItem {
+            name: "No, go back".to_string(),
+            description: Some(
+                "Return to the expired account list without deleting anything.".to_string(),
+            ),
+            actions: vec![Box::new({
+                let return_kind = request.return_kind;
+                move |tx| {
+                    tx.send(AppEvent::SlopFork(SlopForkEvent::OpenLoginPopup {
+                        kind: return_kind,
+                    }));
+                }
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+        if targeted_accounts.is_empty() {
+            items.push(SelectionItem {
+                name: "No saved accounts matched this request".to_string(),
+                description: Some(
+                    "The selected expired accounts are no longer present on disk.".to_string(),
+                ),
+                is_disabled: true,
+                ..Default::default()
+            });
+        } else {
+            items.extend(targeted_accounts.iter().map(|(account, snapshot)| {
+                let label = self.saved_account_label(account, &display_labels, *snapshot);
+                let summary = self.login_account_rate_limit_summary(account, *snapshot, now);
+                SelectionItem {
+                    name: label,
+                    description: Some(summary),
+                    is_disabled: true,
+                    is_current: session_account_id.as_deref() == Some(account.id.as_str()),
+                    ..Default::default()
+                }
+            }));
+        }
+
+        Ok(SelectionViewParams {
+            view_id: Some(LOGIN_POPUP_VIEW_ID),
+            header: self.login_popup_header(
+                "Confirm Delete",
+                subtitle,
+                session_account_label,
+                shared_active_account_label,
+                &rename_suggestions,
+            ),
+            footer_hint: Some(standard_popup_hint_line()),
+            on_cancel: Some(Box::new({
+                let return_kind = request.return_kind;
+                move |tx| {
+                    tx.send(AppEvent::SlopFork(SlopForkEvent::OpenLoginPopup {
+                        kind: return_kind,
+                    }));
+                }
             })),
             items,
             ..Default::default()
@@ -788,11 +1141,13 @@ impl SlopForkUi {
             session_account_id.as_deref(),
             &accounts,
             &display_labels,
+            &rate_limit_snapshots,
         );
         let shared_active_account_label = self.login_account_label(
             shared_active_account_id.as_deref(),
             &accounts,
             &display_labels,
+            &rate_limit_snapshots,
         );
         let now = Utc::now();
         let refreshable_account_count = accounts
@@ -822,8 +1177,9 @@ impl SlopForkUi {
                 .into_iter()
                 .map(|account| {
                     let account_id = account.id.clone();
-                    let account_label = display_labels.label_for_account(&account);
                     let stored_snapshot = rate_limit_snapshots.get(&account.id);
+                    let account_label =
+                        self.saved_account_label(&account, &display_labels, stored_snapshot);
                     let summary =
                         self.login_account_rate_limit_summary(&account, stored_snapshot, now);
                     let summary_spans = styled_saved_account_limit_summary(&summary);
@@ -1010,18 +1366,20 @@ impl SlopForkUi {
             accounts,
             display_labels,
             rename_suggestions,
-            _,
+            rate_limit_snapshots,
         ) = self.login_popup_state(ctx)?;
         let session_account_label = self.session_login_account_label(
             ctx,
             session_account_id.as_deref(),
             &accounts,
             &display_labels,
+            &rate_limit_snapshots,
         );
         let shared_active_account_label = self.login_account_label(
             shared_active_account_id.as_deref(),
             &accounts,
             &display_labels,
+            &rate_limit_snapshots,
         );
         let renameable_count = rename_suggestions
             .iter()
@@ -1241,12 +1599,19 @@ impl SlopForkUi {
         account_id: Option<&str>,
         accounts: &[auth_accounts::StoredAccount],
         display_labels: &auth_accounts::AccountDisplayLabels,
+        rate_limit_snapshots: &HashMap<String, account_rate_limits::StoredRateLimitSnapshot>,
     ) -> Option<String> {
         account_id.and_then(|account_id| {
             accounts
                 .iter()
                 .find(|account| account.id == account_id)
-                .map(|account| display_labels.label_for_account(account))
+                .map(|account| {
+                    self.saved_account_label(
+                        account,
+                        display_labels,
+                        rate_limit_snapshots.get(&account.id),
+                    )
+                })
         })
     }
 
@@ -1256,14 +1621,34 @@ impl SlopForkUi {
         session_account_id: Option<&str>,
         accounts: &[auth_accounts::StoredAccount],
         display_labels: &auth_accounts::AccountDisplayLabels,
+        rate_limit_snapshots: &HashMap<String, account_rate_limits::StoredRateLimitSnapshot>,
     ) -> Option<String> {
-        self.login_account_label(session_account_id, accounts, display_labels)
-            .or_else(|| {
-                ctx.auth_manager
-                    .auth_cached()
-                    .as_ref()
-                    .map(|auth| display_labels.label_for_codex_auth(auth))
-            })
+        self.login_account_label(
+            session_account_id,
+            accounts,
+            display_labels,
+            rate_limit_snapshots,
+        )
+        .or_else(|| {
+            ctx.auth_manager
+                .auth_cached()
+                .as_ref()
+                .map(|auth| display_labels.label_for_codex_auth(auth))
+        })
+    }
+
+    fn saved_account_label(
+        &self,
+        account: &auth_accounts::StoredAccount,
+        display_labels: &auth_accounts::AccountDisplayLabels,
+        snapshot: Option<&account_rate_limits::StoredRateLimitSnapshot>,
+    ) -> String {
+        let label = display_labels.label_for_account(account);
+        if auth_accounts::saved_account_subscription_ran_out(account, snapshot) {
+            format!("{label} [subscription ran out]")
+        } else {
+            label
+        }
     }
 
     fn login_account_rate_limit_summary(
@@ -1273,6 +1658,15 @@ impl SlopForkUi {
         now: DateTime<Utc>,
     ) -> String {
         let mut parts = Vec::new();
+
+        let subscription_ran_out =
+            auth_accounts::saved_account_subscription_ran_out(account, snapshot);
+        if subscription_ran_out {
+            parts.push("subscription ran out".to_string());
+            if snapshot.is_none_or(|snapshot| snapshot.snapshot.is_none()) {
+                return parts.join(" · ");
+            }
+        }
 
         if let Some(snapshot) = snapshot {
             if let Some(rate_limit) = snapshot.snapshot.as_ref() {
@@ -1701,10 +2095,58 @@ mod tests {
     use codex_core::slop_fork::account_rate_limits::StoredRateLimitSnapshot;
     use codex_core::slop_fork::auth_accounts::StoredAccount;
     use codex_login::token_data::IdTokenInfo;
+    use codex_login::token_data::KnownPlan;
+    use codex_login::token_data::PlanType;
     use codex_login::token_data::TokenData;
     use codex_protocol::protocol::RateLimitSnapshot;
     use codex_protocol::protocol::RateLimitWindow;
     use std::path::PathBuf;
+
+    #[test]
+    fn expired_subscription_summary_is_rendered_first() {
+        let ui = SlopForkUi::default();
+        let now = Utc
+            .with_ymd_and_hms(2026, 3, 19, 9, 0, 0)
+            .single()
+            .expect("valid timestamp");
+        let mut id_token = IdTokenInfo::default();
+        id_token.email = Some("expired@example.com".to_string());
+        id_token.chatgpt_plan_type = Some(PlanType::Known(KnownPlan::Team));
+        let account = StoredAccount {
+            id: "acct-expired".to_string(),
+            path: PathBuf::from("acct-expired.json"),
+            auth: AuthDotJson {
+                auth_mode: Some(AuthMode::Chatgpt),
+                openai_api_key: None,
+                tokens: Some(TokenData {
+                    id_token,
+                    access_token: "access".to_string(),
+                    refresh_token: "refresh".to_string(),
+                    account_id: Some("acct-expired".to_string()),
+                }),
+                last_refresh: None,
+            },
+            modified_at: None,
+        };
+        let snapshot = StoredRateLimitSnapshot {
+            account_id: "acct-expired".to_string(),
+            plan: Some("free".to_string()),
+            workspace_deactivated: false,
+            snapshot: None,
+            five_hour_window: StoredQuotaWindow::default(),
+            weekly_window: StoredQuotaWindow::default(),
+            observed_at: None,
+            primary_next_reset_at: None,
+            secondary_next_reset_at: None,
+            last_refresh_attempt_at: None,
+            last_usage_limit_hit_at: None,
+        };
+
+        assert_eq!(
+            ui.login_account_rate_limit_summary(&account, Some(&snapshot), now),
+            "subscription ran out"
+        );
+    }
 
     #[test]
     fn untouched_window_summary_uses_projected_reset_suffix() {
@@ -1735,6 +2177,7 @@ mod tests {
         let snapshot = StoredRateLimitSnapshot {
             account_id: "acct-1".to_string(),
             plan: Some("pro".to_string()),
+            workspace_deactivated: false,
             snapshot: Some(RateLimitSnapshot {
                 limit_id: None,
                 limit_name: None,
@@ -1812,6 +2255,7 @@ mod tests {
         let snapshot = StoredRateLimitSnapshot {
             account_id: "acct-expired".to_string(),
             plan: Some("team".to_string()),
+            workspace_deactivated: false,
             snapshot: Some(RateLimitSnapshot {
                 limit_id: None,
                 limit_name: None,
@@ -1895,6 +2339,7 @@ mod tests {
         let snapshot = StoredRateLimitSnapshot {
             account_id: "acct-hint".to_string(),
             plan: Some("team".to_string()),
+            workspace_deactivated: false,
             snapshot: None,
             five_hour_window: StoredQuotaWindow {
                 used_percent: None,

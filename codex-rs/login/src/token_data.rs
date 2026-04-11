@@ -171,6 +171,8 @@ struct AuthClaims {
     #[serde(default)]
     chatgpt_plan_type: Option<PlanType>,
     #[serde(default)]
+    chatgpt_subscription_active_until: Option<String>,
+    #[serde(default)]
     chatgpt_user_id: Option<String>,
     #[serde(default)]
     user_id: Option<String>,
@@ -236,6 +238,17 @@ pub fn parse_chatgpt_jwt_claims(jwt: &str) -> Result<IdTokenInfo, IdTokenInfoErr
             chatgpt_account_id: None,
         }),
     }
+}
+
+pub fn parse_chatgpt_subscription_active_until(
+    jwt: &str,
+) -> Result<Option<DateTime<Utc>>, IdTokenInfoError> {
+    let claims: IdClaims = decode_jwt_payload(jwt)?;
+    Ok(claims
+        .auth
+        .and_then(|auth| auth.chatgpt_subscription_active_until)
+        .and_then(|value| DateTime::parse_from_rfc3339(&value).ok())
+        .map(|value| value.with_timezone(&Utc)))
 }
 
 fn deserialize_id_token<'de, D>(deserializer: D) -> Result<IdTokenInfo, D::Error>

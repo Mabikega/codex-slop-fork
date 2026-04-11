@@ -87,6 +87,10 @@ pub fn switch_active_account_on_rate_limit(
         && let Some(active_account) = accounts.iter().find(|account| {
             account.id == active_account_id
                 && account_has_credentials(account)
+                && !auth_accounts::saved_account_subscription_ran_out(
+                    account,
+                    snapshot_map.get(active_account_id),
+                )
                 && !is_blocked(
                     now,
                     account_blocked_until(state, &snapshot_map, active_account_id),
@@ -160,7 +164,12 @@ fn select_next_account(
     let mut api_key_accounts = Vec::new();
 
     for account in accounts {
-        if !account_has_credentials(account) {
+        if !account_has_credentials(account)
+            || auth_accounts::saved_account_subscription_ran_out(
+                account,
+                snapshot_map.get(&account.id),
+            )
+        {
             continue;
         }
 
@@ -428,6 +437,44 @@ mod tests {
         .expect("switched");
 
         assert_eq!(next.id, account_c);
+        Ok(())
+    }
+
+    #[test]
+    fn does_not_switch_to_chatgpt_account_whose_subscription_ran_out() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let now = fixed_now();
+        let active_auth = chatgpt_auth("acct-active", "active@example.com");
+        let expired_auth = chatgpt_auth("acct-expired", "expired@example.com");
+        let active_id = upsert_account(dir.path(), &active_auth)?.expect("active id");
+        let expired_id = upsert_account(dir.path(), &expired_auth)?.expect("expired id");
+        crate::auth::save_auth(dir.path(), &active_auth, AuthCredentialsStoreMode::File)?;
+        record_rate_limit_snapshot(
+            dir.path(),
+            &active_id,
+            Some("pro"),
+            &sample_snapshot(now, /*used_percent*/ 80.0),
+            now,
+        )?;
+        record_rate_limit_snapshot(
+            dir.path(),
+            &expired_id,
+            Some("free"),
+            &sample_snapshot(now, /*used_percent*/ 0.0),
+            now,
+        )?;
+
+        let next = switch_active_account_on_rate_limit(
+            dir.path(),
+            AuthCredentialsStoreMode::File,
+            &mut RateLimitSwitchState::default(),
+            /*allow_api_key_fallback*/ false,
+            /*failed_auth*/ None,
+            /*blocked_until*/ None,
+            now,
+        )?;
+
+        assert_eq!(next, None);
         Ok(())
     }
 

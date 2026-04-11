@@ -153,3 +153,18 @@ fn workspace_account_detection_matches_workspace_plans() {
     };
     assert_eq!(personal.is_workspace_account(), false);
 }
+
+#[test]
+fn subscription_active_until_parses_rfc3339_claim() {
+    let fake_jwt = fake_jwt(serde_json::json!({
+        "https://api.openai.com/auth": {
+            "chatgpt_subscription_active_until": "2026-04-05T23:08:23+00:00"
+        }
+    }));
+
+    let active_until = parse_chatgpt_subscription_active_until(&fake_jwt).expect("should parse");
+    assert_eq!(
+        active_until,
+        Utc.with_ymd_and_hms(2026, 4, 5, 23, 8, 23).single()
+    );
+}

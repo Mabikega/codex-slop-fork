@@ -76,6 +76,11 @@ Use `/accounts` to manage saved accounts.
 `/accounts` covers browser login, device-code login, API-key login, switching, removal, renaming
 misnamed saved-account files, limit inspection, and fork-only settings.
 
+If the latest saved `/usage` snapshot says a saved ChatGPT account is now `free` while its saved
+auth still points at a paid tier, `/accounts` marks it as `subscription ran out`. The switch and
+limits popups surface that state, startup switches away from such an active account when another
+saved account is available, and the delete flow warns that removing the saved auth is irreversible.
+
 `/logout` only clears the active auth. It does not delete saved accounts under `~/.codex/.accounts/`.
 
 ### Automatic account switching

@@ -359,17 +359,16 @@ async fn sandbox_blocks_first_time_dot_codex_creation() {
         "sandbox unexpectedly allowed first-time .codex creation: {status:?}"
     );
     let dot_codex_metadata = tokio::fs::symlink_metadata(&dot_codex).await;
-    if let Ok(metadata) = dot_codex_metadata {
-        assert!(
-            !metadata.is_dir(),
-            "{} should not be creatable as a directory",
-            dot_codex.display()
-        );
-    } else if let Err(err) = &dot_codex_metadata {
+    if let Err(err) = &dot_codex_metadata {
         assert_eq!(
             err.kind(),
             io::ErrorKind::NotFound,
             "unexpected metadata error for {}: {err}",
+            dot_codex.display()
+        );
+    } else {
+        panic!(
+            "{} should not exist after blocked first-time creation",
             dot_codex.display()
         );
     }

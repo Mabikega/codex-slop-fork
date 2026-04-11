@@ -5890,7 +5890,10 @@ async fn manual_interrupt_restores_pending_steers_to_composer() {
     }
     assert!(drain_insert_history(&mut rx).is_empty());
 
-    chat.on_interrupted_turn(TurnAbortReason::Interrupted);
+    chat.finish_interrupted_turn(
+        TurnAbortReason::Interrupted,
+        /*show_default_interrupt_message*/ true,
+    );
 
     assert!(chat.pending_steers.is_empty());
     assert_eq!(chat.bottom_pane.composer_text(), "queued while streaming");
@@ -5949,7 +5952,10 @@ async fn esc_interrupt_sends_all_pending_steers_immediately_and_keeps_existing_d
     chat.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     next_interrupt_op(&mut op_rx);
 
-    chat.on_interrupted_turn(TurnAbortReason::Interrupted);
+    chat.finish_interrupted_turn(
+        TurnAbortReason::Interrupted,
+        /*show_default_interrupt_message*/ true,
+    );
 
     match next_submit_op(&mut op_rx) {
         Op::UserTurn { items, .. } => assert_eq!(
@@ -6041,7 +6047,10 @@ async fn manual_interrupt_restores_pending_steer_mention_bindings_to_composer() 
         other => panic!("expected Op::UserTurn, got {other:?}"),
     }
 
-    chat.on_interrupted_turn(TurnAbortReason::Interrupted);
+    chat.finish_interrupted_turn(
+        TurnAbortReason::Interrupted,
+        /*show_default_interrupt_message*/ true,
+    );
 
     assert_eq!(chat.bottom_pane.composer_text(), "please use $figma");
     assert_eq!(chat.bottom_pane.take_mention_bindings(), mention_bindings);
@@ -6078,7 +6087,10 @@ async fn manual_interrupt_restores_pending_steers_before_queued_messages() {
     }
     assert!(drain_insert_history(&mut rx).is_empty());
 
-    chat.on_interrupted_turn(TurnAbortReason::Interrupted);
+    chat.finish_interrupted_turn(
+        TurnAbortReason::Interrupted,
+        /*show_default_interrupt_message*/ true,
+    );
 
     assert!(chat.pending_steers.is_empty());
     assert!(chat.queued_user_messages.is_empty());
@@ -10565,6 +10577,35 @@ async fn accounts_popup_prompts_to_rename_misnamed_account_files() {
 }
 
 #[tokio::test]
+async fn accounts_popup_mentions_expired_saved_accounts_can_be_deleted() {
+    let dir = tempdir().unwrap();
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.config.cli_auth_credentials_store_mode = codex_core::auth::AuthCredentialsStoreMode::File;
+
+    let auth_dot_json = chatgpt_auth_dot_json("acct-expired-root", "expired-root@example.com");
+    let account_id = codex_core::slop_fork::auth_accounts::upsert_account(
+        &chat.config.codex_home,
+        &auth_dot_json,
+    )
+    .unwrap()
+    .expect("saved account id");
+    codex_core::slop_fork::account_rate_limits::record_workspace_deactivated(
+        &chat.config.codex_home,
+        &account_id,
+        Some("team"),
+        Utc::now(),
+    )
+    .unwrap();
+
+    chat.dispatch_command(SlashCommand::Accounts);
+
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(popup.contains("Delete expired accounts"));
+    assert!(popup.contains("subscription ran out"));
+}
+
+#[tokio::test]
 async fn rename_account_files_popup_snapshot() {
     let dir = tempdir().unwrap();
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
@@ -10703,6 +10744,35 @@ async fn login_account_limits_popup_snapshot() {
     let popup = render_bottom_popup(&chat, /*width*/ 100);
     assert!(popup.contains("until 11:29 on 1 Jan"));
     assert_snapshot!(popup);
+}
+
+#[tokio::test]
+async fn login_account_limits_popup_marks_expired_subscription() {
+    let dir = tempdir().unwrap();
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.config.cli_auth_credentials_store_mode = codex_core::auth::AuthCredentialsStoreMode::File;
+
+    let auth_dot_json = chatgpt_auth_dot_json("acct-expired-limits", "expired-limits@example.com");
+    let account_id = codex_core::slop_fork::auth_accounts::upsert_account(
+        &chat.config.codex_home,
+        &auth_dot_json,
+    )
+    .unwrap()
+    .expect("saved account id");
+    codex_core::slop_fork::account_rate_limits::record_workspace_deactivated(
+        &chat.config.codex_home,
+        &account_id,
+        Some("team"),
+        Utc::now(),
+    )
+    .unwrap();
+
+    chat.open_login_popup(LoginPopupKind::AccountLimits);
+
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(popup.contains("[subscription ran out]"));
+    assert!(popup.contains("subscription ran out"));
 }
 
 #[tokio::test]
@@ -11128,6 +11198,178 @@ async fn login_switch_account_popup_snapshot() {
     let popup = render_bottom_popup(&chat, /*width*/ 100);
     assert!(popup.contains("until 12:45 on 1 Jan"));
     assert_snapshot!(popup);
+}
+
+#[tokio::test]
+async fn login_remove_account_popup_warns_about_irreversible_expired_delete() {
+    let dir = tempdir().unwrap();
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.config.cli_auth_credentials_store_mode = codex_core::auth::AuthCredentialsStoreMode::File;
+
+    let healthy = chatgpt_auth_dot_json("acct-healthy-delete", "healthy-delete@example.com");
+    codex_core::slop_fork::auth_accounts::upsert_account(&chat.config.codex_home, &healthy)
+        .unwrap()
+        .expect("healthy account id");
+
+    let expired = chatgpt_auth_dot_json("acct-expired-delete", "expired-delete@example.com");
+    let expired_id =
+        codex_core::slop_fork::auth_accounts::upsert_account(&chat.config.codex_home, &expired)
+            .unwrap()
+            .expect("expired account id");
+    codex_core::auth::save_auth(
+        &chat.config.codex_home,
+        &expired,
+        chat.config.cli_auth_credentials_store_mode,
+    )
+    .unwrap();
+    codex_core::slop_fork::account_rate_limits::record_workspace_deactivated(
+        &chat.config.codex_home,
+        &expired_id,
+        Some("team"),
+        Utc::now(),
+    )
+    .unwrap();
+
+    chat.open_login_popup(LoginPopupKind::RemoveAccount);
+
+    let popup = render_bottom_popup(&chat, /*width*/ 110);
+    assert!(popup.contains("This cannot be undone."));
+    assert!(popup.contains("subscription ran out"));
+}
+
+#[tokio::test]
+async fn login_delete_expired_accounts_popup_offers_bulk_delete() {
+    let dir = tempdir().unwrap();
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.config.cli_auth_credentials_store_mode = codex_core::auth::AuthCredentialsStoreMode::File;
+
+    for (account_id, email) in [
+        ("acct-expired-bulk-a", "expired-bulk-a@example.com"),
+        ("acct-expired-bulk-b", "expired-bulk-b@example.com"),
+    ] {
+        let auth_dot_json = chatgpt_auth_dot_json(account_id, email);
+        let saved_account_id = codex_core::slop_fork::auth_accounts::upsert_account(
+            &chat.config.codex_home,
+            &auth_dot_json,
+        )
+        .unwrap()
+        .expect("saved account id");
+        codex_core::slop_fork::account_rate_limits::record_workspace_deactivated(
+            &chat.config.codex_home,
+            &saved_account_id,
+            Some("team"),
+            Utc::now(),
+        )
+        .unwrap();
+    }
+
+    chat.open_login_popup(LoginPopupKind::RemoveExpiredAccounts);
+
+    let popup = render_bottom_popup(&chat, /*width*/ 110);
+    assert!(popup.contains("Delete all expired accounts"));
+    assert_snapshot!("login_delete_expired_accounts_popup", popup);
+}
+
+#[tokio::test]
+async fn login_delete_expired_accounts_single_delete_requires_confirmation() {
+    let dir = tempdir().unwrap();
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.config.cli_auth_credentials_store_mode = codex_core::auth::AuthCredentialsStoreMode::File;
+
+    let auth_dot_json =
+        chatgpt_auth_dot_json("acct-expired-confirm", "expired-confirm@example.com");
+    let account_id = codex_core::slop_fork::auth_accounts::upsert_account(
+        &chat.config.codex_home,
+        &auth_dot_json,
+    )
+    .unwrap()
+    .expect("saved account id");
+    codex_core::slop_fork::account_rate_limits::record_workspace_deactivated(
+        &chat.config.codex_home,
+        &account_id,
+        Some("team"),
+        Utc::now(),
+    )
+    .unwrap();
+
+    chat.open_login_popup(LoginPopupKind::RemoveExpiredAccounts);
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+
+    let request = match rx.try_recv() {
+        Ok(AppEvent::SlopFork(SlopForkEvent::ConfirmSavedAccountDeletion { request })) => request,
+        other => panic!("expected deletion confirmation request, got {other:?}"),
+    };
+    assert_eq!(request.account_ids, vec![account_id]);
+    assert_eq!(request.return_kind, LoginPopupKind::RemoveExpiredAccounts);
+
+    chat.handle_slop_fork_event(SlopForkEvent::ConfirmSavedAccountDeletion { request });
+
+    let popup = render_bottom_popup(&chat, /*width*/ 110);
+    assert!(popup.contains("Confirm Delete"));
+    assert!(popup.contains("Yes, delete permanently"));
+    assert!(popup.contains("No, go back"));
+    assert_snapshot!("login_delete_expired_accounts_confirmation_popup", popup);
+}
+
+#[tokio::test]
+async fn login_delete_expired_accounts_bulk_confirm_dispatches_bulk_remove() {
+    let dir = tempdir().unwrap();
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.config.cli_auth_credentials_store_mode = codex_core::auth::AuthCredentialsStoreMode::File;
+
+    let mut expected_ids = Vec::new();
+    for (account_id, email) in [
+        (
+            "acct-expired-bulk-confirm-a",
+            "expired-bulk-confirm-a@example.com",
+        ),
+        (
+            "acct-expired-bulk-confirm-b",
+            "expired-bulk-confirm-b@example.com",
+        ),
+    ] {
+        let auth_dot_json = chatgpt_auth_dot_json(account_id, email);
+        let saved_account_id = codex_core::slop_fork::auth_accounts::upsert_account(
+            &chat.config.codex_home,
+            &auth_dot_json,
+        )
+        .unwrap()
+        .expect("saved account id");
+        codex_core::slop_fork::account_rate_limits::record_workspace_deactivated(
+            &chat.config.codex_home,
+            &saved_account_id,
+            Some("team"),
+            Utc::now(),
+        )
+        .unwrap();
+        expected_ids.push(saved_account_id);
+    }
+
+    chat.open_login_popup(LoginPopupKind::RemoveExpiredAccounts);
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+
+    let request = match rx.try_recv() {
+        Ok(AppEvent::SlopFork(SlopForkEvent::ConfirmSavedAccountDeletion { request })) => request,
+        other => panic!("expected deletion confirmation request, got {other:?}"),
+    };
+    assert_eq!(request.account_ids.len(), 2);
+
+    chat.handle_slop_fork_event(SlopForkEvent::ConfirmSavedAccountDeletion { request });
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+
+    match rx.try_recv() {
+        Ok(AppEvent::SlopFork(SlopForkEvent::RemoveSavedAccounts { account_ids })) => {
+            assert_eq!(account_ids.len(), 2);
+            for expected_id in expected_ids {
+                assert!(account_ids.contains(&expected_id));
+            }
+        }
+        other => panic!("expected bulk remove event, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -11913,6 +12155,279 @@ async fn pilot_turn_completion_queues_follow_up_cycle() {
 
     let follow_up_prompt = next_pilot_op(&mut op_rx);
     assert!(follow_up_prompt.contains("improve benchmark accuracy"));
+}
+
+#[tokio::test]
+async fn pilot_idle_recovers_stale_pre_submission_dispatch_and_requeues_cycle() {
+    let dir = tempdir().unwrap();
+    let thread_id = ThreadId::new();
+    let thread_id_string = thread_id.to_string();
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.thread_id = Some(thread_id);
+
+    let mut runtime =
+        codex_core::slop_fork::pilot::PilotRuntime::load(dir.path(), thread_id_string.as_str())
+            .unwrap();
+    assert!(
+        runtime
+            .start(
+                "improve benchmark accuracy".to_string(),
+                /*deadline_at*/ None,
+                Local::now()
+            )
+            .unwrap()
+    );
+    assert!(
+        runtime
+            .prepare_cycle_submission(Local::now())
+            .unwrap()
+            .is_some()
+    );
+    assert!(runtime.note_submission_dispatched().unwrap());
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    let effects = chat
+        .slop_fork_ui
+        .on_pilot_idle(&chat.slop_fork_context(), /*from_replay*/ false);
+    chat.apply_slop_fork_effects(effects);
+
+    let prompt = next_pilot_op(&mut op_rx);
+    assert!(prompt.contains("improve benchmark accuracy"));
+
+    let state =
+        codex_core::slop_fork::pilot::PilotRuntime::load(dir.path(), thread_id_string.as_str())
+            .unwrap()
+            .state()
+            .cloned()
+            .expect("pilot state after idle recovery");
+    assert_eq!(
+        state.status,
+        codex_core::slop_fork::pilot::PilotStatus::Running
+    );
+    assert_eq!(
+        state.pending_cycle_kind,
+        Some(codex_core::slop_fork::pilot::PilotCycleKind::Continue)
+    );
+    assert!(state.submission_dispatched_at.is_some());
+    assert_eq!(state.active_turn_id, None);
+    assert_eq!(state.last_submitted_turn_id, None);
+}
+
+#[tokio::test]
+async fn interrupted_local_pilot_turn_does_not_show_generic_interrupt_error() {
+    let dir = tempdir().unwrap();
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.thread_id = Some(ThreadId::new());
+
+    chat.dispatch_command_with_args(
+        InlineCommand::Pilot,
+        "start improve benchmark accuracy".to_string(),
+        Vec::new(),
+    );
+    drain_insert_history(&mut rx);
+    let _ = next_pilot_op(&mut op_rx);
+
+    chat.handle_codex_event(Event {
+        id: "turn-pilot-1".into(),
+        msg: EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "turn-pilot-1".to_string(),
+            model_context_window: None,
+            collaboration_mode_kind: ModeKind::Default,
+        }),
+    });
+    chat.handle_codex_event(Event {
+        id: "turn-pilot-1".into(),
+        msg: EventMsg::TurnAborted(codex_protocol::protocol::TurnAbortedEvent {
+            turn_id: Some("turn-pilot-1".to_string()),
+            reason: TurnAbortReason::Interrupted,
+        }),
+    });
+
+    let combined = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !combined.contains("Conversation interrupted - tell the model what to do differently."),
+        "unexpected generic interrupt message: {combined:?}"
+    );
+    assert!(
+        combined.contains("Pilot paused because the active turn was aborted."),
+        "expected pilot pause message, got {combined:?}"
+    );
+}
+
+#[tokio::test]
+async fn interrupted_local_active_pilot_turn_without_id_does_not_show_generic_interrupt_error() {
+    let dir = tempdir().unwrap();
+    let thread_id = ThreadId::new();
+    let thread_id_string = thread_id.to_string();
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.thread_id = Some(thread_id);
+
+    chat.dispatch_command_with_args(
+        InlineCommand::Pilot,
+        "start improve benchmark accuracy".to_string(),
+        Vec::new(),
+    );
+    drain_insert_history(&mut rx);
+    let _ = next_pilot_op(&mut op_rx);
+
+    chat.handle_codex_event(Event {
+        id: "turn-pilot-1".into(),
+        msg: EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "turn-pilot-1".to_string(),
+            model_context_window: None,
+            collaboration_mode_kind: ModeKind::Default,
+        }),
+    });
+    chat.handle_codex_event(Event {
+        id: "turn-pilot-1".into(),
+        msg: EventMsg::TurnAborted(codex_protocol::protocol::TurnAbortedEvent {
+            turn_id: None,
+            reason: TurnAbortReason::Interrupted,
+        }),
+    });
+
+    let combined = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !combined.contains("Conversation interrupted - tell the model what to do differently."),
+        "unexpected generic interrupt message: {combined:?}"
+    );
+    assert!(
+        combined.contains("Pilot paused because the active turn was aborted."),
+        "expected pilot pause message, got {combined:?}"
+    );
+
+    let state =
+        codex_core::slop_fork::pilot::PilotRuntime::load(dir.path(), thread_id_string.as_str())
+            .unwrap()
+            .state()
+            .cloned()
+            .expect("pilot state after active turn interrupt");
+    assert_eq!(
+        state.status,
+        codex_core::slop_fork::pilot::PilotStatus::Paused
+    );
+    assert_eq!(state.pending_cycle_kind, None);
+    assert_eq!(state.active_turn_id, None);
+    assert_eq!(state.last_submitted_turn_id, None);
+}
+
+#[tokio::test]
+async fn interrupted_local_pending_pilot_turn_does_not_show_generic_interrupt_error() {
+    let dir = tempdir().unwrap();
+    let thread_id = ThreadId::new();
+    let thread_id_string = thread_id.to_string();
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.thread_id = Some(thread_id);
+
+    chat.dispatch_command_with_args(
+        InlineCommand::Pilot,
+        "start improve benchmark accuracy".to_string(),
+        Vec::new(),
+    );
+    drain_insert_history(&mut rx);
+    let _ = next_pilot_op(&mut op_rx);
+
+    chat.handle_codex_event(Event {
+        id: "turn-pilot-1".into(),
+        msg: EventMsg::TurnAborted(codex_protocol::protocol::TurnAbortedEvent {
+            turn_id: Some("turn-pilot-1".to_string()),
+            reason: TurnAbortReason::Interrupted,
+        }),
+    });
+
+    let combined = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !combined.contains("Conversation interrupted - tell the model what to do differently."),
+        "unexpected generic interrupt message: {combined:?}"
+    );
+    assert!(
+        combined.contains("Pilot paused because the active turn was aborted."),
+        "expected pilot pause message, got {combined:?}"
+    );
+
+    let state =
+        codex_core::slop_fork::pilot::PilotRuntime::load(dir.path(), thread_id_string.as_str())
+            .unwrap()
+            .state()
+            .cloned()
+            .expect("pilot state after pending turn interrupt");
+    assert_eq!(
+        state.status,
+        codex_core::slop_fork::pilot::PilotStatus::Paused
+    );
+    assert_eq!(state.pending_cycle_kind, None);
+    assert_eq!(state.active_turn_id, None);
+    assert_eq!(state.last_submitted_turn_id, None);
+}
+
+#[tokio::test]
+async fn interrupted_local_pending_pilot_turn_without_id_does_not_show_generic_interrupt_error() {
+    let dir = tempdir().unwrap();
+    let thread_id = ThreadId::new();
+    let thread_id_string = thread_id.to_string();
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.thread_id = Some(thread_id);
+
+    chat.dispatch_command_with_args(
+        InlineCommand::Pilot,
+        "start improve benchmark accuracy".to_string(),
+        Vec::new(),
+    );
+    drain_insert_history(&mut rx);
+    let _ = next_pilot_op(&mut op_rx);
+
+    chat.handle_codex_event(Event {
+        id: "turn-pilot-1".into(),
+        msg: EventMsg::TurnAborted(codex_protocol::protocol::TurnAbortedEvent {
+            turn_id: None,
+            reason: TurnAbortReason::Interrupted,
+        }),
+    });
+
+    let combined = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !combined.contains("Conversation interrupted - tell the model what to do differently."),
+        "unexpected generic interrupt message: {combined:?}"
+    );
+    assert!(
+        combined.contains("Pilot paused because the active turn was aborted."),
+        "expected pilot pause message, got {combined:?}"
+    );
+
+    let state =
+        codex_core::slop_fork::pilot::PilotRuntime::load(dir.path(), thread_id_string.as_str())
+            .unwrap()
+            .state()
+            .cloned()
+            .expect("pilot state after pending turn interrupt");
+    assert_eq!(
+        state.status,
+        codex_core::slop_fork::pilot::PilotStatus::Paused
+    );
+    assert_eq!(state.pending_cycle_kind, None);
+    assert_eq!(state.active_turn_id, None);
+    assert_eq!(state.last_submitted_turn_id, None);
 }
 
 #[tokio::test]
@@ -13467,6 +13982,111 @@ async fn app_server_turn_interrupted_pauses_pilot_cycle() {
 }
 
 #[tokio::test]
+async fn app_server_pilot_interrupt_hides_generic_interrupt_message_from_cached_update() {
+    let dir = tempdir().unwrap();
+    let thread_id = ThreadId::new();
+    let thread_id_text = thread_id.to_string();
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.codex_home = dir.path().to_path_buf();
+    chat.thread_id = Some(thread_id);
+
+    chat.handle_server_notification(
+        ServerNotification::PilotUpdated(PilotUpdatedNotification {
+            thread_id: thread_id_text.clone(),
+            update_type: PilotUpdateType::Queued,
+            run: Some(AppServerPilotRun {
+                goal: "review benchmark regressions".to_string(),
+                status: AppServerPilotStatus::Running,
+                started_at: 10,
+                deadline_at: None,
+                updated_at: 11,
+                iteration_count: 0,
+                pending_cycle_kind: Some(AppServerPilotCycleKind::Continue),
+                active_cycle_kind: None,
+                active_turn_id: None,
+                last_submitted_turn_id: Some("turn-pilot-1".to_string()),
+                wrap_up_requested: false,
+                wrap_up_requested_at: None,
+                stop_requested_at: None,
+                last_error: None,
+                status_message: Some(
+                    "Pilot submitted a cycle and is waiting for it to start.".to_string(),
+                ),
+                last_progress_at: Some(11),
+                last_cycle_completed_at: None,
+                last_cycle_summary: None,
+                last_cycle_kind: None,
+                last_agent_message: None,
+            }),
+            message: Some("Pilot submitted a cycle and is waiting for it to start.".to_string()),
+        }),
+        /*replay_kind*/ None,
+    );
+    chat.handle_server_notification(
+        ServerNotification::TurnCompleted(TurnCompletedNotification {
+            thread_id: thread_id_text.clone(),
+            turn: AppServerTurn {
+                id: "turn-pilot-1".to_string(),
+                items: Vec::new(),
+                status: AppServerTurnStatus::Interrupted,
+                error: None,
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+    chat.handle_server_notification(
+        ServerNotification::PilotUpdated(PilotUpdatedNotification {
+            thread_id: thread_id_text,
+            update_type: PilotUpdateType::Paused,
+            run: Some(AppServerPilotRun {
+                goal: "review benchmark regressions".to_string(),
+                status: AppServerPilotStatus::Paused,
+                started_at: 10,
+                deadline_at: None,
+                updated_at: 12,
+                iteration_count: 0,
+                pending_cycle_kind: None,
+                active_cycle_kind: None,
+                active_turn_id: None,
+                last_submitted_turn_id: None,
+                wrap_up_requested: false,
+                wrap_up_requested_at: None,
+                stop_requested_at: None,
+                last_error: Some("Pilot paused because the active turn was aborted.".to_string()),
+                status_message: Some(
+                    "Pilot paused because the active turn was aborted.".to_string(),
+                ),
+                last_progress_at: Some(11),
+                last_cycle_completed_at: None,
+                last_cycle_summary: None,
+                last_cycle_kind: None,
+                last_agent_message: None,
+            }),
+            message: Some("Pilot paused because the active turn was aborted.".to_string()),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let combined = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !combined.contains("Conversation interrupted - tell the model what to do differently."),
+        "unexpected generic interrupt message: {combined:?}"
+    );
+    assert!(
+        combined.contains("Pilot submitted a cycle and is waiting for it to start."),
+        "expected pending pilot message, got {combined:?}"
+    );
+    assert!(
+        combined.contains("Pilot paused because the active turn was aborted."),
+        "expected pilot pause message, got {combined:?}"
+    );
+}
+
+#[tokio::test]
 async fn app_server_turn_failed_pauses_pilot_cycle() {
     let dir = tempdir().unwrap();
     let thread_id = ThreadId::new();
@@ -13911,7 +14531,11 @@ async fn pilot_rpc_failure_rolls_back_dispatched_submission_state() {
         PilotRuntime::load(codex_home.path(), thread_id_string.as_str()).expect("load pilot");
     assert!(
         runtime
-            .start("ship the benchmark fix".to_string(), None, Local::now())
+            .start(
+                "ship the benchmark fix".to_string(),
+                /*deadline_at*/ None,
+                Local::now(),
+            )
             .unwrap()
     );
     assert!(
@@ -13955,8 +14579,8 @@ async fn app_server_pilot_updated_refreshes_runtime_state() {
         runtime
             .start(
                 "stabilize app-server pilot sync".to_string(),
-                None,
-                Local::now()
+                /*deadline_at*/ None,
+                Local::now(),
             )
             .unwrap()
     );
@@ -14369,13 +14993,16 @@ async fn stale_remote_autoresearch_bootstrap_loaded_event_is_ignored() {
     chat.apply_slop_fork_effects(effects);
 
     let mut app_server_state = SlopForkAppServerState::default();
-    app_server_state.seed_pending_remote_autoresearch_bootstrap(thread_id_text.clone(), 3);
+    app_server_state.seed_pending_remote_autoresearch_bootstrap(
+        thread_id_text.clone(),
+        /*request_nonce*/ 3,
+    );
     assert!(chat.slop_fork_ui.cached_remote_autoresearch_run().is_none());
     assert!(!chat.slop_fork_ui.remote_autoresearch_state_loaded());
 
     let handled = app_server_state.handle_app_event(
         &mut chat,
-        None,
+        /*app_server*/ None,
         &sender,
         SlopForkEvent::RemoteAutoresearchStateLoaded {
             thread_id: thread_id_text,
@@ -14594,10 +15221,13 @@ async fn late_remote_autoresearch_bootstrap_does_not_override_live_update() {
     );
 
     let mut app_server_state = SlopForkAppServerState::default();
-    app_server_state.seed_pending_remote_autoresearch_bootstrap(thread_id_text.clone(), 4);
+    app_server_state.seed_pending_remote_autoresearch_bootstrap(
+        thread_id_text.clone(),
+        /*request_nonce*/ 4,
+    );
     let handled = app_server_state.handle_app_event(
         &mut chat,
-        None,
+        /*app_server*/ None,
         &sender,
         SlopForkEvent::RemoteAutoresearchStateLoaded {
             thread_id: thread_id_text,
@@ -14759,7 +15389,7 @@ async fn stale_empty_remote_autoresearch_readback_is_ignored_after_newer_live_up
         /*replay_kind*/ None,
     );
 
-    assert!(!chat.on_remote_autoresearch_state_loaded(None));
+    assert!(!chat.on_remote_autoresearch_state_loaded(/*run*/ None));
 
     let cached_run = chat
         .slop_fork_ui
@@ -14784,10 +15414,13 @@ async fn remote_autoresearch_load_error_reports_unavailable_status() {
     chat.apply_slop_fork_effects(effects);
 
     let mut app_server_state = SlopForkAppServerState::default();
-    app_server_state.seed_pending_remote_autoresearch_bootstrap(thread_id_text.clone(), 9);
+    app_server_state.seed_pending_remote_autoresearch_bootstrap(
+        thread_id_text.clone(),
+        /*request_nonce*/ 9,
+    );
     let handled = app_server_state.handle_app_event(
         &mut chat,
-        None,
+        /*app_server*/ None,
         &sender,
         SlopForkEvent::RemoteAutoresearchStateLoaded {
             thread_id: thread_id_text,
@@ -14827,10 +15460,13 @@ async fn remote_autoresearch_action_failure_reports_unavailable_status() {
     chat.arm_remote_autoresearch_state_reload();
 
     let mut app_server_state = SlopForkAppServerState::default();
-    app_server_state.seed_pending_remote_autoresearch_bootstrap(thread_id_text.clone(), 12);
+    app_server_state.seed_pending_remote_autoresearch_bootstrap(
+        thread_id_text.clone(),
+        /*request_nonce*/ 12,
+    );
     let handled = app_server_state.handle_app_event(
         &mut chat,
-        None,
+        /*app_server*/ None,
         &sender,
         SlopForkEvent::RemoteAutoresearchStateLoaded {
             thread_id: thread_id_text,
@@ -15083,6 +15719,123 @@ async fn ordinary_remote_turn_start_does_not_claim_pilot_cache() {
 }
 
 #[tokio::test]
+async fn remote_pilot_interrupt_hides_generic_interrupt_message_while_cycle_is_pending() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    let thread_id_text = thread_id.to_string();
+    chat.thread_id = Some(thread_id);
+    chat.is_remote_app_server = true;
+
+    chat.handle_server_notification(
+        ServerNotification::PilotUpdated(PilotUpdatedNotification {
+            thread_id: thread_id_text.clone(),
+            update_type: PilotUpdateType::Queued,
+            run: Some(AppServerPilotRun {
+                goal: "remote pilot goal".to_string(),
+                status: AppServerPilotStatus::Running,
+                started_at: 10,
+                deadline_at: None,
+                updated_at: 11,
+                iteration_count: 0,
+                pending_cycle_kind: Some(AppServerPilotCycleKind::Continue),
+                active_cycle_kind: None,
+                active_turn_id: None,
+                last_submitted_turn_id: Some("turn-pilot-1".to_string()),
+                wrap_up_requested: false,
+                wrap_up_requested_at: None,
+                stop_requested_at: None,
+                last_error: None,
+                status_message: Some(
+                    "Pilot submitted a cycle and is waiting for it to start.".to_string(),
+                ),
+                last_progress_at: Some(11),
+                last_cycle_completed_at: None,
+                last_cycle_summary: None,
+                last_cycle_kind: None,
+                last_agent_message: None,
+            }),
+            message: Some("Pilot submitted a cycle and is waiting for it to start.".to_string()),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    chat.handle_server_notification(
+        ServerNotification::TurnStarted(TurnStartedNotification {
+            thread_id: thread_id_text.clone(),
+            turn: AppServerTurn {
+                id: "turn-pilot-1".to_string(),
+                items: Vec::new(),
+                status: AppServerTurnStatus::InProgress,
+                error: None,
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+    chat.handle_server_notification(
+        ServerNotification::TurnCompleted(TurnCompletedNotification {
+            thread_id: thread_id_text.clone(),
+            turn: AppServerTurn {
+                id: "turn-pilot-1".to_string(),
+                items: Vec::new(),
+                status: AppServerTurnStatus::Interrupted,
+                error: None,
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+    chat.handle_server_notification(
+        ServerNotification::PilotUpdated(PilotUpdatedNotification {
+            thread_id: thread_id_text,
+            update_type: PilotUpdateType::Paused,
+            run: Some(AppServerPilotRun {
+                goal: "remote pilot goal".to_string(),
+                status: AppServerPilotStatus::Paused,
+                started_at: 10,
+                deadline_at: None,
+                updated_at: 12,
+                iteration_count: 0,
+                pending_cycle_kind: None,
+                active_cycle_kind: None,
+                active_turn_id: None,
+                last_submitted_turn_id: None,
+                wrap_up_requested: false,
+                wrap_up_requested_at: None,
+                stop_requested_at: None,
+                last_error: Some("Pilot paused because the active turn was aborted.".to_string()),
+                status_message: Some(
+                    "Pilot paused because the active turn was aborted.".to_string(),
+                ),
+                last_progress_at: Some(11),
+                last_cycle_completed_at: None,
+                last_cycle_summary: None,
+                last_cycle_kind: None,
+                last_agent_message: None,
+            }),
+            message: Some("Pilot paused because the active turn was aborted.".to_string()),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let combined = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !combined.contains("Conversation interrupted - tell the model what to do differently."),
+        "unexpected generic interrupt message: {combined:?}"
+    );
+    assert!(
+        combined.contains("Pilot submitted a cycle and is waiting for it to start."),
+        "expected pending pilot message, got {combined:?}"
+    );
+    assert!(
+        combined.contains("Pilot paused because the active turn was aborted."),
+        "expected pilot pause message, got {combined:?}"
+    );
+}
+
+#[tokio::test]
 async fn remote_pilot_status_reports_idle_after_empty_bootstrap() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let thread_id = ThreadId::new();
@@ -15093,7 +15846,7 @@ async fn remote_pilot_status_reports_idle_after_empty_bootstrap() {
         .slop_fork_ui
         .on_session_configured(&chat.slop_fork_context());
     chat.apply_slop_fork_effects(effects);
-    assert!(chat.on_remote_pilot_state_loaded(None));
+    assert!(chat.on_remote_pilot_state_loaded(/*run*/ None));
 
     assert!(chat.slop_fork_ui.remote_pilot_state_loaded());
     chat.dispatch_command_with_args(InlineCommand::Pilot, "status".to_string(), Vec::new());
@@ -15119,13 +15872,14 @@ async fn stale_remote_pilot_bootstrap_loaded_event_is_ignored() {
     chat.apply_slop_fork_effects(effects);
 
     let mut app_server_state = SlopForkAppServerState::default();
-    app_server_state.seed_pending_remote_pilot_bootstrap(thread_id_text.clone(), 2);
+    app_server_state
+        .seed_pending_remote_pilot_bootstrap(thread_id_text.clone(), /*request_nonce*/ 2);
     assert!(chat.slop_fork_ui.cached_remote_pilot_run().is_none());
     assert!(!chat.slop_fork_ui.remote_pilot_state_loaded());
 
     let handled = app_server_state.handle_app_event(
         &mut chat,
-        None,
+        /*app_server*/ None,
         &sender,
         SlopForkEvent::RemotePilotStateLoaded {
             thread_id: thread_id_text,
@@ -15207,10 +15961,11 @@ async fn late_remote_pilot_bootstrap_does_not_override_live_update() {
     );
 
     let mut app_server_state = SlopForkAppServerState::default();
-    app_server_state.seed_pending_remote_pilot_bootstrap(thread_id_text.clone(), 5);
+    app_server_state
+        .seed_pending_remote_pilot_bootstrap(thread_id_text.clone(), /*request_nonce*/ 5);
     let handled = app_server_state.handle_app_event(
         &mut chat,
-        None,
+        /*app_server*/ None,
         &sender,
         SlopForkEvent::RemotePilotStateLoaded {
             thread_id: thread_id_text,
@@ -15508,7 +16263,7 @@ async fn stale_empty_remote_pilot_readback_is_ignored_after_newer_live_update() 
         /*replay_kind*/ None,
     );
 
-    assert!(!chat.on_remote_pilot_state_loaded(None));
+    assert!(!chat.on_remote_pilot_state_loaded(/*run*/ None));
 
     let cached_run = chat
         .slop_fork_ui
@@ -15533,10 +16288,11 @@ async fn remote_pilot_load_error_reports_unavailable_status() {
     chat.apply_slop_fork_effects(effects);
 
     let mut app_server_state = SlopForkAppServerState::default();
-    app_server_state.seed_pending_remote_pilot_bootstrap(thread_id_text.clone(), 10);
+    app_server_state
+        .seed_pending_remote_pilot_bootstrap(thread_id_text.clone(), /*request_nonce*/ 10);
     let handled = app_server_state.handle_app_event(
         &mut chat,
-        None,
+        /*app_server*/ None,
         &sender,
         SlopForkEvent::RemotePilotStateLoaded {
             thread_id: thread_id_text,
@@ -15572,10 +16328,11 @@ async fn remote_pilot_action_failure_reports_unavailable_status() {
     chat.arm_remote_pilot_state_reload();
 
     let mut app_server_state = SlopForkAppServerState::default();
-    app_server_state.seed_pending_remote_pilot_bootstrap(thread_id_text.clone(), 13);
+    app_server_state
+        .seed_pending_remote_pilot_bootstrap(thread_id_text.clone(), /*request_nonce*/ 13);
     let handled = app_server_state.handle_app_event(
         &mut chat,
-        None,
+        /*app_server*/ None,
         &sender,
         SlopForkEvent::RemotePilotStateLoaded {
             thread_id: thread_id_text,
@@ -15782,11 +16539,12 @@ async fn remote_automation_state_loaded_event_replaces_partial_prebootstrap_cach
     assert_eq!(chat.slop_fork_ui.cached_remote_automations().len(), 1);
 
     let mut app_server_state = SlopForkAppServerState::default();
-    app_server_state.seed_pending_remote_automation_bootstrap(thread_id_text.clone(), 7);
+    app_server_state
+        .seed_pending_remote_automation_bootstrap(thread_id_text.clone(), /*request_nonce*/ 7);
 
     let handled = app_server_state.handle_app_event(
         &mut chat,
-        None,
+        /*app_server*/ None,
         &sender,
         SlopForkEvent::RemoteAutomationStateLoaded {
             thread_id: thread_id_text,
@@ -15835,10 +16593,11 @@ async fn remote_automation_bootstrap_does_not_overwrite_fresher_live_update() {
     drain_insert_history(&mut rx);
 
     let mut app_server_state = SlopForkAppServerState::default();
-    app_server_state.seed_pending_remote_automation_bootstrap(thread_id_text.clone(), 8);
+    app_server_state
+        .seed_pending_remote_automation_bootstrap(thread_id_text.clone(), /*request_nonce*/ 8);
     let handled = app_server_state.handle_app_event(
         &mut chat,
-        None,
+        /*app_server*/ None,
         &sender,
         SlopForkEvent::RemoteAutomationStateLoaded {
             thread_id: thread_id_text,
@@ -15900,10 +16659,11 @@ async fn remote_automation_bootstrap_does_not_reintroduce_live_deleted_runtime()
     assert!(chat.slop_fork_ui.cached_remote_automations().is_empty());
 
     let mut app_server_state = SlopForkAppServerState::default();
-    app_server_state.seed_pending_remote_automation_bootstrap(thread_id_text.clone(), 9);
+    app_server_state
+        .seed_pending_remote_automation_bootstrap(thread_id_text.clone(), /*request_nonce*/ 9);
     let handled = app_server_state.handle_app_event(
         &mut chat,
-        None,
+        /*app_server*/ None,
         &sender,
         SlopForkEvent::RemoteAutomationStateLoaded {
             thread_id: thread_id_text,

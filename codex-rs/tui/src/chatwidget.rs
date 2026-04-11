@@ -3142,7 +3142,11 @@ impl ChatWidget {
     /// Handle a turn aborted due to user interrupt (Esc).
     /// When there are queued user messages, restore them into the composer
     /// separated by newlines rather than auto‑submitting the next one.
-    fn on_interrupted_turn(&mut self, reason: TurnAbortReason) {
+    fn finish_interrupted_turn(
+        &mut self,
+        reason: TurnAbortReason,
+        show_default_interrupt_message: bool,
+    ) {
         // Finalize, log a gentle prompt, and clear running state.
         self.finalize_turn();
         let send_pending_steers_immediately = self.submit_pending_steers_after_interrupt;
@@ -3153,7 +3157,7 @@ impl ChatWidget {
                     "Model interrupted to submit steer instructions.".to_owned(),
                     /*hint*/ None,
                 ));
-            } else {
+            } else if show_default_interrupt_message {
                 self.add_to_history(history_cell::new_error_event(
                     "Conversation interrupted - tell the model what to do differently. Something went wrong? Hit `/feedback` to report the issue.".to_owned(),
                 ));
@@ -3179,6 +3183,16 @@ impl ChatWidget {
         self.refresh_pending_input_preview();
 
         self.request_redraw();
+    }
+
+    fn interrupted_turn_is_controller_owned(&mut self, turn_id: Option<&str>) -> bool {
+        let slop_fork_context = self.slop_fork_context();
+        self.slop_fork_ui
+            .pilot_owns_turn_abort(&slop_fork_context, turn_id)
+            || turn_id.is_some_and(|turn_id| {
+                self.slop_fork_ui
+                    .autoresearch_has_active_turn(&slop_fork_context, turn_id)
+            })
     }
 
     /// Merge pending steers, queued drafts, and the current composer state into a single message.
@@ -4222,6 +4236,7 @@ impl ChatWidget {
     pub(crate) fn pre_draw_tick(&mut self) {
         self.bottom_pane.pre_draw_tick();
         self.poll_timer_automations();
+        self.poll_pilot_autonomy();
         self.schedule_slop_fork_frames();
         if self.should_animate_terminal_title_spinner() {
             self.refresh_terminal_title();
@@ -6106,6 +6121,19 @@ impl ChatWidget {
         self.apply_slop_fork_effects(effects);
     }
 
+    fn poll_pilot_autonomy(&mut self) {
+        if self.bottom_pane.is_task_running()
+            || !self.queued_user_messages.is_empty()
+            || !self.pending_steers.is_empty()
+        {
+            return;
+        }
+        let effects = self
+            .slop_fork_ui
+            .on_pilot_idle(&self.slop_fork_context(), /*from_replay*/ false);
+        self.apply_slop_fork_effects(effects);
+    }
+
     fn schedule_slop_fork_frames(&mut self) {
         if !self.timer_automations_can_autosend() {
             return;
@@ -6113,6 +6141,14 @@ impl ChatWidget {
         for effect in self
             .slop_fork_ui
             .automation_frame_effects(&self.slop_fork_context(), Local::now())
+        {
+            if let SlopForkUiEffect::ScheduleFrameIn(delay) = effect {
+                self.frame_requester.schedule_frame_in(delay);
+            }
+        }
+        for effect in self
+            .slop_fork_ui
+            .pilot_frame_effects(&self.slop_fork_context(), Local::now())
         {
             if let SlopForkUiEffect::ScheduleFrameIn(delay) = effect {
                 self.frame_requester.schedule_frame_in(delay);
@@ -7219,7 +7255,12 @@ impl ChatWidget {
             }
             TurnStatus::Interrupted => {
                 self.last_non_retry_error = None;
-                self.on_interrupted_turn(TurnAbortReason::Interrupted);
+                let show_default_interrupt_message =
+                    !self.interrupted_turn_is_controller_owned(Some(notification.turn.id.as_str()));
+                self.finish_interrupted_turn(
+                    TurnAbortReason::Interrupted,
+                    /*show_default_interrupt_message*/ show_default_interrupt_message,
+                );
                 self.apply_slop_fork_runtime_event(runtime_event_interrupted_controller_turn(
                     Some(notification.turn.id.as_str()),
                     replay_kind.is_some(),
@@ -7536,7 +7577,12 @@ impl ChatWidget {
             EventMsg::McpStartupComplete(ev) => self.on_mcp_startup_complete(ev),
             EventMsg::TurnAborted(ev) => match ev.reason {
                 TurnAbortReason::Interrupted => {
-                    self.on_interrupted_turn(ev.reason);
+                    let show_default_interrupt_message =
+                        !self.interrupted_turn_is_controller_owned(ev.turn_id.as_deref());
+                    self.finish_interrupted_turn(
+                        ev.reason,
+                        /*show_default_interrupt_message*/ show_default_interrupt_message,
+                    );
                     self.apply_slop_fork_runtime_event(runtime_event_from_turn_abort_reason(
                         ev.turn_id.as_deref(),
                         TurnAbortReason::Interrupted,
@@ -7555,7 +7601,9 @@ impl ChatWidget {
                     ));
                 }
                 TurnAbortReason::ReviewEnded => {
-                    self.on_interrupted_turn(ev.reason);
+                    self.finish_interrupted_turn(
+                        ev.reason, /*show_default_interrupt_message*/ true,
+                    );
                     self.apply_slop_fork_runtime_event(runtime_event_from_turn_abort_reason(
                         ev.turn_id.as_deref(),
                         TurnAbortReason::ReviewEnded,

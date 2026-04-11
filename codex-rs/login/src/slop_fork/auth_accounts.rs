@@ -13,6 +13,8 @@ use crate::auth::AuthDotJson;
 use crate::auth::CodexAuth;
 use crate::auth::load_auth_dot_json;
 use crate::path_utils::write_atomically;
+use crate::token_data::parse_chatgpt_jwt_claims;
+use crate::token_data::parse_chatgpt_subscription_active_until;
 
 use super::config::SlopForkConfig;
 use super::config::maybe_load_slop_fork_config;
@@ -234,6 +236,46 @@ pub fn current_active_account_id(
     Ok(stored_account_id(&auth))
 }
 
+pub fn account_has_credentials(account: &StoredAccount) -> bool {
+    match account.auth.resolved_mode() {
+        AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => account.auth.tokens.is_some(),
+        AuthMode::ApiKey => account.auth.openai_api_key.is_some(),
+    }
+}
+
+pub fn saved_account_subscription_ran_out_from_plan(
+    account: &StoredAccount,
+    current_plan: Option<&str>,
+    workspace_deactivated: bool,
+    observed_at: Option<DateTime<Utc>>,
+    has_live_snapshot: bool,
+) -> bool {
+    if !account.auth.is_chatgpt_mode() {
+        return false;
+    }
+
+    if workspace_deactivated {
+        return true;
+    }
+    if auth_chatgpt_subscription_active_until_indicates_expired(
+        &account.auth,
+        observed_at,
+        has_live_snapshot,
+        Utc::now(),
+    ) {
+        return true;
+    }
+
+    let Some(snapshot_plan) = current_plan.map(normalized_chatgpt_plan) else {
+        return false;
+    };
+    if snapshot_plan != "free" {
+        return false;
+    }
+
+    auth_chatgpt_plan_type_raw(&account.auth).is_some_and(|saved_plan| saved_plan != "free")
+}
+
 pub fn ensure_current_active_account_saved(
     codex_home: &Path,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
@@ -309,6 +351,47 @@ fn load_current_active_auth(
         return Ok(None);
     }
     load_auth_dot_json(codex_home, auth_credentials_store_mode)
+}
+
+fn auth_chatgpt_plan_type_raw(auth: &AuthDotJson) -> Option<String> {
+    auth.tokens
+        .as_ref()
+        .and_then(|tokens| {
+            tokens.id_token.get_chatgpt_plan_type_raw().or_else(|| {
+                parse_chatgpt_jwt_claims(&tokens.id_token.raw_jwt)
+                    .ok()
+                    .and_then(|claims| claims.get_chatgpt_plan_type_raw())
+            })
+        })
+        .map(normalized_chatgpt_plan)
+}
+
+fn auth_chatgpt_subscription_active_until(auth: &AuthDotJson) -> Option<DateTime<Utc>> {
+    auth.tokens.as_ref().and_then(|tokens| {
+        parse_chatgpt_subscription_active_until(&tokens.id_token.raw_jwt)
+            .ok()
+            .flatten()
+    })
+}
+
+fn auth_chatgpt_subscription_active_until_indicates_expired(
+    auth: &AuthDotJson,
+    observed_at: Option<DateTime<Utc>>,
+    has_live_snapshot: bool,
+    now: DateTime<Utc>,
+) -> bool {
+    let Some(active_until) = auth_chatgpt_subscription_active_until(auth) else {
+        return false;
+    };
+    if now <= active_until {
+        return false;
+    }
+
+    !(has_live_snapshot && observed_at.is_some_and(|observed_at| observed_at > active_until))
+}
+
+fn normalized_chatgpt_plan(plan: impl AsRef<str>) -> String {
+    plan.as_ref().trim().to_ascii_lowercase()
 }
 
 fn scan_account_files(codex_home: &Path) -> std::io::Result<Vec<ParsedAccountFile>> {

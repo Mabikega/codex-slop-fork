@@ -94,6 +94,7 @@ use super::auto_command::parse_auto_command;
 use super::event::LoginFlowKind;
 use super::event::LoginPopupKind;
 use super::event::LoginSettingsState;
+use super::event::SavedAccountDeletionRequest;
 use super::event::SlopForkEvent;
 use super::login_settings_view::LoginSettingsView;
 use super::runtime_event::fallback_autoresearch_status_message;
@@ -301,6 +302,7 @@ pub(crate) struct SlopForkUi {
     last_manual_user_message: Option<String>,
     pending_chatgpt_login: Option<PendingChatgptLogin>,
     active_login_popup_kind: Option<LoginPopupKind>,
+    pending_saved_account_deletion: Option<SavedAccountDeletionRequest>,
     saved_account_rate_limits_refresh: Option<SavedAccountRateLimitsRefreshState>,
     pending_automation_policies: HashSet<(String, String)>,
     auto_command_skill_conflict_warned: bool,
@@ -539,8 +541,8 @@ impl SlopForkUi {
         message: Option<String>,
         from_replay: bool,
     ) -> Vec<SlopForkUiEffect> {
+        self.remote_pilot_run = run.clone();
         if ctx.remote_app_server {
-            self.remote_pilot_run = run.clone();
             self.pilot_runtime = None;
             if !from_replay && !self.remote_pilot_readback_pending {
                 self.remote_pilot_bootstrap_pending = false;
@@ -665,12 +667,18 @@ impl SlopForkUi {
             SlopForkEvent::ActivateSavedAccount { account_id } => {
                 self.activate_saved_account(ctx, &account_id)
             }
+            SlopForkEvent::ConfirmSavedAccountDeletion { request } => {
+                self.confirm_saved_account_deletion(ctx, request)
+            }
             SlopForkEvent::RenameAllSavedAccountFiles => self.rename_all_saved_account_files(ctx),
             SlopForkEvent::RenameSavedAccountFile { path } => {
                 self.rename_saved_account_file(ctx, &path)
             }
             SlopForkEvent::RemoveSavedAccount { account_id } => {
                 self.remove_saved_account(ctx, &account_id)
+            }
+            SlopForkEvent::RemoveSavedAccounts { account_ids } => {
+                self.remove_saved_accounts(ctx, &account_ids)
             }
             SlopForkEvent::AutomationPolicyEvaluated {
                 thread_id,

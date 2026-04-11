@@ -1,0 +1,15 @@
+---
+source: tui/src/chatwidget/tests.rs
+expression: popup
+---
+  Confirm Delete
+  Delete this expired saved account from ~/.codex/.accounts/. This cannot be undone.
+  This session: none
+
+› 1. Yes, delete permanently                                   Delete the selected expired accounts
+                                                               permanently. This cannot be undone.
+  2. No, go back                                               Return to the expired account list without
+                                                               deleting anything.
+     expired-confirm@example.com (Pro) [subscription ran out]  subscription ran out
+
+  Press enter to confirm or esc to go back

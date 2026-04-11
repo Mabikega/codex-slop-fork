@@ -1075,7 +1075,7 @@ mod tests {
     #[test]
     fn pilot_noop_message_reports_inactive_state() {
         assert_eq!(
-            remote_pilot_noop_message(RemotePilotMutationKind::Pause, None),
+            remote_pilot_noop_message(RemotePilotMutationKind::Pause, /*run*/ None),
             "Pilot is not active."
         );
     }

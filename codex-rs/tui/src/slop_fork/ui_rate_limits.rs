@@ -1,4 +1,6 @@
 use super::*;
+use std::future::Future;
+use std::sync::LazyLock;
 
 #[path = "ui_rate_limits_touch.rs"]
 mod touch;
@@ -6,6 +8,16 @@ mod touch;
 use touch::QuotaTouchClient;
 use touch::SavedAccountBackendSession;
 use touch::touch_quota_windows;
+
+static SAVED_ACCOUNT_QUOTA_TOUCH_QUEUE: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+async fn run_saved_account_quota_touch_serialized<T>(future: impl Future<Output = T>) -> T {
+    let _guard = SAVED_ACCOUNT_QUOTA_TOUCH_QUEUE.lock().await;
+    future.await
+}
+
+const DEACTIVATED_WORKSPACE_ERROR_CODE: &str = "deactivated_workspace";
 
 #[derive(Debug)]
 pub(super) struct SavedAccountRateLimitsRefreshState {
@@ -507,6 +519,33 @@ pub(crate) async fn fetch_rate_limits(
     }
 }
 
+#[derive(serde::Deserialize)]
+struct UsageErrorEnvelope {
+    #[serde(default)]
+    detail: Option<UsageErrorDetail>,
+}
+
+#[derive(serde::Deserialize)]
+struct UsageErrorDetail {
+    #[serde(default)]
+    code: Option<String>,
+}
+
+fn usage_error_code(err: &codex_backend_client::RequestError) -> Option<String> {
+    let codex_backend_client::RequestError::UnexpectedStatus { body, .. } = err else {
+        return None;
+    };
+    serde_json::from_str::<UsageErrorEnvelope>(body)
+        .ok()
+        .and_then(|envelope| envelope.detail)
+        .and_then(|detail| detail.code)
+}
+
+fn saved_account_usage_error_code(err: &anyhow::Error) -> Option<String> {
+    err.downcast_ref::<codex_backend_client::RequestError>()
+        .and_then(usage_error_code)
+}
+
 fn backend_raw_rate_limit_snapshot_input(
     raw: codex_backend_client::RawRateLimitSnapshotInput,
 ) -> account_rate_limits::RawRateLimitSnapshotInput {
@@ -590,101 +629,104 @@ pub(super) async fn touch_cached_quotas_for_requested_saved_accounts(
     requested_account_ids: HashSet<String>,
     mode: TouchQuotaMode,
 ) -> CachedQuotaTouchResult {
-    let now = Utc::now();
-    let accounts = auth_accounts::list_accounts(&codex_home).unwrap_or_default();
-    let snapshots =
-        account_rate_limits::snapshot_map_for_accounts(&codex_home, &accounts).unwrap_or_default();
-    let restrict_to_requested_accounts = !requested_account_ids.is_empty();
+    run_saved_account_quota_touch_serialized(async move {
+        let now = Utc::now();
+        let accounts = auth_accounts::list_accounts(&codex_home).unwrap_or_default();
+        let snapshots = account_rate_limits::snapshot_map_for_accounts(&codex_home, &accounts)
+            .unwrap_or_default();
+        let restrict_to_requested_accounts = !requested_account_ids.is_empty();
 
-    let mut checked_accounts = 0usize;
-    let mut started_accounts = 0usize;
-    let mut started_windows = 0usize;
-    let mut updated_account_ids = Vec::new();
+        let mut checked_accounts = 0usize;
+        let mut started_accounts = 0usize;
+        let mut started_windows = 0usize;
+        let mut updated_account_ids = Vec::new();
 
-    for account in accounts {
-        if restrict_to_requested_accounts && !requested_account_ids.contains(&account.id) {
-            continue;
-        }
-        if !auth_dot_json_is_chatgpt(&account.auth) {
-            continue;
-        }
-        let Some(snapshot) = snapshots.get(&account.id) else {
-            continue;
-        };
-        let window_kinds = cached_window_kinds_to_start(snapshot, mode, now);
-        if window_kinds.is_empty() {
-            continue;
-        }
-        checked_accounts += 1;
-
-        let plan = snapshot.plan.clone().or_else(|| {
-            account
-                .auth
-                .tokens
-                .as_ref()
-                .and_then(|tokens| tokens.id_token.get_chatgpt_plan_type())
-        });
-        let session = match SavedAccountBackendSession::new(
-            codex_home.clone(),
-            base_url.clone(),
-            account.id.clone(),
-            account.auth.clone(),
-            auth_credentials_store_mode,
-        ) {
-            Ok(session) => session,
-            Err(err) => {
-                tracing::warn!(
-                    "failed to build auth for saved account {} while touching quotas: {err}",
-                    account.id
-                );
+        for account in accounts {
+            if restrict_to_requested_accounts && !requested_account_ids.contains(&account.id) {
                 continue;
             }
-        };
-        let mut touch_client = QuotaTouchClient::from_saved_account_session(session);
-        match touch_quota_windows(
-            &codex_home,
-            &account.id,
-            plan.as_deref(),
-            &window_kinds,
-            &mut touch_client,
-        )
-        .await
-        {
-            Ok(true) => {
-                started_accounts += 1;
-                started_windows += window_kinds.len();
-                updated_account_ids.push(account.id.clone());
+            if !auth_dot_json_is_chatgpt(&account.auth) {
+                continue;
             }
-            Ok(false) => {}
-            Err(err) => {
-                tracing::warn!(
-                    "failed to touch cached quotas for saved account {}: {err}",
-                    account.id
-                );
+            let Some(snapshot) = snapshots.get(&account.id) else {
+                continue;
+            };
+            let window_kinds = cached_window_kinds_to_start(snapshot, mode, now);
+            if window_kinds.is_empty() {
+                continue;
+            }
+            checked_accounts += 1;
+
+            let plan = snapshot.plan.clone().or_else(|| {
+                account
+                    .auth
+                    .tokens
+                    .as_ref()
+                    .and_then(|tokens| tokens.id_token.get_chatgpt_plan_type())
+            });
+            let session = match SavedAccountBackendSession::new(
+                codex_home.clone(),
+                base_url.clone(),
+                account.id.clone(),
+                account.auth.clone(),
+                auth_credentials_store_mode,
+            ) {
+                Ok(session) => session,
+                Err(err) => {
+                    tracing::warn!(
+                        "failed to build auth for saved account {} while touching quotas: {err}",
+                        account.id
+                    );
+                    continue;
+                }
+            };
+            let mut touch_client = QuotaTouchClient::from_saved_account_session(session);
+            match touch_quota_windows(
+                &codex_home,
+                &account.id,
+                plan.as_deref(),
+                &window_kinds,
+                &mut touch_client,
+            )
+            .await
+            {
+                Ok(true) => {
+                    started_accounts += 1;
+                    started_windows += window_kinds.len();
+                    updated_account_ids.push(account.id.clone());
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    tracing::warn!(
+                        "failed to touch cached quotas for saved account {}: {err}",
+                        account.id
+                    );
+                }
             }
         }
-    }
 
-    let message = match (checked_accounts, started_accounts, started_windows) {
-        (0, _, _) => format!(
-            "{}: no cached untouched windows needed a start.",
-            mode.summary_prefix()
-        ),
-        (_, 0, _) => format!(
-            "{}: checked {checked_accounts} account(s), but no touch request completed.",
-            mode.summary_prefix()
-        ),
-        _ => format!(
-            "{}: started {started_windows} window(s) across {started_accounts} account(s).",
-            mode.summary_prefix()
-        ),
-    };
+        let message = match (checked_accounts, started_accounts, started_windows) {
+            (0, _, _) => format!(
+                "{}: no cached untouched windows needed a start.",
+                mode.summary_prefix()
+            ),
+            (_, 0, _) => format!(
+                "{}: checked {checked_accounts} account(s), but no touch request completed.",
+                mode.summary_prefix()
+            ),
+            _ => format!(
+                "{}: started {started_windows} window(s) across {started_accounts} account(s).",
+                mode.summary_prefix()
+            ),
+        };
 
-    CachedQuotaTouchResult {
-        checked_accounts,
-        message,
-        updated_account_ids,
-    }
+        CachedQuotaTouchResult {
+            checked_accounts,
+            message,
+            updated_account_ids,
+        }
+    })
+    .await
 }
 
 pub(crate) async fn maybe_touch_active_account_cached_quotas(
@@ -866,6 +908,20 @@ pub(crate) async fn refresh_saved_account_rate_limits_once(
                 .map(|(snapshot, raw)| (snapshot, backend_raw_rate_limit_snapshot_input(raw)))
                 .collect::<Vec<_>>(),
             Err(err) => {
+                if saved_account_usage_error_code(&err).as_deref()
+                    == Some(DEACTIVATED_WORKSPACE_ERROR_CODE)
+                    && let Err(persist_err) = account_rate_limits::record_workspace_deactivated(
+                        &codex_home,
+                        &account.id,
+                        plan.as_deref(),
+                        Utc::now(),
+                    )
+                {
+                    tracing::warn!(
+                        "failed to persist deactivated workspace marker for saved account {}: {persist_err}",
+                        account.id
+                    );
+                }
                 tracing::warn!(
                     "failed to refresh rate limits for saved account {}: {err}",
                     account.id
@@ -907,4 +963,72 @@ pub(crate) fn saved_account_rate_limit_refresh_is_due(
             now,
             account_rate_limits::rate_limit_refresh_stale_interval(),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::run_saved_account_quota_touch_serialized;
+    use pretty_assertions::assert_eq;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+    use tokio::sync::oneshot;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn saved_account_quota_touch_requests_are_serialized() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let second_started = Arc::new(AtomicBool::new(false));
+        let (first_started_tx, first_started_rx) = oneshot::channel();
+        let (release_first_tx, release_first_rx) = oneshot::channel();
+
+        let first_events = Arc::clone(&events);
+        let first = tokio::spawn(async move {
+            run_saved_account_quota_touch_serialized(async move {
+                first_events
+                    .lock()
+                    .expect("lock first events")
+                    .push("first-start");
+                first_started_tx.send(()).expect("signal first start");
+                release_first_rx.await.expect("release first request");
+                first_events
+                    .lock()
+                    .expect("lock first events")
+                    .push("first-end");
+            })
+            .await;
+        });
+
+        first_started_rx.await.expect("wait for first request");
+
+        let second_events = Arc::clone(&events);
+        let second_started_flag = Arc::clone(&second_started);
+        let second = tokio::spawn(async move {
+            run_saved_account_quota_touch_serialized(async move {
+                second_events
+                    .lock()
+                    .expect("lock second events")
+                    .push("second-start");
+                second_started_flag.store(true, Ordering::SeqCst);
+                second_events
+                    .lock()
+                    .expect("lock second events")
+                    .push("second-end");
+            })
+            .await;
+        });
+
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert_eq!(second_started.load(Ordering::SeqCst), false);
+        release_first_tx.send(()).expect("release first request");
+
+        first.await.expect("join first request");
+        second.await.expect("join second request");
+
+        assert_eq!(
+            *events.lock().expect("lock serialized events"),
+            vec!["first-start", "first-end", "second-start", "second-end"]
+        );
+    }
 }
