@@ -19,6 +19,8 @@ UPSTREAM_REPO = "openai/codex"
 PROTECTED_PATHS = [
     ".gitattributes",
     ".github/workflows",
+    ".github/scripts/install-musl-build-tools.sh",
+    ".github/scripts/rusty_v8_bazel.py",
     "AGENTS.md",
     "AGENTS_FORK.md",
     "README.md",
