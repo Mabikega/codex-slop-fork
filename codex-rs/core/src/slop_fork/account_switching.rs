@@ -54,7 +54,11 @@ impl RateLimitSwitchState {
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct CandidateScore {
     used_percent: f64,
+    weekly_reset_bucket: Option<i64>,
 }
+
+// Coarsen weekly reset ordering so small timestamp differences do not churn selection.
+const WEEKLY_RESET_BUCKET_SECONDS: i64 = 21_600;
 
 pub fn switch_active_account_on_rate_limit(
     codex_home: &Path,
@@ -200,14 +204,27 @@ fn select_next_account(
                 .get(&account.id)
                 .and_then(account_rate_limits::snapshot_used_percent)
                 .unwrap_or(0.0),
+            weekly_reset_bucket: snapshot_map
+                .get(&account.id)
+                .and_then(|snapshot| snapshot.weekly_window.reset_at)
+                .map(|reset_at| reset_at.timestamp().div_euclid(WEEKLY_RESET_BUCKET_SECONDS)),
         };
         match &best_chatgpt {
             None => best_chatgpt = Some((account.clone(), score)),
             Some((best_account, best_score)) => {
-                if score.used_percent < best_score.used_percent
-                    || (score.used_percent == best_score.used_percent
-                        && account.id < best_account.id)
-                {
+                let score_is_better = if score.used_percent < best_score.used_percent {
+                    true
+                } else if score.used_percent > best_score.used_percent {
+                    false
+                } else {
+                    match (score.weekly_reset_bucket, best_score.weekly_reset_bucket) {
+                        (Some(score_bucket), Some(best_bucket)) if score_bucket != best_bucket => {
+                            score_bucket < best_bucket
+                        }
+                        _ => account.id < best_account.id,
+                    }
+                };
+                if score_is_better {
                     best_chatgpt = Some((account.clone(), score));
                 }
             }
@@ -381,6 +398,14 @@ mod tests {
     }
 
     fn sample_snapshot(now: DateTime<Utc>, used_percent: f64) -> RateLimitSnapshot {
+        sample_snapshot_with_weekly_reset(now, used_percent, now + Duration::hours(5))
+    }
+
+    fn sample_snapshot_with_weekly_reset(
+        now: DateTime<Utc>,
+        used_percent: f64,
+        weekly_reset_at: DateTime<Utc>,
+    ) -> RateLimitSnapshot {
         RateLimitSnapshot {
             limit_id: Some("codex".to_string()),
             limit_name: Some("codex".to_string()),
@@ -392,7 +417,7 @@ mod tests {
             secondary: Some(RateLimitWindow {
                 used_percent,
                 window_minutes: Some(7 * 24 * 60),
-                resets_at: Some((now + Duration::hours(5)).timestamp()),
+                resets_at: Some(weekly_reset_at.timestamp()),
             }),
             credits: None,
             plan_type: Some(PlanType::Pro),
@@ -437,6 +462,118 @@ mod tests {
         .expect("switched");
 
         assert_eq!(next.id, account_c);
+        Ok(())
+    }
+
+    #[test]
+    fn prefers_earlier_weekly_reset_bucket_when_usage_is_tied() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let now = fixed_now();
+        let auth_a = chatgpt_auth("acct-a", "a@example.com");
+        let auth_b = chatgpt_auth("acct-b", "b@example.com");
+        let auth_z = chatgpt_auth("acct-z", "z@example.com");
+        let account_a = upsert_account(dir.path(), &auth_a)?.expect("account a");
+        let account_b = upsert_account(dir.path(), &auth_b)?.expect("account b");
+        let account_z = upsert_account(dir.path(), &auth_z)?.expect("account z");
+        crate::auth::save_auth(dir.path(), &auth_a, AuthCredentialsStoreMode::File)?;
+        record_rate_limit_snapshot(
+            dir.path(),
+            &account_a,
+            Some("pro"),
+            &sample_snapshot(now, /*used_percent*/ 90.0),
+            now,
+        )?;
+        record_rate_limit_snapshot(
+            dir.path(),
+            &account_b,
+            Some("pro"),
+            &sample_snapshot_with_weekly_reset(
+                now,
+                /*used_percent*/ 20.0,
+                now + Duration::hours(20),
+            ),
+            now,
+        )?;
+        record_rate_limit_snapshot(
+            dir.path(),
+            &account_z,
+            Some("pro"),
+            &sample_snapshot_with_weekly_reset(
+                now,
+                /*used_percent*/ 20.0,
+                now + Duration::hours(10),
+            ),
+            now,
+        )?;
+
+        let next = switch_active_account_on_rate_limit(
+            dir.path(),
+            AuthCredentialsStoreMode::File,
+            &mut RateLimitSwitchState::default(),
+            /*allow_api_key_fallback*/ false,
+            /*failed_auth*/ None,
+            /*blocked_until*/ None,
+            now,
+        )?
+        .expect("switched");
+
+        assert_eq!(next.id, account_z);
+        Ok(())
+    }
+
+    #[test]
+    fn treats_weekly_resets_in_same_six_hour_bucket_as_tied() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let now = fixed_now();
+        let auth_a = chatgpt_auth("acct-a", "a@example.com");
+        let auth_b = chatgpt_auth("acct-b", "b@example.com");
+        let auth_z = chatgpt_auth("acct-z", "z@example.com");
+        let account_a = upsert_account(dir.path(), &auth_a)?.expect("account a");
+        let account_b = upsert_account(dir.path(), &auth_b)?.expect("account b");
+        let account_z = upsert_account(dir.path(), &auth_z)?.expect("account z");
+        crate::auth::save_auth(dir.path(), &auth_a, AuthCredentialsStoreMode::File)?;
+        record_rate_limit_snapshot(
+            dir.path(),
+            &account_a,
+            Some("pro"),
+            &sample_snapshot(now, /*used_percent*/ 90.0),
+            now,
+        )?;
+        record_rate_limit_snapshot(
+            dir.path(),
+            &account_b,
+            Some("pro"),
+            &sample_snapshot_with_weekly_reset(
+                now,
+                /*used_percent*/ 20.0,
+                now + Duration::hours(11),
+            ),
+            now,
+        )?;
+        record_rate_limit_snapshot(
+            dir.path(),
+            &account_z,
+            Some("pro"),
+            &sample_snapshot_with_weekly_reset(
+                now,
+                /*used_percent*/ 20.0,
+                now + Duration::hours(10),
+            ),
+            now,
+        )?;
+
+        let next = switch_active_account_on_rate_limit(
+            dir.path(),
+            AuthCredentialsStoreMode::File,
+            &mut RateLimitSwitchState::default(),
+            /*allow_api_key_fallback*/ false,
+            /*failed_auth*/ None,
+            /*blocked_until*/ None,
+            now,
+        )?
+        .expect("switched");
+
+        assert_eq!(next.id, account_b);
         Ok(())
     }
 
