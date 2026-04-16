@@ -1,10 +1,12 @@
 use async_trait::async_trait;
 use chrono::Utc;
+use once_cell::sync::Lazy;
 use reqwest::StatusCode;
 use serde::Deserialize;
 use serde::Serialize;
 #[cfg(test)]
 use serial_test::serial;
+use std::collections::HashMap;
 use std::env;
 use std::fmt::Debug;
 use std::path::Path;
@@ -12,6 +14,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
+use std::time::Duration;
+use std::time::Instant;
 use tokio::sync::Mutex as AsyncMutex;
 
 use codex_app_server_protocol::AuthMode;
@@ -85,6 +89,24 @@ const REFRESH_TOKEN_UNKNOWN_MESSAGE: &str =
 const REFRESH_TOKEN_ACCOUNT_MISMATCH_MESSAGE: &str = "Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again.";
 const REFRESH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 pub const REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR: &str = "CODEX_REFRESH_TOKEN_URL_OVERRIDE";
+const EXPECTED_EXTERNAL_AUTH_TRANSITION_TTL_FOR_FORK: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingExternalAuthTransition {
+    from_identity: Option<String>,
+    to_identity: Option<String>,
+    recorded_at: Instant,
+}
+
+impl PendingExternalAuthTransition {
+    fn is_fresh(&self) -> bool {
+        self.recorded_at.elapsed() <= EXPECTED_EXTERNAL_AUTH_TRANSITION_TTL_FOR_FORK
+    }
+}
+
+static PENDING_EXTERNAL_AUTH_TRANSITIONS_FOR_FORK: Lazy<
+    Mutex<HashMap<PathBuf, PendingExternalAuthTransition>>,
+> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Error)]
 pub enum RefreshTokenError {
@@ -447,6 +469,18 @@ pub fn logout(
     auth_credentials_store_mode: AuthCredentialsStoreMode,
 ) -> std::io::Result<bool> {
     let storage = create_auth_storage(codex_home.to_path_buf(), auth_credentials_store_mode);
+    let previous_auth = match storage.load() {
+        Ok(previous_auth) => previous_auth,
+        Err(err) => {
+            tracing::warn!("failed to load previous auth before logout: {err}");
+            None
+        }
+    };
+    AuthManager::record_expected_external_auth_transition_for_fork(
+        codex_home,
+        previous_auth.as_ref(),
+        None,
+    );
     storage.delete()
 }
 
@@ -1516,7 +1550,14 @@ impl AuthManager {
         self.load_auth_from_storage()
     }
 
-    fn set_cached_auth(&self, new_auth: Option<CodexAuth>) -> bool {
+    fn set_cached_auth_impl(
+        &self,
+        new_auth: Option<CodexAuth>,
+        clear_expected_transition: bool,
+    ) -> bool {
+        if clear_expected_transition {
+            self.clear_expected_external_auth_transition_for_fork(new_auth.as_ref());
+        }
         if let Ok(mut guard) = self.inner.write() {
             let previous = guard.auth.as_ref();
             let changed = !AuthManager::auths_equal(previous, new_auth.as_ref());
@@ -1541,13 +1582,42 @@ impl AuthManager {
         }
     }
 
+    fn set_cached_auth(&self, new_auth: Option<CodexAuth>) -> bool {
+        self.set_cached_auth_impl(new_auth, /*clear_expected_transition*/ true)
+    }
+
     pub fn set_cached_auth_from_fork(&self, new_auth: Option<CodexAuth>) -> bool {
-        self.set_cached_auth(new_auth)
+        self.set_cached_auth_impl(new_auth, /*clear_expected_transition*/ false)
     }
 
     pub fn record_external_auth_switch_notice_for_fork(&self, label: String) {
         if let Ok(mut guard) = self.inner.write() {
             guard.pending_external_auth_switch_notice = Some(label);
+        }
+    }
+
+    pub fn clear_external_auth_switch_notice_for_fork(&self) {
+        if let Ok(mut guard) = self.inner.write() {
+            guard.pending_external_auth_switch_notice = None;
+        }
+    }
+
+    pub fn record_expected_external_auth_transition_for_fork(
+        codex_home: &Path,
+        previous_auth: Option<&AuthDotJson>,
+        new_auth: Option<&AuthDotJson>,
+    ) {
+        let transition = PendingExternalAuthTransition {
+            from_identity: auth_dot_json_identity(previous_auth),
+            to_identity: auth_dot_json_identity(new_auth),
+            recorded_at: Instant::now(),
+        };
+        if let Ok(mut guard) = PENDING_EXTERNAL_AUTH_TRANSITIONS_FOR_FORK.lock() {
+            if transition.from_identity == transition.to_identity {
+                guard.remove(codex_home);
+            } else {
+                guard.insert(codex_home.to_path_buf(), transition);
+            }
         }
     }
 
@@ -1563,25 +1633,63 @@ impl AuthManager {
         }
     }
 
-    pub fn suppress_expected_external_auth_switch_for_fork(
-        &self,
-        auth: Option<&CodexAuth>,
-    ) -> bool {
+    fn clear_expected_external_auth_transition_for_fork(&self, auth: Option<&CodexAuth>) {
         let expected_identity = auth_identity(auth);
-        self.inner
-            .write()
-            .ok()
-            .is_some_and(|mut guard| match expected_identity {
-                Some(expected_identity)
-                    if guard.pending_expected_external_auth_identity.as_deref()
-                        == Some(expected_identity.as_str()) =>
-                {
-                    guard.pending_expected_external_auth_identity = None;
-                    guard.pending_external_auth_switch_notice = None;
-                    true
+        if let Ok(mut guard) = PENDING_EXTERNAL_AUTH_TRANSITIONS_FOR_FORK.lock()
+            && guard
+                .get(self.codex_home.as_path())
+                .is_some_and(|transition| {
+                    transition.to_identity == expected_identity && !transition.is_fresh()
+                })
+        {
+            guard.remove(self.codex_home.as_path());
+        }
+    }
+
+    pub fn suppress_expected_external_auth_transition_for_fork(
+        &self,
+        _previous_auth: Option<&CodexAuth>,
+        new_auth: Option<&CodexAuth>,
+    ) -> bool {
+        let new_identity = auth_identity(new_auth);
+        let suppressed_local_switch =
+            self.inner
+                .write()
+                .ok()
+                .is_some_and(|mut guard| match new_identity.as_deref() {
+                    Some(expected_identity)
+                        if guard.pending_expected_external_auth_identity.as_deref()
+                            == Some(expected_identity) =>
+                    {
+                        guard.pending_expected_external_auth_identity = None;
+                        guard.pending_external_auth_switch_notice = None;
+                        true
+                    }
+                    _ => false,
+                });
+        if suppressed_local_switch {
+            return true;
+        }
+        if let Ok(mut guard) = PENDING_EXTERNAL_AUTH_TRANSITIONS_FOR_FORK.lock() {
+            let matching_transition_is_fresh = guard
+                .get(self.codex_home.as_path())
+                .filter(|transition| transition.to_identity == new_identity)
+                .map(PendingExternalAuthTransition::is_fresh);
+            match matching_transition_is_fresh {
+                Some(true) => {
+                    guard.remove(self.codex_home.as_path());
+                    if let Ok(mut cached) = self.inner.write() {
+                        cached.pending_external_auth_switch_notice = None;
+                    }
+                    return true;
                 }
-                _ => false,
-            })
+                Some(false) => {
+                    guard.remove(self.codex_home.as_path());
+                }
+                None => {}
+            }
+        }
+        false
     }
 
     pub fn take_external_auth_switch_notice_for_fork(&self) -> Option<String> {
@@ -1592,6 +1700,7 @@ impl AuthManager {
     }
 
     pub fn set_cached_auth_for_switch(&self, new_auth: CodexAuth) -> bool {
+        self.clear_external_auth_switch_notice_for_fork();
         self.set_cached_auth(Some(new_auth))
     }
 
@@ -1635,6 +1744,7 @@ impl AuthManager {
     }
 
     pub fn activate_saved_account(&self, account_id: &str) -> std::io::Result<bool> {
+        self.clear_external_auth_switch_notice_for_fork();
         self.expect_external_auth_switch_for_account_for_fork(account_id);
         let Some(account) = crate::slop_fork::activate_saved_account(
             &self.codex_home,
@@ -1952,6 +2062,17 @@ fn auth_identity(auth: Option<&CodexAuth>) -> Option<String> {
     let auth = auth?;
     crate::slop_fork::auth_accounts::stored_account_id_for_auth(auth)
         .or_else(|| auth.get_account_id())
+        .map(|id| format!("account:{id}"))
+}
+
+fn auth_dot_json_identity(auth: Option<&AuthDotJson>) -> Option<String> {
+    let auth = auth?;
+    crate::slop_fork::auth_accounts::stored_account_id(auth)
+        .or_else(|| {
+            auth.tokens
+                .as_ref()
+                .and_then(|tokens| tokens.account_id.clone())
+        })
         .map(|id| format!("account:{id}"))
 }
 

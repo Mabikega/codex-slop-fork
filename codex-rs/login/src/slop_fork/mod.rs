@@ -34,16 +34,25 @@ pub(crate) fn save_auth_with_account_sync(
     auth: &AuthDotJson,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
 ) -> std::io::Result<()> {
+    let storage_mode = auth.storage_mode(auth_credentials_store_mode);
+    let previous_auth = match crate::auth::load_auth_dot_json(codex_home, storage_mode) {
+        Ok(previous_auth) => previous_auth,
+        Err(err) => {
+            tracing::warn!("failed to load previous auth before saving updated auth: {err}");
+            None
+        }
+    };
+    AuthManager::record_expected_external_auth_transition_for_fork(
+        codex_home,
+        previous_auth.as_ref(),
+        Some(auth),
+    );
     if let Err(err) =
         auth_accounts::ensure_current_active_account_saved(codex_home, auth_credentials_store_mode)
     {
         tracing::warn!("failed to preserve current active account in .accounts: {err}");
     }
-    crate::auth::save_auth(
-        codex_home,
-        auth,
-        auth.storage_mode(auth_credentials_store_mode),
-    )?;
+    crate::auth::save_auth(codex_home, auth, storage_mode)?;
     if let Err(err) = auth_accounts::upsert_account(codex_home, auth) {
         tracing::warn!("failed to mirror saved account into .accounts: {err}");
     }

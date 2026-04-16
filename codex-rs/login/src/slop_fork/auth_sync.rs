@@ -34,7 +34,10 @@ pub fn sync_external_auth_if_enabled(auth_manager: &AuthManager) -> ExternalAuth
     auth_manager.set_cached_auth_from_fork(stored_auth.clone());
 
     if auth_identity(cached_auth.as_ref()) != auth_identity(stored_auth.as_ref()) {
-        if auth_manager.suppress_expected_external_auth_switch_for_fork(stored_auth.as_ref()) {
+        if auth_manager.suppress_expected_external_auth_transition_for_fork(
+            cached_auth.as_ref(),
+            stored_auth.as_ref(),
+        ) {
             return ExternalAuthSyncOutcome::SwitchedAccounts;
         }
         let display_labels =
@@ -134,6 +137,90 @@ mod tests {
         let initial_auth = chatgpt_auth("acct-initial", "initial@example.com", KnownPlan::Plus);
         let next_auth = chatgpt_auth("acct-next", "next@example.com", KnownPlan::Pro);
         let next_account_id =
+            auth_accounts::stored_account_id(&next_auth).expect("next account id");
+        crate::auth::save_auth(dir.path(), &initial_auth, AuthCredentialsStoreMode::File)?;
+
+        let initial_codex_auth = crate::auth::auth_for_saved_account(
+            dir.path(),
+            initial_auth,
+            AuthCredentialsStoreMode::File,
+        )?;
+        let auth_manager = AuthManager::from_auth_for_testing_with_home(
+            initial_codex_auth,
+            dir.path().to_path_buf(),
+        );
+
+        crate::slop_fork::save_auth_with_account_sync(
+            dir.path(),
+            &next_auth,
+            AuthCredentialsStoreMode::File,
+        )?;
+
+        let outcome = sync_external_auth_if_enabled(auth_manager.as_ref());
+
+        assert_eq!(outcome, ExternalAuthSyncOutcome::SwitchedAccounts);
+        assert_eq!(
+            auth_manager.take_external_auth_switch_notice_for_fork(),
+            None
+        );
+        assert_eq!(
+            auth_identity(auth_manager.auth_cached().as_ref()),
+            Some(format!("account:{next_account_id}"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn suppresses_notice_when_session_cache_was_already_stale() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        std::fs::write(
+            dir.path().join("config-slop-fork.toml"),
+            "follow_external_account_switches = true\n",
+        )?;
+
+        let shared_auth = chatgpt_auth("acct-shared", "shared@example.com", KnownPlan::Plus);
+        let session_auth = chatgpt_auth("acct-session", "session@example.com", KnownPlan::Plus);
+        let next_auth = chatgpt_auth("acct-next", "next@example.com", KnownPlan::Pro);
+        let next_account_id =
+            auth_accounts::stored_account_id(&next_auth).expect("next account id");
+        crate::auth::save_auth(dir.path(), &shared_auth, AuthCredentialsStoreMode::File)?;
+
+        let stale_session_auth = crate::auth::auth_for_saved_account(
+            dir.path(),
+            session_auth,
+            AuthCredentialsStoreMode::File,
+        )?;
+        let auth_manager = AuthManager::from_auth_for_testing_with_home(
+            stale_session_auth,
+            dir.path().to_path_buf(),
+        );
+
+        crate::slop_fork::save_auth_with_account_sync(
+            dir.path(),
+            &next_auth,
+            AuthCredentialsStoreMode::File,
+        )?;
+
+        let outcome = sync_external_auth_if_enabled(auth_manager.as_ref());
+
+        assert_eq!(outcome, ExternalAuthSyncOutcome::SwitchedAccounts);
+        assert_eq!(
+            auth_manager.take_external_auth_switch_notice_for_fork(),
+            None
+        );
+        assert_eq!(
+            auth_identity(auth_manager.auth_cached().as_ref()),
+            Some(format!("account:{next_account_id}"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn clears_queued_notice_when_current_session_switches_accounts() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let initial_auth = chatgpt_auth("acct-initial", "initial@example.com", KnownPlan::Plus);
+        let next_auth = chatgpt_auth("acct-next", "next@example.com", KnownPlan::Pro);
+        let next_account_id =
             auth_accounts::upsert_account(dir.path(), &next_auth)?.expect("next account id");
         crate::auth::save_auth(dir.path(), &initial_auth, AuthCredentialsStoreMode::File)?;
 
@@ -147,18 +234,65 @@ mod tests {
             dir.path().to_path_buf(),
         );
 
-        auth_manager.expect_external_auth_switch_for_account_for_fork(&next_account_id);
-        crate::auth::save_auth(dir.path(), &next_auth, AuthCredentialsStoreMode::File)?;
-
-        let outcome = sync_external_auth_if_enabled(auth_manager.as_ref());
-
-        assert_eq!(outcome, ExternalAuthSyncOutcome::SwitchedAccounts);
+        auth_manager.record_external_auth_switch_notice_for_fork("stale queued notice".to_string());
+        assert_eq!(auth_manager.activate_saved_account(&next_account_id)?, true);
         assert_eq!(
             auth_manager.take_external_auth_switch_notice_for_fork(),
             None
         );
+        Ok(())
+    }
+
+    #[test]
+    fn suppresses_notice_when_another_auth_manager_is_stale_after_local_switch()
+    -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        std::fs::write(
+            dir.path().join("config-slop-fork.toml"),
+            "follow_external_account_switches = true\n",
+        )?;
+
+        let initial_auth = chatgpt_auth("acct-initial", "initial@example.com", KnownPlan::Plus);
+        let next_auth = chatgpt_auth("acct-next", "next@example.com", KnownPlan::Pro);
+        let next_account_id =
+            auth_accounts::stored_account_id(&next_auth).expect("next account id");
+        crate::auth::save_auth(dir.path(), &initial_auth, AuthCredentialsStoreMode::File)?;
+
+        let initial_cached_auth = crate::auth::auth_for_saved_account(
+            dir.path(),
+            initial_auth,
+            AuthCredentialsStoreMode::File,
+        )?;
+        let switching_auth_manager = AuthManager::from_auth_for_testing_with_home(
+            initial_cached_auth.clone(),
+            dir.path().to_path_buf(),
+        );
+        let observing_auth_manager = AuthManager::from_auth_for_testing_with_home(
+            initial_cached_auth,
+            dir.path().to_path_buf(),
+        );
+
+        crate::slop_fork::save_auth_with_account_sync(
+            dir.path(),
+            &next_auth,
+            AuthCredentialsStoreMode::File,
+        )?;
+        let switched_auth = crate::auth::auth_for_saved_account(
+            dir.path(),
+            next_auth,
+            AuthCredentialsStoreMode::File,
+        )?;
+        switching_auth_manager.set_cached_auth_for_switch(switched_auth);
+
+        let outcome = sync_external_auth_if_enabled(observing_auth_manager.as_ref());
+
+        assert_eq!(outcome, ExternalAuthSyncOutcome::SwitchedAccounts);
         assert_eq!(
-            auth_identity(auth_manager.auth_cached().as_ref()),
+            observing_auth_manager.take_external_auth_switch_notice_for_fork(),
+            None
+        );
+        assert_eq!(
+            auth_identity(observing_auth_manager.auth_cached().as_ref()),
             Some(format!("account:{next_account_id}"))
         );
         Ok(())
