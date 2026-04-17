@@ -87,6 +87,7 @@ mod tests {
                 account_id: None,
             }),
             last_refresh: None,
+            agent_identity: None,
         };
         let account_id = auth_accounts::upsert_account(dir.path(), &saved_auth)
             .expect("saved account upsert should succeed")
@@ -121,6 +122,7 @@ mod tests {
                 account_id: None,
             }),
             last_refresh: None,
+            agent_identity: None,
         };
         chatgpt_auth
             .save_auth_for_test(&updated)

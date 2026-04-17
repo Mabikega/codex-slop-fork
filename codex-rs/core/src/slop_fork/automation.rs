@@ -325,6 +325,8 @@ pub async fn run_policy_command(
         None => AbsolutePathBuf::try_from(execution.session_cwd.clone())
             .map_err(|err| format!("automation session cwd should be absolute: {err}"))?,
     };
+    let session_cwd = AbsolutePathBuf::try_from(execution.session_cwd.clone())
+        .map_err(|err| format!("automation session cwd should be absolute: {err}"))?;
     let joined_command = shlex::try_join(command.command.iter().map(String::as_str))
         .map_err(|err| format!("Failed to serialize automation policy command: {err}"))?;
     let wrapped_command = if cfg!(windows) {
@@ -361,7 +363,7 @@ pub async fn run_policy_command(
         &execution.sandbox_policy,
         &execution.file_system_sandbox_policy,
         execution.network_sandbox_policy,
-        &execution.session_cwd,
+        &session_cwd,
         &execution.codex_linux_sandbox_exe,
         /*use_legacy_landlock*/ false,
         /*stdout_stream*/ None,

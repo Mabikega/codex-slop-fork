@@ -131,7 +131,7 @@ impl SlopForkAutomationManager {
 
         let sandbox_policy = snapshot.sandbox_policy.clone();
         let execution = AutomationPolicyExecutionContext {
-            session_cwd: snapshot.cwd.clone(),
+            session_cwd: snapshot.cwd.clone().to_path_buf(),
             sandbox_policy: sandbox_policy.clone(),
             file_system_sandbox_policy: FileSystemSandboxPolicy::from(&sandbox_policy),
             network_sandbox_policy: NetworkSandboxPolicy::from(&sandbox_policy),
@@ -190,7 +190,7 @@ impl SlopForkAutomationManager {
 
         let sandbox_policy = snapshot.sandbox_policy.clone();
         let execution = AutomationPolicyExecutionContext {
-            session_cwd: snapshot.cwd.clone(),
+            session_cwd: snapshot.cwd.clone().to_path_buf(),
             sandbox_policy: sandbox_policy.clone(),
             file_system_sandbox_policy: FileSystemSandboxPolicy::from(&sandbox_policy),
             network_sandbox_policy: NetworkSandboxPolicy::from(&sandbox_policy),

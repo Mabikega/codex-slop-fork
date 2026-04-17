@@ -283,6 +283,7 @@ mod tests {
                 account_id: Some(account_id.to_string()),
             }),
             last_refresh: None,
+            agent_identity: None,
         }
     }
 

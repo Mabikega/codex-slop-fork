@@ -21,6 +21,7 @@ PROTECTED_PATHS = [
     ".github/workflows",
     ".github/scripts/install-musl-build-tools.sh",
     ".github/scripts/rusty_v8_bazel.py",
+    ".github/scripts/rusty_v8_module_bazel.py",
     "AGENTS.md",
     "AGENTS_FORK.md",
     "README.md",

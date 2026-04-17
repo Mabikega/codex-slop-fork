@@ -336,6 +336,7 @@ pub fn stored_account_id_for_auth(auth: &CodexAuth) -> Option<String> {
             openai_api_key: Some(api_key.to_string()),
             tokens: None,
             last_refresh: None,
+            agent_identity: None,
         })
     })
 }

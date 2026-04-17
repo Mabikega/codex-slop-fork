@@ -45,12 +45,6 @@ use codex_core::slop_fork::pilot::PilotRuntime;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 use tokio::time::timeout;
-use wiremock::Mock;
-use wiremock::matchers::method;
-use wiremock::matchers::path_regex;
-
-use core_test_support::responses;
-
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[tokio::test]
@@ -70,8 +64,8 @@ async fn pilot_control_succeeds_after_thread_is_unloaded() -> Result<()> {
         /*deadline_at*/ None,
         Local::now(),
     )?);
-
-    unload_thread(&mut mcp, &thread_id).await?;
+    drop(mcp);
+    let mut mcp = restart_mcp(codex_home.path()).await?;
 
     let control_id = mcp
         .send_pilot_control_request(PilotControlParams {
@@ -124,8 +118,8 @@ async fn autoresearch_control_succeeds_after_thread_is_unloaded() -> Result<()> 
         /*max_runs*/ None,
         Local::now(),
     )?);
-
-    unload_thread(&mut mcp, &thread_id).await?;
+    drop(mcp);
+    let mut mcp = restart_mcp(codex_home.path()).await?;
 
     let control_id = mcp
         .send_autoresearch_control_request(AutoresearchControlParams {
@@ -161,7 +155,8 @@ async fn pilot_start_succeeds_after_thread_is_unloaded() -> Result<()> {
 
     let thread_cwd = create_thread_cwd(codex_home.path())?;
     let thread_id = start_thread(&mut mcp, &thread_cwd).await?;
-    unload_thread(&mut mcp, &thread_id).await?;
+    drop(mcp);
+    let mut mcp = restart_mcp(codex_home.path()).await?;
 
     let start_id = mcp
         .send_pilot_start_request(PilotStartParams {
@@ -183,16 +178,8 @@ async fn pilot_start_succeeds_after_thread_is_unloaded() -> Result<()> {
 }
 
 #[tokio::test]
-async fn pilot_start_rejects_pending_thread_unload() -> Result<()> {
-    let server = responses::start_mock_server().await;
-    let delayed_body = responses::sse(vec![responses::ev_response_created("resp-pending-unload")]);
-    Mock::given(method("POST"))
-        .and(path_regex(".*/responses$"))
-        .respond_with(
-            responses::sse_response(delayed_body).set_delay(std::time::Duration::from_secs(1)),
-        )
-        .mount(&server)
-        .await;
+async fn pilot_start_succeeds_after_thread_unsubscribe_before_idle_unload() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
@@ -201,8 +188,15 @@ async fn pilot_start_rejects_pending_thread_unload() -> Result<()> {
 
     let thread_cwd = create_thread_cwd(codex_home.path())?;
     let thread_id = start_thread(&mut mcp, &thread_cwd).await?;
-    let _in_flight_turn_id = start_turn_without_waiting(&mut mcp, &thread_id).await?;
     begin_unload_thread(&mut mcp, &thread_id).await?;
+    assert!(
+        timeout(
+            std::time::Duration::from_millis(250),
+            mcp.read_stream_until_notification_message("thread/closed"),
+        )
+        .await
+        .is_err()
+    );
 
     let start_id = mcp
         .send_pilot_start_request(PilotStartParams {
@@ -211,24 +205,14 @@ async fn pilot_start_rejects_pending_thread_unload() -> Result<()> {
             deadline_at: None,
         })
         .await?;
-    let start_err = timeout(
+    let start_resp: JSONRPCResponse = timeout(
         DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_error_message(RequestId::Integer(start_id)),
+        mcp.read_stream_until_response_message(RequestId::Integer(start_id)),
     )
     .await??;
-    assert_eq!(start_err.error.code, -32600);
-    assert!(
-        start_err
-            .error
-            .message
-            .contains("retry pilot/start after the thread is closed")
-    );
-
-    timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("thread/closed"),
-    )
-    .await??;
+    let PilotStartResponse { run } = to_response::<PilotStartResponse>(start_resp)?;
+    assert_eq!(run.status, PilotStatus::Running);
+    assert_eq!(run.goal, "keep shipping");
     Ok(())
 }
 
@@ -243,7 +227,8 @@ async fn autoresearch_start_succeeds_after_thread_is_unloaded() -> Result<()> {
 
     let thread_cwd = create_thread_cwd(codex_home.path())?;
     let thread_id = start_thread(&mut mcp, &thread_cwd).await?;
-    unload_thread(&mut mcp, &thread_id).await?;
+    drop(mcp);
+    let mut mcp = restart_mcp(codex_home.path()).await?;
 
     let start_id = mcp
         .send_autoresearch_start_request(AutoresearchStartParams {
@@ -290,8 +275,8 @@ async fn pilot_read_clears_stale_running_state_after_thread_is_unloaded() -> Res
         .expect("pilot cycle should be prepared");
     assert!(runtime.note_turn_submitted("turn-pilot")?);
     assert!(runtime.activate_pending_cycle("turn-pilot".to_string())?);
-
-    unload_thread(&mut mcp, &thread_id).await?;
+    drop(mcp);
+    let mut mcp = restart_mcp(codex_home.path()).await?;
 
     let read_id = mcp
         .send_pilot_read_request(PilotReadParams {
@@ -347,8 +332,8 @@ async fn autoresearch_read_clears_stale_running_state_after_thread_is_unloaded()
         .expect("autoresearch cycle should be prepared");
     assert!(runtime.note_turn_submitted("turn-autoresearch")?);
     assert!(runtime.activate_pending_cycle("turn-autoresearch".to_string())?);
-
-    unload_thread(&mut mcp, &thread_id).await?;
+    drop(mcp);
+    let mut mcp = restart_mcp(codex_home.path()).await?;
 
     let read_id = mcp
         .send_autoresearch_read_request(AutoresearchReadParams {
@@ -529,8 +514,8 @@ async fn autoresearch_stop_clears_stale_running_state_after_thread_is_unloaded()
         .expect("autoresearch cycle should be prepared");
     assert!(runtime.note_turn_submitted("turn-autoresearch")?);
     assert!(runtime.activate_pending_cycle("turn-autoresearch".to_string())?);
-
-    unload_thread(&mut mcp, &thread_id).await?;
+    drop(mcp);
+    let mut mcp = restart_mcp(codex_home.path()).await?;
 
     let control_id = mcp
         .send_autoresearch_control_request(AutoresearchControlParams {
@@ -555,14 +540,10 @@ async fn autoresearch_stop_clears_stale_running_state_after_thread_is_unloaded()
     Ok(())
 }
 
-async fn unload_thread(mcp: &mut McpProcess, thread_id: &str) -> Result<()> {
-    begin_unload_thread(mcp, thread_id).await?;
-    timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("thread/closed"),
-    )
-    .await??;
-    Ok(())
+async fn restart_mcp(codex_home: &std::path::Path) -> Result<McpProcess> {
+    let mut mcp = McpProcess::new(codex_home).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    Ok(mcp)
 }
 
 async fn begin_unload_thread(mcp: &mut McpProcess, thread_id: &str) -> Result<()> {
@@ -656,24 +637,4 @@ async fn start_thread(mcp: &mut McpProcess, cwd: &std::path::Path) -> Result<Str
     )
     .await??;
     Ok(thread.id)
-}
-
-async fn start_turn_without_waiting(mcp: &mut McpProcess, thread_id: &str) -> Result<String> {
-    let turn_start_id = mcp
-        .send_turn_start_request(TurnStartParams {
-            thread_id: thread_id.to_string(),
-            input: vec![UserInput::Text {
-                text: "keep running".to_string(),
-                text_elements: Vec::new(),
-            }],
-            ..Default::default()
-        })
-        .await?;
-    let turn_resp: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(turn_start_id)),
-    )
-    .await??;
-    let turn: TurnStartResponse = to_response::<TurnStartResponse>(turn_resp)?;
-    Ok(turn.turn.id)
 }

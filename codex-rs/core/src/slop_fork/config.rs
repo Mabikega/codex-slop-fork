@@ -349,7 +349,7 @@ async fn existing_additional_doc_path(
         return Ok(None);
     }
 
-    match fs.get_metadata(path).await {
+    match fs.get_metadata(path, /*sandbox*/ None).await {
         Ok(metadata) if !metadata.is_file => Ok(None),
         Ok(_) => {
             let resolved_path = normalize_path(path)

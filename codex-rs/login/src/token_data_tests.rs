@@ -153,6 +153,12 @@ fn workspace_account_detection_matches_workspace_plans() {
         ..IdTokenInfo::default()
     };
     assert_eq!(personal.is_workspace_account(), false);
+
+    let personal = IdTokenInfo {
+        chatgpt_plan_type: Some(PlanType::Known(KnownPlan::ProLite)),
+        ..IdTokenInfo::default()
+    };
+    assert_eq!(personal.is_workspace_account(), false);
 }
 
 #[test]

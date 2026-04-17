@@ -24,6 +24,7 @@ This section describes the actual structure of this fork, not generic upstream C
 - Current required workflow support files are:
   - `.github/scripts/install-musl-build-tools.sh`
   - `.github/scripts/rusty_v8_bazel.py`
+  - `.github/scripts/rusty_v8_module_bazel.py`
 - Remove upstream or non-fork GitHub Actions workflows and workflow-only support files when they are no longer needed by the fork.
 - Do not add new non-fork workflow files unless the user explicitly asks for an exception.
 - During upstream merges, do not bring back upstream `.github/` files unless they are required by the current fork workflows.

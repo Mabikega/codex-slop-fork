@@ -78,6 +78,7 @@ async fn run_code_mode_turn_with_rmcp(
                 disabled_tools: None,
                 scopes: None,
                 oauth_resource: None,
+                supports_parallel_tool_calls: false,
                 tools: HashMap::new(),
             },
         );

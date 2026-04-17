@@ -379,6 +379,7 @@ mod tests {
                 account_id: Some(account_id.to_string()),
             }),
             last_refresh: Some(Utc::now()),
+            agent_identity: None,
         }
     }
 
@@ -388,6 +389,7 @@ mod tests {
             openai_api_key: Some(format!("sk-test-{suffix}")),
             tokens: None,
             last_refresh: None,
+            agent_identity: None,
         }
     }
 

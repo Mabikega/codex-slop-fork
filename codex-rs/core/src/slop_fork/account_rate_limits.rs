@@ -585,6 +585,7 @@ pub fn plan_label(plan: AccountPlanType) -> &'static str {
         AccountPlanType::Go => "go",
         AccountPlanType::Plus => "plus",
         AccountPlanType::Pro => "pro",
+        AccountPlanType::ProLite => "prolite",
         AccountPlanType::Team => "team",
         AccountPlanType::Business => "business",
         AccountPlanType::Enterprise => "enterprise",
@@ -801,6 +802,7 @@ mod tests {
                 account_id: Some(account_id.to_string()),
             }),
             last_refresh: Some(Utc::now()),
+            agent_identity: None,
         }
     }
 

@@ -2125,6 +2125,7 @@ mod tests {
                     account_id: Some("acct-expired".to_string()),
                 }),
                 last_refresh: None,
+                agent_identity: None,
             },
             modified_at: None,
         };
@@ -2171,6 +2172,7 @@ mod tests {
                     account_id: Some("acct-1".to_string()),
                 }),
                 last_refresh: None,
+                agent_identity: None,
             },
             modified_at: None,
         };
@@ -2248,6 +2250,7 @@ mod tests {
                     account_id: Some("acct-expired".to_string()),
                 }),
                 last_refresh: None,
+                agent_identity: None,
             },
             modified_at: None,
         };
@@ -2333,6 +2336,7 @@ mod tests {
                     account_id: Some("acct-hint".to_string()),
                 }),
                 last_refresh: None,
+                agent_identity: None,
             },
             modified_at: None,
         };

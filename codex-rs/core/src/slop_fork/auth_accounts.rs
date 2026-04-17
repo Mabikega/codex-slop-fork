@@ -449,6 +449,7 @@ pub fn stored_account_id_for_auth(auth: &CodexAuth) -> Option<String> {
             openai_api_key: Some(api_key.to_string()),
             tokens: None,
             last_refresh: None,
+            agent_identity: None,
         })
     })
 }
@@ -793,6 +794,7 @@ mod tests {
                 account_id: Some(account_id.to_string()),
             }),
             last_refresh: Some(Utc::now()),
+            agent_identity: None,
         }
     }
 
@@ -911,6 +913,7 @@ mod tests {
                 account_id: Some("acct-1".to_string()),
             }),
             last_refresh: None,
+            agent_identity: None,
         };
         let account = StoredAccount {
             id: stored_account_id(&auth).expect("saved account id"),
