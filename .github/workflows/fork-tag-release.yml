@@ -142,7 +142,6 @@ jobs:
   build-unix:
     needs:
       - prepare
-      - build-rusty-v8-musl
     name: Build - ${{ matrix.label }}
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -225,23 +224,50 @@ jobs:
         with:
           version: 0.14.0
 
-      - name: Download staged musl rusty_v8 artifacts
-        if: ${{ matrix.use_musl }}
-        uses: actions/download-artifact@v8
-        with:
-          name: rusty-v8-musl-${{ matrix.target }}
-          path: ${{ runner.temp }}/rusty-v8/${{ matrix.target }}
-
-      - name: Configure musl rusty_v8 artifacts
+      - name: Download musl rusty_v8 release assets
         if: ${{ matrix.use_musl }}
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
+          v8_version="$(
+            python3 - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          cargo_lock = tomllib.loads(Path("codex-rs/Cargo.lock").read_text())
+          versions = sorted(
+              {package["version"] for package in cargo_lock["package"] if package["name"] == "v8"}
+          )
+          if len(versions) != 1:
+              raise SystemExit(f"expected exactly one resolved v8 version, found: {versions}")
+          print(versions[0])
+          PY
+          )"
+          release_tag="rusty-v8-v${v8_version}"
           artifact_root="${RUNNER_TEMP}/rusty-v8/${TARGET}"
-          archive_path="${artifact_root}/librusty_v8_release_${TARGET}.a.gz"
-          binding_path="${artifact_root}/src_binding_release_${TARGET}.rs"
+          archive_name="librusty_v8_release_${TARGET}.a.gz"
+          binding_name="src_binding_release_${TARGET}.rs"
+          archive_path="${artifact_root}/${archive_name}"
+          binding_path="${artifact_root}/${binding_name}"
+          manifest_path="third_party/v8/rusty_v8_${v8_version//./_}.sha256"
+          mkdir -p "${artifact_root}"
+          curl -fsSL \
+            "https://github.com/openai/codex/releases/download/${release_tag}/${archive_name}" \
+            -o "${archive_path}"
+          curl -fsSL \
+            "https://github.com/openai/codex/releases/download/${release_tag}/${binding_name}" \
+            -o "${binding_path}"
+          for file_path in "${archive_path}" "${binding_path}"; do
+            filename="$(basename "${file_path}")"
+            expected_sha="$(grep -F "  ${filename}" "${manifest_path}" | awk '{print $1}')"
+            if [[ -z "${expected_sha}" ]]; then
+              echo "missing checksum for ${filename} in ${manifest_path}" >&2
+              exit 1
+            fi
+            echo "${expected_sha}  ${file_path}" | sha256sum -c -
+          done
           [[ -f "${archive_path}" ]]
           [[ -f "${binding_path}" ]]
           echo "RUSTY_V8_ARCHIVE=${archive_path}" >> "$GITHUB_ENV"
@@ -342,100 +368,6 @@ jobs:
         with:
           name: ${{ matrix.asset_name }}
           path: ${{ runner.temp }}/${{ matrix.asset_name }}
-
-  build-rusty-v8-musl:
-    needs: prepare
-    name: Build musl rusty_v8 - ${{ matrix.target }}
-    runs-on: ${{ matrix.runner }}
-    permissions:
-      contents: read
-      actions: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            platform: linux_amd64_musl
-            target: x86_64-unknown-linux-musl
-          - runner: ubuntu-24.04-arm
-            platform: linux_arm64_musl
-            target: aarch64-unknown-linux-musl
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.prepare.outputs.source_sha }}
-
-      - name: Set up Bazel
-        uses: bazelbuild/setup-bazelisk@v3
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
-      - name: Build Bazel V8 release pair
-        env:
-          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
-          PLATFORM: ${{ matrix.platform }}
-          TARGET: ${{ matrix.target }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          target_suffix="${TARGET//-/_}"
-          pair_target="//third_party/v8:rusty_v8_release_pair_${target_suffix}"
-          extra_targets=()
-          if [[ "${TARGET}" == *-unknown-linux-musl ]]; then
-            extra_targets=(
-              "@llvm//runtimes/libcxx:libcxx.static"
-              "@llvm//runtimes/libcxx:libcxxabi.static"
-            )
-          fi
-
-          bazel_args=(
-            build
-            -c
-            opt
-            "--platforms=@llvm//platforms:${PLATFORM}"
-            "${pair_target}"
-            "${extra_targets[@]}"
-            --build_metadata=COMMIT_SHA=$(git rev-parse HEAD)
-          )
-
-          remote_args=()
-          if [[ -n "${BUILDBUDDY_API_KEY:-}" ]]; then
-            remote_args=(
-              "--remote_header=x-buildbuddy-api-key=${BUILDBUDDY_API_KEY}"
-            )
-          fi
-
-          bazel \
-            --noexperimental_remote_repo_contents_cache \
-            --bazelrc=.bazelrc \
-            "${bazel_args[@]}" \
-            "${remote_args[@]}"
-
-      - name: Stage musl rusty_v8 release pair
-        env:
-          PLATFORM: ${{ matrix.platform }}
-          TARGET: ${{ matrix.target }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python3 .github/scripts/rusty_v8_bazel.py stage-release-pair \
-            --platform "${PLATFORM}" \
-            --target "${TARGET}" \
-            --compilation-mode opt \
-            --output-dir "dist/${TARGET}"
-
-      - name: Upload staged musl rusty_v8 artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: rusty-v8-musl-${{ matrix.target }}
-          path: dist/${{ matrix.target }}/*
 
   build-windows:
     needs: prepare
