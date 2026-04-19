@@ -64,26 +64,49 @@ alsa_lib_root="${tool_root}/alsa-lib-${alsa_lib_version}"
 alsa_lib_src_root="${alsa_lib_root}/src"
 alsa_lib_prefix="${alsa_lib_root}/prefix"
 alsa_lib_pkgconfig_dir="${alsa_lib_prefix}/lib/pkgconfig"
+pic_cflags="-fPIC"
+pic_cxxflags="-fPIC"
+clean_build_env=(env -i PATH="${PATH}" HOME="${HOME:-/tmp}" TERM="${TERM:-dumb}" TMPDIR="${TMPDIR:-/tmp}")
+helper_cc="${musl_linker}"
+if command -v "${arch}-linux-musl-g++" >/dev/null; then
+  helper_cxx="$(command -v "${arch}-linux-musl-g++")"
+elif command -v musl-g++ >/dev/null; then
+  helper_cxx="$(command -v musl-g++)"
+else
+  helper_cxx="${helper_cc}"
+fi
+helper_cppflags=()
+if [[ -d /usr/include ]]; then
+  helper_cppflags+=(-idirafter /usr/include)
+fi
+host_multiarch="$(gcc -dumpmachine 2>/dev/null || true)"
+if [[ -n "${host_multiarch}" && -d "/usr/include/${host_multiarch}" ]]; then
+  helper_cppflags+=(-idirafter "/usr/include/${host_multiarch}")
+fi
+helper_cppflags_value="${helper_cppflags[*]}"
 
-if [[ ! -f "${libcap_prefix}/lib/libcap.a" ]]; then
-  mkdir -p "${libcap_src_root}" "${libcap_prefix}/lib" "${libcap_prefix}/include/sys" "${libcap_prefix}/include/linux" "${libcap_pkgconfig_dir}"
-  libcap_tarball="${libcap_root}/${libcap_tarball_name}"
+# Rebuild vendored helper libraries from a clean tree each run so a previous
+# sanitized archive in RUNNER_TEMP cannot leak into a later musl release build.
+rm -rf "${libcap_src_root}" "${libcap_prefix}"
+mkdir -p "${libcap_src_root}" "${libcap_prefix}/lib" "${libcap_prefix}/include/sys" "${libcap_prefix}/include/linux" "${libcap_pkgconfig_dir}"
+libcap_tarball="${libcap_root}/${libcap_tarball_name}"
 
-  curl -fsSL "${libcap_download_url}" -o "${libcap_tarball}"
-  echo "${libcap_sha256}  ${libcap_tarball}" | sha256sum -c -
+curl -fsSL "${libcap_download_url}" -o "${libcap_tarball}"
+echo "${libcap_sha256}  ${libcap_tarball}" | sha256sum -c -
 
-  tar -xJf "${libcap_tarball}" -C "${libcap_src_root}"
-  libcap_source_dir="${libcap_src_root}/libcap-${libcap_version}"
+tar -xJf "${libcap_tarball}" -C "${libcap_src_root}"
+libcap_source_dir="${libcap_src_root}/libcap-${libcap_version}"
+"${clean_build_env[@]}" \
   make -C "${libcap_source_dir}/libcap" -j"$(nproc)" \
-    CC="${musl_linker}" \
-    AR=ar \
-    RANLIB=ranlib
+  CC="${helper_cc}" \
+  AR=ar \
+  RANLIB=ranlib
 
-  cp "${libcap_source_dir}/libcap/libcap.a" "${libcap_prefix}/lib/libcap.a"
-  cp "${libcap_source_dir}/libcap/include/uapi/linux/capability.h" "${libcap_prefix}/include/linux/capability.h"
-  cp "${libcap_source_dir}/libcap/../libcap/include/sys/capability.h" "${libcap_prefix}/include/sys/capability.h"
+cp "${libcap_source_dir}/libcap/libcap.a" "${libcap_prefix}/lib/libcap.a"
+cp "${libcap_source_dir}/libcap/include/uapi/linux/capability.h" "${libcap_prefix}/include/linux/capability.h"
+cp "${libcap_source_dir}/libcap/../libcap/include/sys/capability.h" "${libcap_prefix}/include/sys/capability.h"
 
-  cat > "${libcap_pkgconfig_dir}/libcap.pc" <<EOF
+cat > "${libcap_pkgconfig_dir}/libcap.pc" <<EOF
 prefix=${libcap_prefix}
 exec_prefix=\${prefix}
 libdir=\${prefix}/lib
@@ -95,7 +118,6 @@ Version: ${libcap_version}
 Libs: -L\${libdir} -lcap
 Cflags: -I\${includedir}
 EOF
-fi
 
 sysroot=""
 if command -v zig >/dev/null; then
@@ -239,31 +261,62 @@ if [[ -n "${sysroot}" && "${sysroot}" != "/" ]]; then
   echo "${boring_sysroot_var}=${sysroot}" >> "$GITHUB_ENV"
 fi
 
-if [[ ! -f "${alsa_lib_prefix}/lib/libasound.a" ]]; then
-  mkdir -p "${alsa_lib_root}" "${alsa_lib_src_root}"
-  alsa_lib_tarball="${alsa_lib_root}/${alsa_lib_tarball_name}"
+rm -rf "${alsa_lib_src_root}" "${alsa_lib_prefix}"
+mkdir -p "${alsa_lib_root}" "${alsa_lib_src_root}"
+alsa_lib_tarball="${alsa_lib_root}/${alsa_lib_tarball_name}"
 
-  curl -fsSL "${alsa_lib_download_url}" -o "${alsa_lib_tarball}"
-  echo "${alsa_lib_sha256}  ${alsa_lib_tarball}" | sha256sum -c -
+curl -fsSL "${alsa_lib_download_url}" -o "${alsa_lib_tarball}"
+echo "${alsa_lib_sha256}  ${alsa_lib_tarball}" | sha256sum -c -
 
-  tar -xjf "${alsa_lib_tarball}" -C "${alsa_lib_src_root}"
-  alsa_lib_source_dir="${alsa_lib_src_root}/alsa-lib-${alsa_lib_version}"
-  pushd "${alsa_lib_source_dir}" >/dev/null
-  CC="${cc}" \
-  CXX="${cxx}" \
+tar -xjf "${alsa_lib_tarball}" -C "${alsa_lib_src_root}"
+alsa_lib_source_dir="${alsa_lib_src_root}/alsa-lib-${alsa_lib_version}"
+pushd "${alsa_lib_source_dir}" >/dev/null
+# Rust links musl release binaries as static PIE, so any locally-built
+# static archive must use position-independent code as well.
+"${clean_build_env[@]}" \
+  CC="${helper_cc}" \
+  CXX="${helper_cxx}" \
+  CFLAGS="${pic_cflags}" \
+  CXXFLAGS="${pic_cxxflags}" \
+  CPPFLAGS="${helper_cppflags_value}" \
+  LDFLAGS="" \
   AR=ar \
   RANLIB=ranlib \
   ./configure \
-    --host="${arch}-linux-musl" \
-    --prefix="${alsa_lib_prefix}" \
-    --disable-shared \
-    --enable-static \
-    --disable-python \
-    --disable-topology \
-    --disable-ucm
-  make -j"$(nproc)"
-  make install
-  popd >/dev/null
+  --host="${arch}-linux-musl" \
+  --prefix="${alsa_lib_prefix}" \
+  --disable-shared \
+  --enable-static \
+  --disable-python \
+  --disable-topology \
+  --disable-ucm
+"${clean_build_env[@]}" \
+  make \
+  CC="${helper_cc}" \
+  CXX="${helper_cxx}" \
+  AR=ar \
+  RANLIB=ranlib \
+  CFLAGS="${pic_cflags}" \
+  CXXFLAGS="${pic_cxxflags}" \
+  CPPFLAGS="${helper_cppflags_value}" \
+  LDFLAGS="" \
+  -j"$(nproc)"
+"${clean_build_env[@]}" \
+  make \
+  CC="${helper_cc}" \
+  CXX="${helper_cxx}" \
+  AR=ar \
+  RANLIB=ranlib \
+  CFLAGS="${pic_cflags}" \
+  CXXFLAGS="${pic_cxxflags}" \
+  CPPFLAGS="${helper_cppflags_value}" \
+  LDFLAGS="" \
+  install
+popd >/dev/null
+
+if nm -A "${alsa_lib_prefix}/lib/libasound.a" | grep -q '__ubsan_'; then
+  echo "vendored ALSA archive unexpectedly contains UBSan references" >&2
+  exit 1
 fi
 
 cflags="-pthread"
