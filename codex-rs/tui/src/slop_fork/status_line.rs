@@ -282,6 +282,7 @@ mod tests {
             }),
             credits: None,
             plan_type: None,
+            rate_limit_reached_type: None,
         }
     }
 
@@ -397,6 +398,7 @@ mod tests {
                 secondary: None,
                 credits: None,
                 plan_type: None,
+                rate_limit_reached_type: None,
             },
             Utc::now(),
         )
@@ -447,6 +449,7 @@ mod tests {
                 secondary: None,
                 credits: None,
                 plan_type: None,
+                rate_limit_reached_type: None,
             },
             expired_observed_at,
         )
@@ -466,6 +469,7 @@ mod tests {
                 secondary: None,
                 credits: None,
                 plan_type: None,
+                rate_limit_reached_type: None,
             },
             now,
         )

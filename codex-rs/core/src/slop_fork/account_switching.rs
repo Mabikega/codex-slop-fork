@@ -372,6 +372,7 @@ mod tests {
                     chatgpt_plan_type: None,
                     chatgpt_user_id: None,
                     chatgpt_account_id: Some(account_id.to_string()),
+                    chatgpt_account_is_fedramp: false,
                     raw_jwt: fake_jwt(email, account_id),
                 },
                 access_token: "access".to_string(),
@@ -423,6 +424,7 @@ mod tests {
             }),
             credits: None,
             plan_type: Some(PlanType::Pro),
+            rate_limit_reached_type: None,
         }
     }
 

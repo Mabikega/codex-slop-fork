@@ -234,8 +234,8 @@ impl ToolHandler for AutoresearchRunParallelHandler {
 }
 
 async fn run_parallel_candidate(
-    session: &crate::codex::Session,
-    turn: &crate::codex::TurnContext,
+    session: &crate::session::session::Session,
+    turn: &crate::session::turn_context::TurnContext,
     run_config: &ParallelRunConfig<'_>,
     approach_id: &str,
     lease: &crate::slop_fork::autoresearch::AutoresearchParallelWorkspaceLease,

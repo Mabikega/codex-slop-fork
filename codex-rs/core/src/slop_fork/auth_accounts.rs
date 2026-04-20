@@ -787,6 +787,7 @@ mod tests {
                     chatgpt_plan_type: Some(PlanType::Known(KnownPlan::Pro)),
                     chatgpt_user_id: None,
                     chatgpt_account_id: Some(account_id.to_string()),
+                    chatgpt_account_is_fedramp: false,
                     raw_jwt: fake_jwt(email, "pro", account_id),
                 },
                 access_token: "access".to_string(),
@@ -901,6 +902,7 @@ mod tests {
                     chatgpt_plan_type: Some(PlanType::Known(KnownPlan::Team)),
                     chatgpt_user_id: None,
                     chatgpt_account_id: Some("acct-1".to_string()),
+                    chatgpt_account_is_fedramp: false,
                     raw_jwt: fake_jwt_with_active_until(
                         "person@example.com",
                         "team",

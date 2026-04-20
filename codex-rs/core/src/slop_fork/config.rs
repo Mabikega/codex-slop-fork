@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::slop_fork::resolve_root_git_project_for_trust_local;
 use codex_exec_server::ExecutorFileSystem;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use dunce::canonicalize as normalize_path;
@@ -13,7 +14,6 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::slop_fork::automation::AutomationScope;
-use codex_git_utils::resolve_root_git_project_for_trust;
 
 const SLOP_FORK_CONFIG_FILE: &str = "config-slop-fork.toml";
 
@@ -190,7 +190,7 @@ impl SlopForkConfig {
             return Some(project_config.clone());
         }
 
-        if let Some(repo_root) = resolve_root_git_project_for_trust(resolved_cwd)
+        if let Some(repo_root) = resolve_root_git_project_for_trust_local(resolved_cwd)
             && let Some(project_config) =
                 self.projects.get(&repo_root.to_string_lossy().to_string())
         {

@@ -14,10 +14,10 @@ use serde::Deserialize;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::codex::Session;
-use crate::codex::TurnContext;
-use crate::codex::TurnRunOptions;
-use crate::codex::run_turn_with_options;
+use crate::session::session::Session;
+use crate::session::turn::TurnRunOptions;
+use crate::session::turn::run_turn_with_options;
+use crate::session::turn_context::TurnContext;
 use crate::state::TaskKind;
 use crate::tasks::SessionTask;
 use crate::tasks::SessionTaskContext;

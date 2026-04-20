@@ -30,7 +30,7 @@ use crate::exec::ExecExpiration;
 use crate::exec::ExecParams;
 use crate::exec::process_exec_tool_call;
 use crate::sandboxing::SandboxPermissions;
-use codex_git_utils::resolve_root_git_project_for_trust;
+use crate::slop_fork::resolve_root_git_project_for_trust_local;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
@@ -1115,7 +1115,7 @@ pub fn global_automations_path(codex_home: &Path) -> PathBuf {
 }
 
 pub fn repo_automations_path(cwd: &Path) -> Option<PathBuf> {
-    let repo_root = resolve_root_git_project_for_trust(cwd)?;
+    let repo_root = resolve_root_git_project_for_trust_local(cwd)?;
     Some(repo_root.join(".codex").join(GLOBAL_AUTOMATIONS_FILE))
 }
 

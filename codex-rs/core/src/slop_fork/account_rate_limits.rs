@@ -762,6 +762,7 @@ mod tests {
             }),
             credits: None,
             plan_type: Some(AccountPlanType::Pro),
+            rate_limit_reached_type: None,
         }
     }
 
@@ -795,6 +796,7 @@ mod tests {
                     chatgpt_plan_type: Some(TokenPlanType::Known(KnownPlan::Pro)),
                     chatgpt_user_id: None,
                     chatgpt_account_id: Some(account_id.to_string()),
+                    chatgpt_account_is_fedramp: false,
                     raw_jwt: "jwt".to_string(),
                 },
                 access_token: "access".to_string(),
@@ -1172,6 +1174,7 @@ mod tests {
             secondary: None,
             credits: None,
             plan_type: Some(AccountPlanType::Pro),
+            rate_limit_reached_type: None,
         };
         record_rate_limit_snapshot(dir.path(), "acct-1", Some("pro"), &snapshot, now)?;
 

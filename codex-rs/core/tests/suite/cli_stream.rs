@@ -21,6 +21,12 @@ fn cli_responses_fixture() -> std::path::PathBuf {
     find_resource!("tests/cli_responses_fixture.sse").expect("failed to resolve fixture path")
 }
 
+fn codex_bin() -> std::path::PathBuf {
+    #[expect(clippy::expect_used)]
+    codex_utils_cargo_bin::cargo_bin_from_package("codex-cli", "codex")
+        .expect("failed to resolve codex binary")
+}
+
 /// Tests streaming the Responses API through the CLI using a mock server.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn responses_mode_stream_cli() {
@@ -40,7 +46,7 @@ async fn responses_mode_stream_cli() {
         "model_providers.mock={{ name = \"mock\", base_url = \"{}/v1\", env_key = \"PATH\", wire_api = \"responses\" }}",
         server.uri()
     );
-    let bin = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
+    let bin = codex_bin();
     let mut cmd = AssertCommand::new(bin);
     cmd.timeout(Duration::from_secs(30));
     cmd.arg("exec")
@@ -104,7 +110,7 @@ async fn responses_mode_stream_cli_supports_openai_base_url_config_override() {
     let resp_mock = responses::mount_sse_once(&server, sse).await;
 
     let home = TempDir::new().unwrap();
-    let bin = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
+    let bin = codex_bin();
     let mut cmd = AssertCommand::new(bin);
     cmd.timeout(Duration::from_secs(30));
     cmd.arg("exec")
@@ -157,7 +163,7 @@ async fn exec_cli_applies_model_instructions_file() {
 
     let home = TempDir::new().unwrap();
     let repo_root = repo_root();
-    let bin = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
+    let bin = codex_bin();
     let mut cmd = AssertCommand::new(bin);
     cmd.arg("exec")
         .arg("--skip-git-repo-check")
@@ -227,7 +233,7 @@ async fn exec_cli_profile_applies_model_instructions_file() {
     .unwrap();
 
     let repo_root = repo_root();
-    let bin = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
+    let bin = codex_bin();
     let mut cmd = AssertCommand::new(bin);
     cmd.arg("exec")
         .arg("--skip-git-repo-check")
@@ -276,7 +282,7 @@ async fn responses_api_stream_cli() {
     let repo_root = repo_root();
 
     let home = TempDir::new().unwrap();
-    let bin = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
+    let bin = codex_bin();
     let mut cmd = AssertCommand::new(bin);
     cmd.arg("exec")
         .arg("--skip-git-repo-check")
@@ -313,7 +319,7 @@ async fn integration_creates_and_checks_session_file() -> anyhow::Result<()> {
     let repo_root = repo_root();
 
     // 4. Run the codex CLI and invoke `exec`, which is what records a session.
-    let bin = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
+    let bin = codex_bin();
     let mut cmd = AssertCommand::new(bin);
     cmd.arg("exec")
         .arg("--skip-git-repo-check")

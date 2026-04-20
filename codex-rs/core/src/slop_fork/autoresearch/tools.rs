@@ -20,14 +20,14 @@ use codex_tools::augment_tool_spec_for_code_mode as augment_tool_spec_for_code_m
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::codex::Session;
-use crate::codex::TurnContext;
 use crate::exec::ExecExpiration;
 use crate::exec::ExecParams;
 use crate::exec::process_exec_tool_call;
 use crate::exec_env::create_env;
 use crate::function_tool::FunctionCallError;
 use crate::sandboxing::SandboxPermissions;
+use crate::session::session::Session;
+use crate::session::turn_context::TurnContext;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;

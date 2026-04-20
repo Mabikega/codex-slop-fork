@@ -12,6 +12,7 @@ should shrink and eventually disappear.
 */
 
 use super::App;
+use crate::app_command::AppCommand;
 use crate::app_event::AppEvent;
 use crate::app_server_session::AppServerSession;
 use crate::app_server_session::app_server_rate_limit_snapshot_to_core;
@@ -153,13 +154,17 @@ impl App {
 
     async fn handle_server_notification_event(
         &mut self,
-        _app_server_client: &AppServerSession,
+        app_server_client: &AppServerSession,
         notification: ServerNotification,
     ) {
         match &notification {
             ServerNotification::ServerRequestResolved(notification) => {
-                self.pending_app_server_requests
-                    .resolve_notification(&notification.request_id);
+                if let Some(request) = self
+                    .pending_app_server_requests
+                    .resolve_notification(&notification.request_id)
+                {
+                    self.chat_widget.dismiss_app_server_request(&request);
+                }
             }
             ServerNotification::McpServerStatusUpdated(_) => {
                 self.refresh_mcp_startup_expected_servers_from_config();
@@ -182,6 +187,19 @@ impl App {
                         Some(AuthMode::Chatgpt) | Some(AuthMode::ChatgptAuthTokens)
                     ),
                 );
+                return;
+            }
+            ServerNotification::ExternalAgentConfigImportCompleted(_) => {
+                let cwd = self.chat_widget.config_ref().cwd.to_path_buf();
+                if let Err(err) = self.refresh_in_memory_config_from_disk().await {
+                    tracing::warn!(
+                        error = %err,
+                        "failed to refresh config after external agent config import"
+                    );
+                }
+                self.chat_widget.refresh_plugin_mentions();
+                self.chat_widget.submit_op(AppCommand::reload_user_config());
+                self.fetch_plugins_list(app_server_client, cwd);
                 return;
             }
             _ => {}
@@ -410,12 +428,14 @@ fn server_notification_thread_target(
             Some(notification.thread_id.as_str())
         }
         ServerNotification::PilotUpdated(notification) => Some(notification.thread_id.as_str()),
+        ServerNotification::Warning(notification) => notification.thread_id.as_deref(),
         ServerNotification::SkillsChanged(_)
         | ServerNotification::McpServerStatusUpdated(_)
         | ServerNotification::McpServerOauthLoginCompleted(_)
         | ServerNotification::AccountUpdated(_)
         | ServerNotification::AccountRateLimitsUpdated(_)
         | ServerNotification::AppListUpdated(_)
+        | ServerNotification::ExternalAgentConfigImportCompleted(_)
         | ServerNotification::DeprecationNotice(_)
         | ServerNotification::ConfigWarning(_)
         | ServerNotification::FuzzyFileSearchSessionUpdated(_)
@@ -1037,6 +1057,7 @@ fn app_server_codex_error_info_to_core(
 
 #[cfg(test)]
 mod tests {
+    use super::ServerNotificationThreadTarget;
     use super::command_execution_started_event;
     use super::server_notification_thread_events;
     use super::server_notification_thread_target;
@@ -1065,6 +1086,7 @@ mod tests {
     use codex_app_server_protocol::TurnCompletedNotification;
     use codex_app_server_protocol::TurnError;
     use codex_app_server_protocol::TurnStatus;
+    use codex_app_server_protocol::WarningNotification;
     use codex_protocol::ThreadId;
     use codex_protocol::items::AgentMessageContent;
     use codex_protocol::items::AgentMessageItem;
@@ -1661,7 +1683,7 @@ mod tests {
     }
 
     #[test]
-    fn routes_automation_autoresearch_and_pilot_notifications_to_thread_targets() {
+    fn thread_scoped_notifications_route_to_thread_targets() {
         let thread_id = ThreadId::new();
 
         let automation_target = server_notification_thread_target(
@@ -1702,6 +1724,16 @@ mod tests {
         assert_eq!(
             pilot_target,
             super::ServerNotificationThreadTarget::Thread(thread_id)
+        );
+
+        let warning_target =
+            server_notification_thread_target(&ServerNotification::Warning(WarningNotification {
+                thread_id: Some(thread_id.to_string()),
+                message: "warning".to_string(),
+            }));
+        assert_eq!(
+            warning_target,
+            ServerNotificationThreadTarget::Thread(thread_id)
         );
     }
 }

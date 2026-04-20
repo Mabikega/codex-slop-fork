@@ -12,6 +12,7 @@ pub const FORK_DISPLAY_NAME: &str = "Codex Slop Fork";
 
 use std::fs::OpenOptions;
 use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use account_rate_limits::RawRateLimitSnapshotInput;
@@ -19,14 +20,15 @@ use chrono::DateTime;
 use chrono::Utc;
 use codex_protocol::protocol::RateLimitSnapshot;
 use once_cell::sync::Lazy;
+use std::ffi::OsStr;
 
 use crate::ModelClientSession;
 use crate::auth;
 use crate::auth::AuthCredentialsStoreMode;
 use crate::auth::AuthDotJson;
 use crate::auth::AuthManager;
-use crate::codex::Session;
-use crate::codex::TurnContext;
+use crate::session::session::Session;
+use crate::session::turn_context::TurnContext;
 use codex_protocol::error::CodexErr;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::WarningEvent;
@@ -46,6 +48,41 @@ static ACCOUNT_SWITCH_MUTEX: Lazy<tokio::sync::Mutex<()>> =
     Lazy::new(|| tokio::sync::Mutex::new(()));
 const ACCOUNT_SWITCH_LOCK_RETRIES: usize = 10;
 const ACCOUNT_SWITCH_LOCK_RETRY_SLEEP: Duration = Duration::from_millis(100);
+
+pub(crate) fn resolve_root_git_project_for_trust_local(cwd: &Path) -> Option<PathBuf> {
+    let base = if cwd.is_dir() { cwd } else { cwd.parent()? };
+    let mut dir = base.to_path_buf();
+
+    loop {
+        let dot_git = dir.join(".git");
+        if dot_git.exists() {
+            if dot_git.is_dir() {
+                return Some(dir);
+            }
+
+            let git_dir_s = std::fs::read_to_string(&dot_git).ok()?;
+            let git_dir_rel = git_dir_s.trim().strip_prefix("gitdir:")?.trim();
+            if git_dir_rel.is_empty() {
+                return None;
+            }
+
+            let git_dir_path = dir.join(git_dir_rel);
+            let worktrees_dir = git_dir_path.parent()?;
+            if worktrees_dir.file_name() != Some(OsStr::new("worktrees")) {
+                return None;
+            }
+
+            let common_dir = worktrees_dir.parent()?;
+            return common_dir.parent().map(Path::to_path_buf);
+        }
+
+        if !dir.pop() {
+            break;
+        }
+    }
+
+    None
+}
 
 pub(crate) fn save_auth_with_account_sync(
     codex_home: &Path,
@@ -415,6 +452,7 @@ mod tests {
                     chatgpt_plan_type: Some(PlanType::Known(KnownPlan::Team)),
                     chatgpt_user_id: None,
                     chatgpt_account_id: Some(account_id.to_string()),
+                    chatgpt_account_is_fedramp: false,
                     raw_jwt: "jwt".to_string(),
                 },
                 access_token: "access".to_string(),
@@ -460,6 +498,7 @@ mod tests {
             secondary: None,
             credits: None,
             plan_type: Some(AccountPlanType::Team),
+            rate_limit_reached_type: None,
         };
 
         record_active_account_rate_limit_snapshot(dir.path(), auth_manager.as_ref(), &rate_limits);

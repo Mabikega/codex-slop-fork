@@ -33,6 +33,7 @@ pub enum SlashCommand {
     Plan,
     Collab,
     Agent,
+    Side,
     // Undo,
     Copy,
     Diff,
@@ -97,13 +98,16 @@ impl SlashCommand {
             SlashCommand::MemoryDrop => "DO NOT USE",
             SlashCommand::MemoryUpdate => "DO NOT USE",
             SlashCommand::Model => "choose what model and reasoning effort to use",
-            SlashCommand::Fast => "toggle Fast mode to enable fastest inference at 2X plan usage",
+            SlashCommand::Fast => {
+                "toggle Fast mode to enable fastest inference with increased plan usage"
+            }
             SlashCommand::Personality => "choose a communication style for Codex",
             SlashCommand::Realtime => "toggle realtime voice mode (experimental)",
             SlashCommand::Settings => "configure realtime microphone/speaker",
             SlashCommand::Plan => "switch to Plan mode",
             SlashCommand::Collab => "change collaboration mode (experimental)",
             SlashCommand::Agent | SlashCommand::MultiAgents => "switch the active agent thread",
+            SlashCommand::Side => "start a side conversation in an ephemeral fork",
             SlashCommand::Approvals => "choose what Codex is allowed to do",
             SlashCommand::Permissions => "choose what Codex is allowed to do",
             SlashCommand::ElevateSandbox => "set up elevated agent sandbox",
@@ -139,8 +143,17 @@ impl SlashCommand {
                 | SlashCommand::Rename
                 | SlashCommand::Plan
                 | SlashCommand::Fast
+                | SlashCommand::Side
                 | SlashCommand::Resume
                 | SlashCommand::SandboxReadRoot
+        )
+    }
+
+    /// Whether this command remains available inside an active side conversation.
+    pub fn available_in_side_conversation(self) -> bool {
+        matches!(
+            self,
+            SlashCommand::Copy | SlashCommand::Diff | SlashCommand::Mention | SlashCommand::Status
         )
     }
 
@@ -183,7 +196,8 @@ impl SlashCommand {
             | SlashCommand::Plugins
             | SlashCommand::Feedback
             | SlashCommand::Quit
-            | SlashCommand::Exit => true,
+            | SlashCommand::Exit
+            | SlashCommand::Side => true,
             SlashCommand::Rollout => true,
             SlashCommand::TestApproval => true,
             SlashCommand::Realtime => true,
@@ -201,7 +215,6 @@ impl SlashCommand {
             SlashCommand::SandboxReadRoot => cfg!(target_os = "windows"),
             SlashCommand::Copy => !cfg!(target_os = "android"),
             SlashCommand::Rollout | SlashCommand::TestApproval => cfg!(debug_assertions),
-            SlashCommand::Memories => false,
             _ => true,
         }
     }

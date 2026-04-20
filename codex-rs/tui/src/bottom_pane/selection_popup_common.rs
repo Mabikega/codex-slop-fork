@@ -56,6 +56,22 @@ pub(crate) enum ColumnWidthMode {
     Fixed,
 }
 
+/// Column-width behavior plus an optional shared left-column width override.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ColumnWidthConfig {
+    pub mode: ColumnWidthMode,
+    pub name_column_width: Option<usize>,
+}
+
+impl ColumnWidthConfig {
+    pub(crate) const fn new(mode: ColumnWidthMode, name_column_width: Option<usize>) -> Self {
+        Self {
+            mode,
+            name_column_width,
+        }
+    }
+}
+
 // Fixed split used by explicitly fixed column mode: 30% label, 70%
 // description.
 const FIXED_LEFT_COLUMN_NUMERATOR: usize = 3;
@@ -149,7 +165,7 @@ fn compute_desc_col(
     start_idx: usize,
     visible_items: usize,
     content_width: u16,
-    col_width_mode: ColumnWidthMode,
+    column_width: ColumnWidthConfig,
 ) -> usize {
     if content_width <= 1 {
         return 0;
@@ -164,12 +180,12 @@ fn compute_desc_col(
             / FIXED_LEFT_COLUMN_DENOMINATOR)
             .max(1),
     );
-    match col_width_mode {
+    match column_width.mode {
         ColumnWidthMode::Fixed => ((content_width as usize * FIXED_LEFT_COLUMN_NUMERATOR)
             / FIXED_LEFT_COLUMN_DENOMINATOR)
             .clamp(1, max_desc_col),
         ColumnWidthMode::AutoVisible | ColumnWidthMode::AutoAllRows => {
-            let max_name_width = match col_width_mode {
+            let max_name_width = match column_width.mode {
                 ColumnWidthMode::AutoVisible => rows_all
                     .iter()
                     .enumerate()
@@ -200,7 +216,12 @@ fn compute_desc_col(
                 ColumnWidthMode::Fixed => 0,
             };
 
-            max_name_width.saturating_add(2).min(max_auto_desc_col)
+            column_width
+                .name_column_width
+                .map(|width| width.max(max_name_width))
+                .unwrap_or(max_name_width)
+                .saturating_add(2)
+                .min(max_auto_desc_col)
         }
     }
 }
@@ -403,7 +424,7 @@ fn adjust_start_for_wrapped_selection_visibility(
     desc_measure_items: usize,
     width: u16,
     viewport_height: u16,
-    col_width_mode: ColumnWidthMode,
+    column_width: ColumnWidthConfig,
 ) -> usize {
     let mut start_idx = compute_item_window_start(rows_all, state, max_items);
     let Some(sel) = state.selected_idx else {
@@ -416,13 +437,8 @@ fn adjust_start_for_wrapped_selection_visibility(
     // If wrapped row heights push the selected item out of view, advance the
     // item window until the selected row is visible.
     while start_idx < sel {
-        let desc_col = compute_desc_col(
-            rows_all,
-            start_idx,
-            desc_measure_items,
-            width,
-            col_width_mode,
-        );
+        let desc_col =
+            compute_desc_col(rows_all, start_idx, desc_measure_items, width, column_width);
         if is_selected_visible_in_wrapped_viewport(
             rows_all,
             start_idx,
@@ -531,7 +547,7 @@ fn render_rows_inner(
     state: &ScrollState,
     max_results: usize,
     empty_message: &str,
-    col_width_mode: ColumnWidthMode,
+    column_width: ColumnWidthConfig,
 ) -> u16 {
     if rows_all.is_empty() {
         if area.height > 0 {
@@ -556,7 +572,7 @@ fn render_rows_inner(
         desc_measure_items,
         area.width,
         area.height,
-        col_width_mode,
+        column_width,
     );
 
     let desc_col = compute_desc_col(
@@ -564,7 +580,7 @@ fn render_rows_inner(
         start_idx,
         desc_measure_items,
         area.width,
-        col_width_mode,
+        column_width,
     );
 
     // Render items, wrapping descriptions and aligning wrapped lines under the
@@ -628,35 +644,7 @@ pub(crate) fn render_rows(
         state,
         max_results,
         empty_message,
-        ColumnWidthMode::AutoVisible,
-    )
-}
-
-/// Render a list of rows using the provided ScrollState, with shared styling
-/// and behavior for selection popups.
-/// This mode keeps column placement stable while scrolling by sizing the
-/// description column against the full dataset.
-///
-/// This function should be paired with
-/// [`measure_rows_height_stable_col_widths`] so reserved and rendered heights
-/// stay in sync.
-/// Returns the number of terminal lines actually rendered.
-pub(crate) fn render_rows_stable_col_widths(
-    area: Rect,
-    buf: &mut Buffer,
-    rows_all: &[GenericDisplayRow],
-    state: &ScrollState,
-    max_results: usize,
-    empty_message: &str,
-) -> u16 {
-    render_rows_inner(
-        area,
-        buf,
-        rows_all,
-        state,
-        max_results,
-        empty_message,
-        ColumnWidthMode::AutoAllRows,
+        ColumnWidthConfig::default(),
     )
 }
 
@@ -673,7 +661,7 @@ pub(crate) fn render_rows_with_col_width_mode(
     state: &ScrollState,
     max_results: usize,
     empty_message: &str,
-    col_width_mode: ColumnWidthMode,
+    column_width: ColumnWidthConfig,
 ) -> u16 {
     render_rows_inner(
         area,
@@ -682,7 +670,7 @@ pub(crate) fn render_rows_with_col_width_mode(
         state,
         max_results,
         empty_message,
-        col_width_mode,
+        column_width,
     )
 }
 
@@ -698,6 +686,28 @@ pub(crate) fn render_rows_single_line(
     state: &ScrollState,
     max_results: usize,
     empty_message: &str,
+) -> u16 {
+    render_rows_single_line_with_col_width_mode(
+        area,
+        buf,
+        rows_all,
+        state,
+        max_results,
+        empty_message,
+        ColumnWidthConfig::default(),
+    )
+}
+
+/// Render a list of rows as a single line each (no wrapping), truncating overflow with an
+/// ellipsis while honoring the configured column width behavior.
+pub(crate) fn render_rows_single_line_with_col_width_mode(
+    area: Rect,
+    buf: &mut Buffer,
+    rows_all: &[GenericDisplayRow],
+    state: &ScrollState,
+    max_results: usize,
+    empty_message: &str,
+    column_width: ColumnWidthConfig,
 ) -> u16 {
     if rows_all.is_empty() {
         if area.height > 0 {
@@ -723,13 +733,7 @@ pub(crate) fn render_rows_single_line(
         }
     }
 
-    let desc_col = compute_desc_col(
-        rows_all,
-        start_idx,
-        visible_items,
-        area.width,
-        ColumnWidthMode::AutoVisible,
-    );
+    let desc_col = compute_desc_col(rows_all, start_idx, visible_items, area.width, column_width);
 
     let mut cur_y = area.y;
     let mut rendered_lines: u16 = 0;
@@ -793,25 +797,7 @@ pub(crate) fn measure_rows_height(
         state,
         max_results,
         width,
-        ColumnWidthMode::AutoVisible,
-    )
-}
-
-/// Measures selection-row height while using full-dataset column alignment.
-/// This should be paired with [`render_rows_stable_col_widths`] so layout
-/// reservation matches rendering behavior.
-pub(crate) fn measure_rows_height_stable_col_widths(
-    rows_all: &[GenericDisplayRow],
-    state: &ScrollState,
-    max_results: usize,
-    width: u16,
-) -> u16 {
-    measure_rows_height_inner(
-        rows_all,
-        state,
-        max_results,
-        width,
-        ColumnWidthMode::AutoAllRows,
+        ColumnWidthConfig::default(),
     )
 }
 
@@ -823,9 +809,9 @@ pub(crate) fn measure_rows_height_with_col_width_mode(
     state: &ScrollState,
     max_results: usize,
     width: u16,
-    col_width_mode: ColumnWidthMode,
+    column_width: ColumnWidthConfig,
 ) -> u16 {
-    measure_rows_height_inner(rows_all, state, max_results, width, col_width_mode)
+    measure_rows_height_inner(rows_all, state, max_results, width, column_width)
 }
 
 fn measure_rows_height_inner(
@@ -833,7 +819,7 @@ fn measure_rows_height_inner(
     state: &ScrollState,
     max_results: usize,
     width: u16,
-    col_width_mode: ColumnWidthMode,
+    column_width: ColumnWidthConfig,
 ) -> u16 {
     if rows_all.is_empty() {
         return 1; // placeholder "no matches" line
@@ -859,7 +845,7 @@ fn measure_rows_height_inner(
         start_idx,
         visible_items,
         content_width,
-        col_width_mode,
+        column_width,
     );
 
     let mut total: u16 = 0;

@@ -205,6 +205,7 @@ impl SlopForkUi {
         let view = CustomPromptView::new(
             "Enter API Key".to_string(),
             "Paste the API key and press Enter".to_string(),
+            String::new(),
             Some(
                 "The key is stored as auth.json and also saved in ~/.codex/.accounts/.".to_string(),
             ),
@@ -2191,6 +2192,7 @@ mod tests {
                 secondary: None,
                 credits: None,
                 plan_type: None,
+                rate_limit_reached_type: None,
             }),
             five_hour_window: StoredQuotaWindow {
                 used_percent: Some(0),
@@ -2270,6 +2272,7 @@ mod tests {
                 secondary: None,
                 credits: None,
                 plan_type: None,
+                rate_limit_reached_type: None,
             }),
             five_hour_window: StoredQuotaWindow {
                 used_percent: Some(100),
