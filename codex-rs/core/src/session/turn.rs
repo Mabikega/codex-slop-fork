@@ -16,6 +16,7 @@ use crate::compact::run_inline_auto_compact_task;
 use crate::compact::should_use_remote_compact_task;
 use crate::compact_remote::run_inline_remote_auto_compact_task;
 use crate::connectors;
+use crate::context::ContextualUserFragment;
 use crate::feedback_tags;
 use crate::hook_runtime::PendingInputHookDisposition;
 use crate::hook_runtime::emit_hook_completed_events;
@@ -81,7 +82,6 @@ use codex_protocol::items::UserMessageItem;
 use codex_protocol::items::build_hook_prompt_message;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
-use codex_protocol::models::DeveloperInstructions;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
@@ -97,7 +97,9 @@ use codex_protocol::protocol::ReasoningRawContentDeltaEvent;
 use codex_protocol::protocol::TurnDiffEvent;
 use codex_protocol::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
+use codex_tools::ResponsesApiNamespaceTool;
 use codex_tools::ToolName;
+use codex_tools::ToolSpec;
 use codex_tools::filter_tool_suggest_discoverable_tools_for_client;
 use codex_utils_stream_parser::AssistantTextChunk;
 use codex_utils_stream_parser::AssistantTextStreamParser;
@@ -135,7 +137,10 @@ pub(crate) struct TurnRunOptions {
     pub(crate) additional_instructions: Option<String>,
     pub(crate) prewarmed_client_session: Option<ModelClientSession>,
 }
-
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "turn execution must keep active-turn state transitions atomic"
+)]
 pub(crate) async fn run_turn(
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
@@ -274,7 +279,7 @@ pub(crate) async fn run_turn_with_options(
         turn_context.sub_id.clone(),
     );
     let SkillInjections {
-        items: skill_items,
+        items: skill_injections,
         warnings: skill_warnings,
     } = build_skill_injections(
         &mentioned_skills,
@@ -289,6 +294,11 @@ pub(crate) async fn run_turn_with_options(
         sess.send_event(&turn_context, EventMsg::Warning(WarningEvent { message }))
             .await;
     }
+
+    let skill_items: Vec<ResponseItem> = skill_injections
+        .iter()
+        .map(|skill| ContextualUserFragment::into(crate::context::SkillInstructions::from(skill)))
+        .collect();
 
     let plugin_items =
         build_plugin_injections(&mentioned_plugins, &mcp_tools, &available_connectors);
@@ -489,7 +499,15 @@ pub(crate) async fn run_turn_with_options(
                 .for_prompt(&turn_context.model_info.input_modalities)
         };
         if let Some(prompt) = additional_instructions.as_ref() {
-            sampling_request_input.push(DeveloperInstructions::new(prompt.clone()).into());
+            sampling_request_input.push(
+                ResponseInputItem::Message {
+                    role: "developer".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: prompt.clone(),
+                    }],
+                }
+                .into(),
+            );
         }
 
         let sampling_request_input_messages = sampling_request_input
@@ -1010,7 +1028,7 @@ pub(crate) fn build_prompt(
         .dynamic_tools
         .iter()
         .filter(|tool| tool.defer_loading)
-        .map(|tool| tool.name.as_str())
+        .map(|tool| ToolName::new(tool.namespace.clone(), tool.name.clone()))
         .collect::<HashSet<_>>();
     let tools = if deferred_dynamic_tools.is_empty() {
         router.model_visible_specs()
@@ -1018,7 +1036,7 @@ pub(crate) fn build_prompt(
         router
             .model_visible_specs()
             .into_iter()
-            .filter(|spec| !deferred_dynamic_tools.contains(spec.name()))
+            .filter_map(|spec| filter_deferred_dynamic_tool_spec(spec, &deferred_dynamic_tools))
             .collect()
     };
 
@@ -1029,6 +1047,35 @@ pub(crate) fn build_prompt(
         base_instructions,
         personality: turn_context.personality,
         output_schema: turn_context.final_output_json_schema.clone(),
+    }
+}
+
+fn filter_deferred_dynamic_tool_spec(
+    spec: ToolSpec,
+    deferred_dynamic_tools: &HashSet<ToolName>,
+) -> Option<ToolSpec> {
+    match spec {
+        ToolSpec::Function(tool) => {
+            if deferred_dynamic_tools.contains(&ToolName::plain(tool.name.as_str())) {
+                None
+            } else {
+                Some(ToolSpec::Function(tool))
+            }
+        }
+        ToolSpec::Namespace(mut namespace) => {
+            let namespace_name = namespace.name.clone();
+            namespace.tools.retain(|tool| match tool {
+                ResponsesApiNamespaceTool::Function(tool) => !deferred_dynamic_tools.contains(
+                    &ToolName::namespaced(namespace_name.as_str(), tool.name.as_str()),
+                ),
+            });
+            if namespace.tools.is_empty() {
+                None
+            } else {
+                Some(ToolSpec::Namespace(namespace))
+            }
+        }
+        spec => Some(spec),
     }
 }
 
@@ -1209,6 +1256,10 @@ async fn run_sampling_request(
     }
 }
 
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "tool router construction reads through the session-owned manager guard"
+)]
 pub(crate) async fn built_tools(
     sess: &Session,
     turn_context: &TurnContext,
@@ -1991,7 +2042,11 @@ async fn try_run_sampling_request(
         match event {
             ResponseEvent::Created => {}
             ResponseEvent::OutputItemDone(item) => {
-                active_tool_argument_diff_consumer = None;
+                if let Some((_, mut consumer)) = active_tool_argument_diff_consumer.take()
+                    && let Some(event) = consumer.flush_on_complete()
+                {
+                    sess.send_event(&turn_context, event).await;
+                }
                 let previously_active_item = active_item.take();
                 if let Some(previous) = previously_active_item.as_ref()
                     && matches!(previous, TurnItem::AgentMessage(_))
