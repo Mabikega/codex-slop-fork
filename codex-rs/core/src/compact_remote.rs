@@ -338,7 +338,6 @@ fn trim_function_call_history_to_fit_context_window(
     let Some(context_window) = turn_context.model_context_window() else {
         return deleted_items;
     };
-
     while history
         .estimate_token_count_with_base_instructions(base_instructions)
         .is_some_and(|estimated_tokens| estimated_tokens > context_window)

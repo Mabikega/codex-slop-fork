@@ -12,7 +12,6 @@ mod status_line;
 mod ui;
 
 pub(crate) use app_server::SlopForkAppServerState;
-pub(crate) use app_server::try_submit_app_server_op;
 #[cfg(test)]
 pub(crate) use auto_command::AUTO_COMMAND_MENTION_PATH;
 pub(crate) use auto_command::auto_command_mention_item;

@@ -276,6 +276,7 @@ mod tests {
                     chatgpt_plan_type: Some(PlanType::Known(plan)),
                     chatgpt_user_id: None,
                     chatgpt_account_id: Some(account_id.to_string()),
+                    chatgpt_account_is_fedramp: false,
                     raw_jwt: fake_jwt(email, plan.raw_value(), account_id),
                 },
                 access_token: "access".to_string(),

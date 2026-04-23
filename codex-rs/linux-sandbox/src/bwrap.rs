@@ -1480,8 +1480,12 @@ mod tests {
             exclude_slash_tmp: true,
         };
 
-        let args = create_filesystem_args(&FileSystemSandboxPolicy::from(&policy), &workspace)
-            .expect("filesystem args");
+        let args = create_filesystem_args(
+            &FileSystemSandboxPolicy::from(&policy),
+            &workspace,
+            NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH,
+        )
+        .expect("filesystem args");
         let dot_codex = workspace.join(".codex");
 
         assert!(
