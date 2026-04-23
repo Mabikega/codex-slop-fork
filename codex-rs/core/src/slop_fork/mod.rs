@@ -127,7 +127,9 @@ pub fn sync_external_auth_if_enabled(auth_manager: &AuthManager) -> ExternalAuth
     auth_sync::sync_external_auth_if_enabled(auth_manager)
 }
 
-pub fn take_external_auth_switch_notice(auth_manager: &AuthManager) -> Option<String> {
+pub fn take_external_auth_switch_notice(
+    auth_manager: &AuthManager,
+) -> Option<crate::auth::ExternalAuthSwitchNoticeForFork> {
     auth_manager.take_external_auth_switch_notice_for_fork()
 }
 

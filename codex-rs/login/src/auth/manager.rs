@@ -117,6 +117,12 @@ static PENDING_EXTERNAL_AUTH_TRANSITIONS_FOR_FORK: Lazy<
     Mutex<HashMap<PathBuf, PendingExternalAuthTransition>>,
 > = Lazy::new(|| Mutex::new(HashMap::new()));
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExternalAuthSwitchNoticeForFork {
+    External { label: String },
+    Local { label: String },
+}
+
 #[derive(Debug, Error)]
 pub enum RefreshTokenError {
     #[error("{0}")]
@@ -1071,7 +1077,7 @@ impl AuthDotJson {
 #[derive(Clone)]
 struct CachedAuth {
     auth: Option<CodexAuth>,
-    pending_external_auth_switch_notice: Option<String>,
+    pending_external_auth_switch_notice: Option<ExternalAuthSwitchNoticeForFork>,
     pending_expected_external_auth_identity: Option<String>,
     /// Permanent refresh failure cached for the current auth snapshot so
     /// later refresh attempts for the same credentials fail fast without network.
@@ -1681,7 +1687,15 @@ impl AuthManager {
 
     pub fn record_external_auth_switch_notice_for_fork(&self, label: String) {
         if let Ok(mut guard) = self.inner.write() {
-            guard.pending_external_auth_switch_notice = Some(label);
+            guard.pending_external_auth_switch_notice =
+                Some(ExternalAuthSwitchNoticeForFork::External { label });
+        }
+    }
+
+    pub fn record_local_auth_switch_notice_for_fork(&self, label: String) {
+        if let Ok(mut guard) = self.inner.write() {
+            guard.pending_external_auth_switch_notice =
+                Some(ExternalAuthSwitchNoticeForFork::Local { label });
         }
     }
 
@@ -1781,7 +1795,9 @@ impl AuthManager {
         false
     }
 
-    pub fn take_external_auth_switch_notice_for_fork(&self) -> Option<String> {
+    pub fn take_external_auth_switch_notice_for_fork(
+        &self,
+    ) -> Option<ExternalAuthSwitchNoticeForFork> {
         self.inner
             .write()
             .ok()

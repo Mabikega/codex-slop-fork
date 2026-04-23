@@ -34,18 +34,19 @@ pub fn sync_external_auth_if_enabled(auth_manager: &AuthManager) -> ExternalAuth
     auth_manager.set_cached_auth_from_fork(stored_auth.clone());
 
     if auth_identity(cached_auth.as_ref()) != auth_identity(stored_auth.as_ref()) {
-        if auth_manager.suppress_expected_external_auth_transition_for_fork(
-            cached_auth.as_ref(),
-            stored_auth.as_ref(),
-        ) {
-            return ExternalAuthSyncOutcome::SwitchedAccounts;
-        }
         let display_labels =
             auth_accounts::load_account_display_labels(auth_manager.codex_home_path());
         let label = stored_auth
             .as_ref()
             .map(|auth| display_labels.label_for_codex_auth(auth))
             .unwrap_or_else(|| "none".to_string());
+        if auth_manager.suppress_expected_external_auth_transition_for_fork(
+            cached_auth.as_ref(),
+            stored_auth.as_ref(),
+        ) {
+            auth_manager.record_local_auth_switch_notice_for_fork(label);
+            return ExternalAuthSyncOutcome::SwitchedAccounts;
+        }
         auth_manager.record_external_auth_switch_notice_for_fork(label);
         ExternalAuthSyncOutcome::SwitchedAccounts
     } else {
@@ -71,6 +72,7 @@ mod tests {
     use crate::AuthManager;
     use crate::auth::AuthCredentialsStoreMode;
     use crate::auth::AuthDotJson;
+    use crate::auth::ExternalAuthSwitchNoticeForFork;
     use codex_app_server_protocol::AuthMode;
     use codex_login::token_data::IdTokenInfo;
     use codex_login::token_data::TokenData;
@@ -163,7 +165,9 @@ mod tests {
         assert_eq!(outcome, ExternalAuthSyncOutcome::SwitchedAccounts);
         assert_eq!(
             auth_manager.take_external_auth_switch_notice_for_fork(),
-            None
+            Some(ExternalAuthSwitchNoticeForFork::Local {
+                label: "next@example.com (Pro)".to_string(),
+            })
         );
         assert_eq!(
             auth_identity(auth_manager.auth_cached().as_ref()),
@@ -208,7 +212,9 @@ mod tests {
         assert_eq!(outcome, ExternalAuthSyncOutcome::SwitchedAccounts);
         assert_eq!(
             auth_manager.take_external_auth_switch_notice_for_fork(),
-            None
+            Some(ExternalAuthSwitchNoticeForFork::Local {
+                label: "next@example.com (Pro)".to_string(),
+            })
         );
         assert_eq!(
             auth_identity(auth_manager.auth_cached().as_ref()),
@@ -291,7 +297,9 @@ mod tests {
         assert_eq!(outcome, ExternalAuthSyncOutcome::SwitchedAccounts);
         assert_eq!(
             observing_auth_manager.take_external_auth_switch_notice_for_fork(),
-            None
+            Some(ExternalAuthSwitchNoticeForFork::Local {
+                label: "next@example.com (Pro)".to_string(),
+            })
         );
         assert_eq!(
             auth_identity(observing_auth_manager.auth_cached().as_ref()),

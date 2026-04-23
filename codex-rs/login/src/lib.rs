@@ -32,6 +32,7 @@ pub use auth::ExternalAuth;
 pub use auth::ExternalAuthChatgptMetadata;
 pub use auth::ExternalAuthRefreshContext;
 pub use auth::ExternalAuthRefreshReason;
+pub use auth::ExternalAuthSwitchNoticeForFork;
 pub use auth::ExternalAuthTokens;
 pub use auth::OPENAI_API_KEY_ENV_VAR;
 pub use auth::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
