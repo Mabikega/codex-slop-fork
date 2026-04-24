@@ -300,7 +300,7 @@ fn default_exec_approval_decisions(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct GuardianApprovalsMode {
+struct AutoReviewMode {
     approval_policy: AskForApproval,
     approvals_reviewer: ApprovalsReviewer,
     sandbox_policy: SandboxPolicy,
@@ -309,11 +309,11 @@ struct GuardianApprovalsMode {
 /// Enabling the Auto-review experiment in the TUI should also switch the
 /// current `/approvals` settings to the matching Auto-review mode. Users
 /// can still change `/approvals` afterward; this just assumes that opting into
-/// the experiment means they want guardian review enabled immediately.
-fn guardian_approvals_mode() -> GuardianApprovalsMode {
-    GuardianApprovalsMode {
+/// the experiment means they want Auto-review enabled immediately.
+fn auto_review_mode() -> AutoReviewMode {
+    AutoReviewMode {
         approval_policy: AskForApproval::OnRequest,
-        approvals_reviewer: ApprovalsReviewer::GuardianSubagent,
+        approvals_reviewer: ApprovalsReviewer::AutoReview,
         sandbox_policy: SandboxPolicy::new_workspace_write_policy(),
     }
 }
@@ -625,6 +625,7 @@ impl App {
                 cfg.codex_home.clone().to_path_buf(),
                 /*enable_codex_api_key_env*/ false,
                 cfg.cli_auth_credentials_store_mode,
+                Some(cfg.chatgpt_base_url),
             ),
             has_chatgpt_account: self.chat_widget.has_chatgpt_account(),
             model_catalog: self.model_catalog.clone(),
@@ -790,6 +791,7 @@ impl App {
                         config.codex_home.clone().to_path_buf(),
                         /*enable_codex_api_key_env*/ false,
                         config.cli_auth_credentials_store_mode,
+                        Some(config.chatgpt_base_url.clone()),
                     ),
                     has_chatgpt_account,
                     model_catalog: model_catalog.clone(),
@@ -831,6 +833,7 @@ impl App {
                         config.codex_home.clone().to_path_buf(),
                         /*enable_codex_api_key_env*/ false,
                         config.cli_auth_credentials_store_mode,
+                        Some(config.chatgpt_base_url.clone()),
                     ),
                     has_chatgpt_account,
                     model_catalog: model_catalog.clone(),
@@ -877,6 +880,7 @@ impl App {
                         config.codex_home.clone().to_path_buf(),
                         /*enable_codex_api_key_env*/ false,
                         config.cli_auth_credentials_store_mode,
+                        Some(config.chatgpt_base_url.clone()),
                     ),
                     has_chatgpt_account,
                     model_catalog: model_catalog.clone(),

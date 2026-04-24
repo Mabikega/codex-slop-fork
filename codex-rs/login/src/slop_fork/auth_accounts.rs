@@ -82,6 +82,11 @@ pub fn auth_label(auth: &AuthDotJson) -> String {
                 .unwrap_or_else(|| "ChatGPT account".to_string());
             chatgpt_label_with_base(auth, base_label)
         }
+        AuthMode::AgentIdentity => auth
+            .agent_identity
+            .as_ref()
+            .map(|record| format!("Agent identity ({})", record.email))
+            .unwrap_or_else(|| "Agent identity".to_string()),
     }
 }
 
@@ -240,6 +245,7 @@ pub fn account_has_credentials(account: &StoredAccount) -> bool {
     match account.auth.resolved_mode() {
         AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => account.auth.tokens.is_some(),
         AuthMode::ApiKey => account.auth.openai_api_key.is_some(),
+        AuthMode::AgentIdentity => account.auth.agent_identity.is_some(),
     }
 }
 
@@ -315,11 +321,12 @@ pub fn upsert_account(codex_home: &Path, auth: &AuthDotJson) -> std::io::Result<
 }
 
 pub fn stored_account_id(auth: &AuthDotJson) -> Option<String> {
-    let identity = account_identity(auth)?;
     let prefix = match auth.resolved_mode() {
         AuthMode::ApiKey => "api-key",
         AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => "chatgpt",
+        AuthMode::AgentIdentity => return None,
     };
+    let identity = account_identity(auth)?;
     let digest = Sha256::digest(identity.as_bytes());
     let hex = format!("{digest:x}");
     Some(format!("{prefix}-{}", &hex[..16]))
@@ -516,6 +523,7 @@ fn account_identity(auth: &AuthDotJson) -> Option<String> {
                     .map(str::to_ascii_lowercase)
             })
             .map(|identity| format!("chatgpt:{identity}")),
+        AuthMode::AgentIdentity => None,
     }
 }
 

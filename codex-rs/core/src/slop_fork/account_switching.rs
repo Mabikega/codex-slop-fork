@@ -182,6 +182,7 @@ fn select_next_account(
                 chatgpt_accounts.push(account.clone());
             }
             ApiAuthMode::ApiKey => api_key_accounts.push(account.clone()),
+            ApiAuthMode::AgentIdentity => {}
         }
     }
 
@@ -292,6 +293,7 @@ fn account_has_credentials(account: &StoredAccount) -> bool {
     match account.auth.resolved_mode() {
         ApiAuthMode::Chatgpt | ApiAuthMode::ChatgptAuthTokens => account.auth.tokens.is_some(),
         ApiAuthMode::ApiKey => account.auth.openai_api_key.is_some(),
+        ApiAuthMode::AgentIdentity => account.auth.agent_identity.is_some(),
     }
 }
 

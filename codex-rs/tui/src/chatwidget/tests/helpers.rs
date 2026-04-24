@@ -185,6 +185,7 @@ pub(super) async fn make_chatwidget_manual(
         codex_core::CodexAuth::from_api_key("unused"),
         cfg.codex_home.to_path_buf(),
     );
+    let effective_service_tier = cfg.service_tier;
     let mut widget = ChatWidget {
         app_event_tx,
         codex_op_target: super::CodexOpTarget::Direct(op_tx),
@@ -197,6 +198,7 @@ pub(super) async fn make_chatwidget_manual(
         layout_cache: std::cell::Cell::new(None),
         active_cell_viewport_cache: std::cell::RefCell::new(None),
         config: cfg,
+        effective_service_tier,
         current_collaboration_mode,
         active_collaboration_mask,
         auth_manager,
@@ -977,7 +979,7 @@ pub(super) fn plugins_test_detail(
 ) -> PluginDetail {
     PluginDetail {
         marketplace_name: "ChatGPT Marketplace".to_string(),
-        marketplace_path: plugins_test_absolute_path("marketplaces/chatgpt"),
+        marketplace_path: Some(plugins_test_absolute_path("marketplaces/chatgpt")),
         summary,
         description: description.map(str::to_string),
         skills: skills
@@ -987,7 +989,9 @@ pub(super) fn plugins_test_detail(
                 description: format!("{name} description"),
                 short_description: None,
                 interface: None,
-                path: plugins_test_absolute_path(&format!("skills/{name}/SKILL.md")),
+                path: Some(plugins_test_absolute_path(&format!(
+                    "skills/{name}/SKILL.md"
+                ))),
                 enabled: true,
             })
             .collect(),
