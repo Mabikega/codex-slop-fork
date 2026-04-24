@@ -656,33 +656,6 @@ impl SlopForkAppServerState {
         chat_widget.add_error_message(message.to_string());
         None
     }
-
-    #[cfg(test)]
-    pub(crate) fn seed_pending_remote_automation_bootstrap(
-        &mut self,
-        thread_id: String,
-        request_nonce: u64,
-    ) {
-        self.pending_remote_automation_bootstrap = Some((thread_id, request_nonce));
-    }
-
-    #[cfg(test)]
-    pub(crate) fn seed_pending_remote_autoresearch_bootstrap(
-        &mut self,
-        thread_id: String,
-        request_nonce: u64,
-    ) {
-        self.pending_remote_autoresearch_bootstrap = Some((thread_id, request_nonce));
-    }
-
-    #[cfg(test)]
-    pub(crate) fn seed_pending_remote_pilot_bootstrap(
-        &mut self,
-        thread_id: String,
-        request_nonce: u64,
-    ) {
-        self.pending_remote_pilot_bootstrap = Some((thread_id, request_nonce));
-    }
 }
 
 async fn fetch_remote_automation_state(

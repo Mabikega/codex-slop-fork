@@ -482,6 +482,17 @@ impl App {
         thread_id: ThreadId,
         op: &AppCommand,
     ) -> Result<bool> {
+        if crate::slop_fork::try_submit_app_server_op(
+            &mut self.chat_widget,
+            app_server,
+            thread_id,
+            op,
+        )
+        .await?
+        {
+            return Ok(true);
+        }
+
         match op.view() {
             AppCommandView::Interrupt => {
                 if let Some(turn_id) = self.active_turn_id_for_thread(thread_id).await {
@@ -571,6 +582,14 @@ impl App {
                     }
                 }
                 if should_start_turn {
+                    let permission_profile = if !app_server.is_remote()
+                        && self.runtime_sandbox_policy_override.is_some()
+                        && !matches!(sandbox_policy, SandboxPolicy::ExternalSandbox { .. })
+                    {
+                        Some(self.config.permissions.permission_profile())
+                    } else {
+                        None
+                    };
                     app_server
                         .turn_start(
                             thread_id,
@@ -580,6 +599,7 @@ impl App {
                             approvals_reviewer
                                 .unwrap_or(self.chat_widget.config_ref().approvals_reviewer),
                             sandbox_policy.clone(),
+                            permission_profile,
                             model.to_string(),
                             effort,
                             *summary,
@@ -672,6 +692,12 @@ impl App {
                 Ok(true)
             }
             AppCommandView::OverrideTurnContext { .. } => Ok(true),
+            AppCommandView::Other(Op::ApproveGuardianDeniedAction { event }) => {
+                app_server
+                    .thread_approve_guardian_denied_action(thread_id, event)
+                    .await?;
+                Ok(true)
+            }
             _ => Ok(false),
         }
     }

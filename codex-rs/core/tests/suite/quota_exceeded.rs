@@ -103,6 +103,7 @@ async fn quota_exceeded_emits_single_error_event() -> Result<()> {
 
     test.codex
         .submit(Op::UserInput {
+            environments: None,
             items: vec![UserInput::Text {
                 text: "quota?".into(),
                 text_elements: Vec::new(),
@@ -214,6 +215,7 @@ async fn usage_limit_switches_to_another_saved_account_and_retries_turn() -> Res
                 text: "hello".into(),
                 text_elements: Vec::new(),
             }],
+            environments: None,
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
         })

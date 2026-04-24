@@ -1047,14 +1047,24 @@ impl App {
             AppEvent::PersistServiceTierSelection { service_tier } => {
                 self.refresh_status_line();
                 let profile = self.active_profile.as_deref();
-                match ConfigEditsBuilder::new(&self.config.codex_home)
+                self.config.service_tier = service_tier;
+                let mut edits = ConfigEditsBuilder::new(&self.config.codex_home)
                     .with_profile(profile)
-                    .set_service_tier(service_tier)
-                    .apply()
-                    .await
-                {
+                    .set_service_tier(service_tier);
+                if service_tier.is_none() {
+                    self.config.notices.fast_default_opt_out = Some(true);
+                    edits = edits.set_fast_default_opt_out(/*opted_out*/ true);
+                }
+                match edits.apply().await {
                     Ok(()) => {
-                        let status = if service_tier.is_some() { "on" } else { "off" };
+                        let status = if matches!(
+                            service_tier,
+                            Some(codex_protocol::config_types::ServiceTier::Fast)
+                        ) {
+                            "on"
+                        } else {
+                            "off"
+                        };
                         let mut message = format!("Fast mode set to {status}");
                         if let Some(profile) = profile {
                             message.push_str(" for ");
@@ -1142,6 +1152,8 @@ impl App {
                     Some(self.config.permissions.approval_policy.value());
                 self.chat_widget
                     .set_approval_policy(self.config.permissions.approval_policy.value());
+                self.sync_active_thread_permission_settings_to_cached_session()
+                    .await;
             }
             AppEvent::UpdateSandboxPolicy(policy) => {
                 #[cfg(target_os = "windows")]
@@ -1170,6 +1182,8 @@ impl App {
                 }
                 self.runtime_sandbox_policy_override =
                     Some(self.config.permissions.sandbox_policy.get().clone());
+                self.sync_active_thread_permission_settings_to_cached_session()
+                    .await;
 
                 // If sandbox policy becomes workspace-write or read-only, run the Windows world-writable scan.
                 #[cfg(target_os = "windows")]
@@ -1204,6 +1218,8 @@ impl App {
             AppEvent::UpdateApprovalsReviewer(policy) => {
                 self.config.approvals_reviewer = policy;
                 self.chat_widget.set_approvals_reviewer(policy);
+                self.sync_active_thread_permission_settings_to_cached_session()
+                    .await;
                 let profile = self.active_profile.as_deref();
                 let segments = if let Some(profile) = profile {
                     vec![
@@ -1549,7 +1565,6 @@ impl App {
                     ));
                 }
             },
-            #[cfg(not(target_os = "linux"))]
             AppEvent::UpdateRecordingMeter { id, text } => {
                 // Update in place to preserve the element id for subsequent frames.
                 let updated = self.chat_widget.update_recording_meter_in_place(&id, &text);
@@ -1561,8 +1576,6 @@ impl App {
                     tui.frame_requester().schedule_frame();
                 }
             }
-            #[cfg(target_os = "linux")]
-            AppEvent::UpdateRecordingMeter { .. } => {}
             AppEvent::StatusLineSetup { items } => {
                 let ids = items.iter().map(ToString::to_string).collect::<Vec<_>>();
                 let edit = crate::legacy_core::config::edit::status_line_items_edit(&ids);

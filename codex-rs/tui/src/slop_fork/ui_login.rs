@@ -33,25 +33,6 @@ enum SavedAccountPopupMode {
 }
 
 impl SlopForkUi {
-    #[cfg(test)]
-    pub(crate) fn set_pending_chatgpt_login_for_test(
-        &mut self,
-        pending_login: PendingChatgptLogin,
-    ) {
-        self.finish_pending_chatgpt_login();
-        self.pending_chatgpt_login = Some(pending_login);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn pending_chatgpt_login(&self) -> Option<&PendingChatgptLogin> {
-        self.pending_chatgpt_login.as_ref()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn open_login_root(&mut self, ctx: &SlopForkUiContext) -> Vec<SlopForkUiEffect> {
-        self.open_login_popup(ctx, LoginPopupKind::Root)
-    }
-
     pub(crate) fn open_login_popup(
         &mut self,
         ctx: &SlopForkUiContext,

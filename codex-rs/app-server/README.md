@@ -334,12 +334,15 @@ If this was the last subscriber, the server unloads the thread and emits `thread
 
 ### Example: Read a thread
 
-Use `thread/read` to fetch a stored thread by id without resuming it. Pass `includeTurns` when you want the rollout history loaded into `thread.turns`. The returned thread includes `agentNickname` and `agentRole` for AgentControl-spawned thread sub-agents when available.
+Use `thread/read` to fetch a stored thread by id without resuming it. Pass `includeTurns` when you want the rollout history loaded into `thread.turns`. The returned thread includes `agentNickname` and `agentRole` for AgentControl-spawned thread sub-agents when available. When the active permissions are known, `thread/read` also returns `approvalPolicy`, `sandbox`, and `permissionProfile`, matching the same compatibility/canonical split used by `thread/start`, `thread/resume`, and `thread/fork`.
 
 ```json
 { "method": "thread/read", "id": 22, "params": { "threadId": "thr_123" } }
 { "id": 22, "result": {
-    "thread": { "id": "thr_123", "status": { "type": "notLoaded" }, "turns": [] }
+    "thread": { "id": "thr_123", "status": { "type": "notLoaded" }, "turns": [] },
+    "approvalPolicy": { "type": "on_request" },
+    "sandbox": { "type": "read_only" },
+    "permissionProfile": { "...": "..." }
 } }
 ```
 

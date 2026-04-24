@@ -668,8 +668,11 @@ mod tests {
     use codex_app_server_protocol::ConfigWarningNotification;
     use codex_app_server_protocol::DynamicToolCallParams;
     use codex_app_server_protocol::FileChangeRequestApprovalParams;
+    use codex_app_server_protocol::GuardianWarningNotification;
     use codex_app_server_protocol::ModelRerouteReason;
     use codex_app_server_protocol::ModelReroutedNotification;
+    use codex_app_server_protocol::ModelVerification;
+    use codex_app_server_protocol::ModelVerificationNotification;
     use codex_app_server_protocol::PilotRun;
     use codex_app_server_protocol::PilotStatus;
     use codex_app_server_protocol::PilotUpdateType;
@@ -1037,6 +1040,28 @@ mod tests {
     }
 
     #[test]
+    fn verify_guardian_warning_notification_serialization() {
+        let notification = ServerNotification::GuardianWarning(GuardianWarningNotification {
+            thread_id: "thread-1".to_string(),
+            message: "Automatic approval review denied the requested action.".to_string(),
+        });
+
+        let jsonrpc_notification = OutgoingMessage::AppServerNotification(notification);
+        assert_eq!(
+            json!({
+                "method": "guardianWarning",
+                "params": {
+                    "threadId": "thread-1",
+                    "message": "Automatic approval review denied the requested action.",
+                },
+            }),
+            serde_json::to_value(jsonrpc_notification)
+                .expect("ensure the notification serializes correctly"),
+            "ensure the notification serializes correctly"
+        );
+    }
+
+    #[test]
     fn verify_model_rerouted_notification_serialization() {
         let notification = ServerNotification::ModelRerouted(ModelReroutedNotification {
             thread_id: "thread-1".to_string(),
@@ -1056,6 +1081,30 @@ mod tests {
                     "fromModel": "gpt-5.3-codex",
                     "toModel": "gpt-5.2",
                     "reason": "highRiskCyberActivity",
+                },
+            }),
+            serde_json::to_value(jsonrpc_notification)
+                .expect("ensure the notification serializes correctly"),
+            "ensure the notification serializes correctly"
+        );
+    }
+
+    #[test]
+    fn verify_model_verification_notification_serialization() {
+        let notification = ServerNotification::ModelVerification(ModelVerificationNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            verifications: vec![ModelVerification::TrustedAccessForCyber],
+        });
+
+        let jsonrpc_notification = OutgoingMessage::AppServerNotification(notification);
+        assert_eq!(
+            json!({
+                "method": "model/verification",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "verifications": ["trustedAccessForCyber"],
                 },
             }),
             serde_json::to_value(jsonrpc_notification)

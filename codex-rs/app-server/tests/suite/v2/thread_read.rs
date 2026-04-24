@@ -5,8 +5,15 @@ use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::rollout_path;
 use app_test_support::test_absolute_path;
 use app_test_support::to_response;
+use codex_app_server_protocol::FileSystemAccessMode;
+use codex_app_server_protocol::FileSystemPath;
+use codex_app_server_protocol::FileSystemSandboxEntry;
+use codex_app_server_protocol::FileSystemSpecialPath;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCResponse;
+use codex_app_server_protocol::PermissionProfile;
+use codex_app_server_protocol::PermissionProfileFileSystemPermissions;
+use codex_app_server_protocol::PermissionProfileNetworkPermissions;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SessionSource;
 use codex_app_server_protocol::SortDirection;
@@ -32,6 +39,8 @@ use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
 use codex_core::ARCHIVED_SESSIONS_SUBDIR;
+use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::user_input::ByteRange;
 use codex_protocol::user_input::TextElement;
 use core_test_support::responses;
@@ -86,7 +95,13 @@ async fn thread_read_returns_summary_without_turns() -> Result<()> {
         mcp.read_stream_until_response_message(RequestId::Integer(read_id)),
     )
     .await??;
-    let ThreadReadResponse { thread, .. } = to_response::<ThreadReadResponse>(read_resp)?;
+    let ThreadReadResponse {
+        thread,
+        approval_policy,
+        approvals_reviewer,
+        sandbox,
+        permission_profile,
+    } = to_response::<ThreadReadResponse>(read_resp)?;
 
     assert_eq!(thread.id, conversation_id);
     assert_eq!(thread.preview, preview);
@@ -99,6 +114,13 @@ async fn thread_read_returns_summary_without_turns() -> Result<()> {
     assert_eq!(thread.git_info, None);
     assert_eq!(thread.turns.len(), 0);
     assert_eq!(thread.status, ThreadStatus::NotLoaded);
+    assert_eq!(approval_policy, Some(AskForApproval::OnRequest.into()));
+    assert_eq!(approvals_reviewer, None);
+    assert_eq!(sandbox, Some(SandboxPolicy::new_read_only_policy().into()));
+    assert_eq!(
+        permission_profile,
+        Some(root_read_only_permission_profile())
+    );
 
     Ok(())
 }
@@ -284,7 +306,7 @@ async fn thread_read_can_return_archived_threads_by_id() -> Result<()> {
         mcp.read_stream_until_response_message(RequestId::Integer(read_id)),
     )
     .await??;
-    let ThreadReadResponse { thread } = to_response::<ThreadReadResponse>(read_resp)?;
+    let ThreadReadResponse { thread, .. } = to_response::<ThreadReadResponse>(read_resp)?;
 
     assert_eq!(thread.id, conversation_id);
     assert_eq!(thread.preview, preview);
@@ -433,7 +455,14 @@ async fn thread_read_loaded_thread_returns_precomputed_path_before_materializati
         mcp.read_stream_until_response_message(RequestId::Integer(start_id)),
     )
     .await??;
-    let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(start_resp)?;
+    let ThreadStartResponse {
+        thread,
+        approval_policy,
+        approvals_reviewer,
+        sandbox,
+        permission_profile,
+        ..
+    } = to_response::<ThreadStartResponse>(start_resp)?;
     let thread_path = thread.path.clone().expect("thread path");
     assert!(
         !thread_path.exists(),
@@ -451,13 +480,23 @@ async fn thread_read_loaded_thread_returns_precomputed_path_before_materializati
         mcp.read_stream_until_response_message(RequestId::Integer(read_id)),
     )
     .await??;
-    let ThreadReadResponse { thread: read, .. } = to_response::<ThreadReadResponse>(read_resp)?;
+    let ThreadReadResponse {
+        thread: read,
+        approval_policy: read_approval_policy,
+        approvals_reviewer: read_approvals_reviewer,
+        sandbox: read_sandbox,
+        permission_profile: read_permission_profile,
+    } = to_response::<ThreadReadResponse>(read_resp)?;
 
     assert_eq!(read.id, thread.id);
     assert_eq!(read.path, Some(thread_path));
     assert!(read.preview.is_empty());
     assert_eq!(read.turns.len(), 0);
     assert_eq!(read.status, ThreadStatus::Idle);
+    assert_eq!(read_approval_policy, Some(approval_policy));
+    assert_eq!(read_approvals_reviewer, Some(approvals_reviewer));
+    assert_eq!(read_sandbox, Some(sandbox));
+    assert_eq!(read_permission_profile, permission_profile);
 
     Ok(())
 }
@@ -548,6 +587,7 @@ async fn thread_name_set_is_reflected_in_read_list_and_resume() -> Result<()> {
             source_kinds: None,
             archived: None,
             cwd: None,
+            use_state_db_only: false,
             search_term: None,
         })
         .await?;
@@ -784,6 +824,23 @@ fn turn_user_texts(turns: &[codex_app_server_protocol::Turn]) -> Vec<&str> {
             _ => None,
         })
         .collect()
+}
+
+fn root_read_only_permission_profile() -> PermissionProfile {
+    PermissionProfile {
+        network: Some(PermissionProfileNetworkPermissions {
+            enabled: Some(false),
+        }),
+        file_system: Some(PermissionProfileFileSystemPermissions {
+            entries: vec![FileSystemSandboxEntry {
+                path: FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                access: FileSystemAccessMode::Read,
+            }],
+            glob_scan_max_depth: None,
+        }),
+    }
 }
 
 // Helper to create a config.toml pointing at the mock model server.

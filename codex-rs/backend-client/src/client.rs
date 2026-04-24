@@ -6,6 +6,7 @@ use crate::types::RateLimitStatusPayload;
 use crate::types::TurnAttemptsSiblingTurnsResponse;
 use anyhow::Result;
 use codex_client::build_reqwest_client_with_custom_ca;
+use codex_client::with_chatgpt_cloudflare_cookie_store;
 use codex_login::CodexAuth;
 use codex_login::default_client::get_codex_user_agent;
 use codex_protocol::account::PlanType as AccountPlanType;
@@ -162,7 +163,9 @@ impl Client {
         {
             base_url = format!("{base_url}/backend-api");
         }
-        let http = build_reqwest_client_with_custom_ca(reqwest::Client::builder())?;
+        let http = build_reqwest_client_with_custom_ca(with_chatgpt_cloudflare_cookie_store(
+            reqwest::Client::builder(),
+        ))?;
         let path_style = PathStyle::from_base_url(&base_url);
         Ok(Self {
             base_url,
@@ -176,10 +179,12 @@ impl Client {
     }
 
     pub fn from_auth(base_url: impl Into<String>, auth: &CodexAuth) -> Result<Self> {
-        let token = auth.get_token().map_err(anyhow::Error::from)?;
+        let authorization_header_value = auth
+            .get_authorization_header_value()
+            .map_err(anyhow::Error::from)?;
         let mut client = Self::new(base_url)?
             .with_user_agent(get_codex_user_agent())
-            .with_bearer_token(token);
+            .with_authorization_header_value(authorization_header_value);
         if let Some(account_id) = auth.get_account_id() {
             client = client.with_chatgpt_account_id(account_id);
         }
@@ -581,6 +586,7 @@ impl Client {
         snapshots
     }
 
+    #[cfg(test)]
     fn rate_limit_snapshots_from_payload(
         payload: RateLimitStatusPayload,
     ) -> Vec<RateLimitSnapshot> {
@@ -749,6 +755,7 @@ mod tests {
     use codex_backend_openapi_models::models::AdditionalRateLimitDetails;
     use codex_backend_openapi_models::models::RateLimitReachedKind;
     use codex_backend_openapi_models::models::RateLimitReachedType as BackendRateLimitReachedType;
+    use codex_login::CodexAuth;
     use pretty_assertions::assert_eq;
 
     #[test]
@@ -1004,6 +1011,35 @@ mod tests {
             })
             .unwrap(),
             serde_json::json!({ "credit_type": "usage_limit" })
+        );
+    }
+
+    #[test]
+    fn from_auth_uses_bearer_authorization_for_api_keys() {
+        let auth = CodexAuth::from_api_key("sk-test-123");
+        let client = Client::from_auth("https://chatgpt.com", &auth).expect("client");
+
+        assert_eq!(
+            client
+                .headers()
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer sk-test-123")
+        );
+    }
+
+    #[test]
+    fn custom_authorization_header_value_is_preserved() {
+        let client = Client::new("https://chatgpt.com")
+            .expect("client")
+            .with_authorization_header_value("AgentAssertion signed-payload");
+
+        assert_eq!(
+            client
+                .headers()
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("AgentAssertion signed-payload")
         );
     }
 }

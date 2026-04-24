@@ -178,7 +178,7 @@ fn select_next_account(
         }
 
         match account.auth.resolved_mode() {
-            ApiAuthMode::Chatgpt | ApiAuthMode::ChatgptAuthTokens => {
+            ApiAuthMode::Chatgpt | ApiAuthMode::ChatgptAuthTokens | ApiAuthMode::AgentIdentity => {
                 chatgpt_accounts.push(account.clone());
             }
             ApiAuthMode::ApiKey => api_key_accounts.push(account.clone()),
@@ -292,6 +292,7 @@ fn account_has_credentials(account: &StoredAccount) -> bool {
     match account.auth.resolved_mode() {
         ApiAuthMode::Chatgpt | ApiAuthMode::ChatgptAuthTokens => account.auth.tokens.is_some(),
         ApiAuthMode::ApiKey => account.auth.openai_api_key.is_some(),
+        ApiAuthMode::AgentIdentity => account.auth.agent_identity.is_some(),
     }
 }
 
@@ -327,6 +328,7 @@ mod tests {
     use crate::slop_fork::account_rate_limits::record_rate_limit_snapshot;
     use crate::slop_fork::account_rate_limits::record_usage_limit_hint;
     use crate::slop_fork::auth_accounts::upsert_account;
+    use codex_login::auth::AgentIdentityAuthRecord;
     use codex_login::token_data::IdTokenInfo;
     use codex_login::token_data::TokenData;
     use codex_protocol::account::PlanType;
@@ -391,6 +393,25 @@ mod tests {
             tokens: None,
             last_refresh: None,
             agent_identity: None,
+        }
+    }
+
+    fn agent_identity_auth(account_id: &str, user_id: &str, email: &str) -> AuthDotJson {
+        AuthDotJson {
+            auth_mode: Some(ApiAuthMode::AgentIdentity),
+            openai_api_key: None,
+            tokens: None,
+            last_refresh: None,
+            agent_identity: Some(AgentIdentityAuthRecord {
+                agent_runtime_id: format!("runtime-{account_id}"),
+                agent_private_key:
+                    "MC4CAQAwBQYDK2VwBCIEIF0YfwNgTOuld+mqaN7OfdKVvNKnUgb2N0ONXqXY92a2".to_string(),
+                account_id: account_id.to_string(),
+                chatgpt_user_id: user_id.to_string(),
+                email: email.to_string(),
+                plan_type: PlanType::Pro,
+                chatgpt_account_is_fedramp: false,
+            }),
         }
     }
 
@@ -679,6 +700,31 @@ mod tests {
         .expect("switched");
 
         assert_eq!(next.id, account_b);
+        Ok(())
+    }
+
+    #[test]
+    fn agent_identity_accounts_participate_in_chatgpt_switching() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let now = fixed_now();
+        let active_auth = chatgpt_auth("acct-a", "a@example.com");
+        let agent_auth = agent_identity_auth("acct-b", "user-b", "b@example.com");
+        upsert_account(dir.path(), &active_auth)?;
+        let agent_account = upsert_account(dir.path(), &agent_auth)?.expect("agent account");
+        crate::auth::save_auth(dir.path(), &active_auth, AuthCredentialsStoreMode::File)?;
+
+        let next = switch_active_account_on_rate_limit(
+            dir.path(),
+            AuthCredentialsStoreMode::File,
+            &mut RateLimitSwitchState::default(),
+            /*allow_api_key_fallback*/ false,
+            /*failed_auth*/ None,
+            Some(now + Duration::hours(1)),
+            now,
+        )?
+        .expect("switched");
+
+        assert_eq!(next.id, agent_account);
         Ok(())
     }
 

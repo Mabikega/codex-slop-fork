@@ -60,6 +60,7 @@ mv "${tmp_path}" "${payload_path}""#,
     // 1) Normal user input – should hit server once.
     codex
         .submit(Op::UserInput {
+            environments: None,
             items: vec![UserInput::Text {
                 text: "hello world".into(),
                 text_elements: Vec::new(),
@@ -128,6 +129,7 @@ mv "${tmp_path}" "${payload_path}""#,
                 text_elements: Vec::new(),
             }],
             cwd: std::env::current_dir()?,
+            environments: None,
             approval_policy: AskForApproval::Never,
             approvals_reviewer: None,
             sandbox_policy: codex_protocol::protocol::SandboxPolicy::DangerFullAccess,
