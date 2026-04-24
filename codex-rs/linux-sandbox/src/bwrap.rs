@@ -428,7 +428,7 @@ fn create_filesystem_args(
                 &mut cleanup_paths,
                 &subpath,
                 &allowed_write_paths,
-            );
+            )?;
         }
         let mut nested_unreadable_roots: Vec<PathBuf> = unreadable_roots
             .iter()

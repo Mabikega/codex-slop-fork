@@ -325,7 +325,7 @@ impl From<CoreAskForApproval> for AskForApproval {
 pub enum ApprovalsReviewer {
     #[serde(rename = "user")]
     User,
-    #[serde(rename = "guardian_subagent", alias = "auto_review")]
+    #[serde(rename = "auto_review", alias = "guardian_subagent")]
     AutoReview,
 }
 
@@ -4531,11 +4531,17 @@ pub struct ThreadReadParams {
     pub include_turns: bool,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ThreadReadResponse {
     pub thread: Thread,
+    #[experimental(nested)]
+    pub approval_policy: Option<AskForApproval>,
+    pub approvals_reviewer: Option<ApprovalsReviewer>,
+    pub sandbox: Option<SandboxPolicy>,
+    #[serde(default)]
+    pub permission_profile: Option<PermissionProfile>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -8043,7 +8049,7 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_string(&ApprovalsReviewer::AutoReview).expect("serialize reviewer"),
-            "\"guardian_subagent\""
+            "\"auto_review\""
         );
 
         for value in ["user", "auto_review", "guardian_subagent"] {

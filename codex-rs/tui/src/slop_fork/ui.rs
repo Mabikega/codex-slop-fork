@@ -734,25 +734,6 @@ impl SlopForkUi {
             .ok_or_else(|| "Automations require an active session.".to_string())
     }
 
-    #[cfg(test)]
-    pub(crate) fn cached_pilot_runtime_state(
-        &self,
-    ) -> Option<&codex_core::slop_fork::pilot::PilotRunState> {
-        self.pilot_runtime
-            .as_ref()
-            .and_then(|runtime| runtime.state())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn cached_remote_pilot_run(&self) -> Option<&AppServerPilotRun> {
-        self.remote_pilot_run.as_ref()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn remote_pilot_state_loaded(&self) -> bool {
-        self.remote_pilot_state_loaded
-    }
-
     pub(crate) fn on_remote_automation_state_loaded(
         &mut self,
         automations: Vec<AppServerAutomation>,
@@ -901,20 +882,5 @@ impl SlopForkUi {
     pub(crate) fn arm_remote_autoresearch_state_reload(&mut self) {
         self.remote_autoresearch_bootstrap_pending = true;
         self.remote_autoresearch_readback_pending = true;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn cached_remote_automations(&self) -> &[AppServerAutomation] {
-        &self.remote_automations
-    }
-
-    #[cfg(test)]
-    pub(crate) fn cached_remote_autoresearch_run(&self) -> Option<&AppServerAutoresearchRun> {
-        self.remote_autoresearch_run.as_ref()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn remote_autoresearch_state_loaded(&self) -> bool {
-        self.remote_autoresearch_state_loaded
     }
 }

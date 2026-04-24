@@ -12,6 +12,7 @@ mod status_line;
 mod ui;
 
 pub(crate) use app_server::SlopForkAppServerState;
+pub(crate) use app_server::try_submit_app_server_op;
 #[cfg(test)]
 pub(crate) use auto_command::AUTO_COMMAND_MENTION_PATH;
 pub(crate) use auto_command::auto_command_mention_item;
@@ -27,8 +28,6 @@ pub(crate) use autoresearch_command::first_token as autoresearch_command_first_t
 pub(crate) use autoresearch_command::parse_autoresearch_command_args;
 pub(crate) use autoresearch_command::should_dispatch_autoresearch_command;
 pub(crate) use autoresearch_command::should_record_autoresearch_command_in_history;
-#[cfg(test)]
-pub(crate) use event::LoginFlowKind;
 pub(crate) use event::LoginPopupKind;
 pub(crate) use event::LoginSettingsState;
 pub(crate) use event::SlopForkEvent;
@@ -53,8 +52,6 @@ pub(crate) use runtime_event::pilot_updated as runtime_event_pilot_updated;
 pub(crate) use status_line::SavedAccountLimitKind;
 pub(crate) use status_line::SavedAccountStatusLineFormatter;
 pub(crate) use ui::LOGIN_POPUP_VIEW_ID;
-#[cfg(test)]
-pub(crate) use ui::PendingChatgptLogin;
 pub(crate) use ui::SlopForkRuntimeEvent;
 pub(crate) use ui::SlopForkUi;
 pub(crate) use ui::SlopForkUiContext;

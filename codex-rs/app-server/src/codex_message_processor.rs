@@ -5123,8 +5123,8 @@ impl CodexMessageProcessor {
             }
         };
 
-        let thread = match self.read_thread_view(thread_uuid, include_turns).await {
-            Ok(thread) => thread,
+        let response = match self.read_thread_view(thread_uuid, include_turns).await {
+            Ok(response) => response,
             Err(ThreadReadViewError::InvalidRequest(message)) => {
                 self.send_invalid_request_error(request_id, message).await;
                 return;
@@ -5134,7 +5134,6 @@ impl CodexMessageProcessor {
                 return;
             }
         };
-        let response = ThreadReadResponse { thread };
         self.outgoing.send_response(request_id, response).await;
     }
 
@@ -5143,18 +5142,18 @@ impl CodexMessageProcessor {
         &self,
         thread_id: ThreadId,
         include_turns: bool,
-    ) -> Result<Thread, ThreadReadViewError> {
+    ) -> Result<ThreadReadResponse, ThreadReadViewError> {
         let loaded_thread = self.load_live_thread_for_read(thread_id).await;
-        let mut thread = if let Some(thread) = self
+        let mut response = if let Some(response) = self
             .load_persisted_thread_for_read(thread_id, include_turns)
             .await?
         {
-            thread
-        } else if let Some(thread) = self
+            response
+        } else if let Some(response) = self
             .load_live_thread_view(thread_id, include_turns, loaded_thread.as_ref())
             .await?
         {
-            thread
+            response
         } else {
             return Err(ThreadReadViewError::InvalidRequest(format!(
                 "thread not loaded: {thread_id}"
@@ -5169,15 +5168,15 @@ impl CodexMessageProcessor {
 
         let thread_status = self
             .thread_watch_manager
-            .loaded_status_for_thread(&thread.id)
+            .loaded_status_for_thread(&response.thread.id)
             .await;
 
         set_thread_status_and_interrupt_stale_turns(
-            &mut thread,
+            &mut response.thread,
             thread_status,
             has_live_in_progress_turn,
         );
-        Ok(thread)
+        Ok(response)
     }
 
     async fn load_live_thread_for_read(&self, thread_id: ThreadId) -> Option<Arc<CodexThread>> {
@@ -5188,7 +5187,7 @@ impl CodexMessageProcessor {
         &self,
         thread_id: ThreadId,
         include_turns: bool,
-    ) -> Result<Option<Thread>, ThreadReadViewError> {
+    ) -> Result<Option<ThreadReadResponse>, ThreadReadViewError> {
         let fallback_provider = self.config.model_provider_id.as_str();
         match self
             .thread_store
@@ -5200,12 +5199,27 @@ impl CodexMessageProcessor {
             .await
         {
             Ok(stored_thread) => {
+                let approval_policy = Some(stored_thread.approval_mode.into());
+                let sandbox_policy = stored_thread.sandbox_policy.clone();
                 let (mut thread, history) =
                     thread_from_stored_thread(stored_thread, fallback_provider, &self.config.cwd);
                 if include_turns && let Some(history) = history {
                     thread.turns = build_turns_from_rollout_items(&history.items);
                 }
-                Ok(Some(thread))
+                let permission_profile = thread_response_permission_profile(
+                    &sandbox_policy,
+                    codex_protocol::models::PermissionProfile::from_legacy_sandbox_policy(
+                        &sandbox_policy,
+                        thread.cwd.as_path(),
+                    ),
+                );
+                Ok(Some(ThreadReadResponse {
+                    thread,
+                    approval_policy,
+                    approvals_reviewer: None,
+                    sandbox: Some(sandbox_policy.into()),
+                    permission_profile,
+                }))
             }
             Err(ThreadStoreError::InvalidRequest { message })
                 if message == format!("no rollout found for thread id {thread_id}") =>
@@ -5229,11 +5243,18 @@ impl CodexMessageProcessor {
         thread_id: ThreadId,
         include_turns: bool,
         loaded_thread: Option<&Arc<CodexThread>>,
-    ) -> Result<Option<Thread>, ThreadReadViewError> {
+    ) -> Result<Option<ThreadReadResponse>, ThreadReadViewError> {
         let Some(thread) = loaded_thread else {
             return Ok(None);
         };
         let config_snapshot = thread.config_snapshot().await;
+        let approval_policy = Some(config_snapshot.approval_policy.into());
+        let approvals_reviewer = Some(config_snapshot.approvals_reviewer.into());
+        let sandbox_policy = config_snapshot.sandbox_policy.clone();
+        let permission_profile = thread_response_permission_profile(
+            &sandbox_policy,
+            config_snapshot.permission_profile.clone(),
+        );
         let loaded_rollout_path = thread.rollout_path();
         if include_turns && loaded_rollout_path.is_none() {
             return Err(ThreadReadViewError::InvalidRequest(
@@ -5249,7 +5270,13 @@ impl CodexMessageProcessor {
             include_turns,
         )
         .await?;
-        Ok(Some(thread))
+        Ok(Some(ThreadReadResponse {
+            thread,
+            approval_policy,
+            approvals_reviewer,
+            sandbox: Some(sandbox_policy.into()),
+            permission_profile,
+        }))
     }
 
     async fn apply_thread_read_rollout_fields(

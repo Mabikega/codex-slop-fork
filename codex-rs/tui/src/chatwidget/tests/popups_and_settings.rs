@@ -24,7 +24,6 @@ async fn realtime_error_closes_without_followup_closed_info() {
     insta::assert_snapshot!(rendered.join("\n\n"), @"■ Realtime voice error: boom");
 }
 
-#[cfg(not(target_os = "linux"))]
 #[tokio::test]
 async fn deleted_realtime_meter_uses_shared_stop_path() {
     let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;

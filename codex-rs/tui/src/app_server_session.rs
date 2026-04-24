@@ -482,9 +482,19 @@ impl AppServerSession {
         thread_id: ThreadId,
         include_turns: bool,
     ) -> Result<Thread> {
+        Ok(self
+            .thread_read_response(thread_id, include_turns)
+            .await?
+            .thread)
+    }
+
+    pub(crate) async fn thread_read_response(
+        &mut self,
+        thread_id: ThreadId,
+        include_turns: bool,
+    ) -> Result<ThreadReadResponse> {
         let request_id = self.next_request_id();
-        let response: ThreadReadResponse = self
-            .client
+        self.client
             .request_typed(ClientRequest::ThreadRead {
                 request_id,
                 params: ThreadReadParams {
@@ -493,8 +503,7 @@ impl AppServerSession {
                 },
             })
             .await
-            .wrap_err("thread/read failed during TUI session lookup")?;
-        Ok(response.thread)
+            .wrap_err("thread/read failed during TUI session lookup")
     }
 
     pub(crate) async fn thread_inject_items(

@@ -1565,7 +1565,6 @@ impl App {
                     ));
                 }
             },
-            #[cfg(not(target_os = "linux"))]
             AppEvent::UpdateRecordingMeter { id, text } => {
                 // Update in place to preserve the element id for subsequent frames.
                 let updated = self.chat_widget.update_recording_meter_in_place(&id, &text);
@@ -1577,8 +1576,6 @@ impl App {
                     tui.frame_requester().schedule_frame();
                 }
             }
-            #[cfg(target_os = "linux")]
-            AppEvent::UpdateRecordingMeter { .. } => {}
             AppEvent::StatusLineSetup { items } => {
                 let ids = items.iter().map(ToString::to_string).collect::<Vec<_>>();
                 let edit = crate::legacy_core::config::edit::status_line_items_edit(&ids);

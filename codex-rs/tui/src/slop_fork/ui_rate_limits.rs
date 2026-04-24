@@ -246,52 +246,6 @@ pub(crate) struct CachedQuotaTouchResult {
 }
 
 impl SlopForkUi {
-    #[cfg(test)]
-    pub(crate) fn saved_account_rate_limits_refresh_in_flight(&self) -> bool {
-        self.saved_account_rate_limits_refresh.is_some()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_saved_account_rate_limits_refresh_for_test(
-        &mut self,
-        requested_account_ids: Option<Vec<String>>,
-    ) {
-        let target = match requested_account_ids {
-            Some(account_ids) => SavedAccountRateLimitsRefreshTarget::Accounts(
-                account_ids.into_iter().collect::<HashSet<_>>(),
-            ),
-            None => SavedAccountRateLimitsRefreshTarget::Due,
-        };
-        self.saved_account_rate_limits_refresh = Some(SavedAccountRateLimitsRefreshState {
-            started_at: Instant::now(),
-            target,
-        });
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_saved_account_rate_limits_force_refresh_all_for_test(
-        &mut self,
-        account_ids: Vec<String>,
-    ) {
-        self.saved_account_rate_limits_refresh = Some(SavedAccountRateLimitsRefreshState {
-            started_at: Instant::now(),
-            target: SavedAccountRateLimitsRefreshTarget::AllAccounts(
-                account_ids.into_iter().collect::<HashSet<_>>(),
-            ),
-        });
-    }
-
-    #[cfg(test)]
-    pub(crate) fn saved_account_rate_limits_auto_touch_request_for_test(
-        &self,
-        codex_home: &Path,
-        updated_account_ids: Vec<String>,
-    ) -> Option<(HashSet<String>, TouchQuotaMode)> {
-        self.saved_account_rate_limits_refresh
-            .as_ref()
-            .and_then(|state| state.touch_request_after_refresh(codex_home, &updated_account_ids))
-    }
-
     pub(crate) fn refresh_saved_account_rate_limits(
         &mut self,
         ctx: &SlopForkUiContext,

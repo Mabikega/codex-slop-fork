@@ -49,24 +49,33 @@ fn build_permissions_update_item(
     }
 
     let prev = previous?;
-    if prev.permission_profile() == next.permission_profile()
-        && prev.approval_policy == next.approval_policy.value()
-    {
+    let exec_permission_approvals_enabled = next.features.enabled(Feature::ExecPermissionApprovals);
+    let request_permissions_tool_enabled = next.features.enabled(Feature::RequestPermissionsTool);
+    let next_text = PermissionsInstructions::from_policy(
+        next.sandbox_policy.get(),
+        next.approval_policy.value(),
+        next.config.approvals_reviewer,
+        exec_policy,
+        &next.cwd,
+        exec_permission_approvals_enabled,
+        request_permissions_tool_enabled,
+    )
+    .render();
+    let prev_text = PermissionsInstructions::from_policy(
+        &prev.sandbox_policy,
+        prev.approval_policy,
+        next.config.approvals_reviewer,
+        exec_policy,
+        &prev.cwd,
+        exec_permission_approvals_enabled,
+        request_permissions_tool_enabled,
+    )
+    .render();
+    if prev_text == next_text {
         return None;
     }
 
-    Some(
-        PermissionsInstructions::from_policy(
-            next.sandbox_policy.get(),
-            next.approval_policy.value(),
-            next.config.approvals_reviewer,
-            exec_policy,
-            &next.cwd,
-            next.features.enabled(Feature::ExecPermissionApprovals),
-            next.features.enabled(Feature::RequestPermissionsTool),
-        )
-        .render(),
-    )
+    Some(next_text)
 }
 
 fn build_collaboration_mode_update_item(

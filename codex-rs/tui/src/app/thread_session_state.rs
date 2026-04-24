@@ -1,7 +1,7 @@
 use super::App;
 use crate::app_server_session::ThreadSessionState;
 use crate::read_session_model;
-use codex_app_server_protocol::Thread;
+use codex_app_server_protocol::ThreadReadResponse;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::SandboxPolicy;
 
@@ -49,8 +49,9 @@ impl App {
     pub(super) async fn session_state_for_thread_read(
         &self,
         thread_id: ThreadId,
-        thread: &Thread,
+        response: &ThreadReadResponse,
     ) -> ThreadSessionState {
+        let thread = &response.thread;
         let sandbox_policy = self.config.permissions.sandbox_policy.get().clone();
         let mut session = self
             .primary_session_configured
@@ -78,8 +79,17 @@ impl App {
         session.thread_id = thread_id;
         session.thread_name = thread.name.clone();
         session.model_provider_id = thread.model_provider.clone();
+        if let Some(approval_policy) = response.approval_policy {
+            session.approval_policy = approval_policy.to_core();
+        }
+        if let Some(approvals_reviewer) = response.approvals_reviewer {
+            session.approvals_reviewer = approvals_reviewer.to_core();
+        }
+        if let Some(sandbox_policy) = response.sandbox.clone() {
+            session.sandbox_policy = sandbox_policy.to_core();
+        }
         session.cwd = thread.cwd.clone();
-        session.permission_profile = None;
+        session.permission_profile = response.permission_profile.clone().map(Into::into);
         session.instruction_source_paths = Vec::new();
         session.rollout_path = thread.path.clone();
         if let Some(model) =

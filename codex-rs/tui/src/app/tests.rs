@@ -43,6 +43,7 @@ use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadClosedNotification;
 use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadReadResponse;
 use codex_app_server_protocol::ThreadStartedNotification;
 use codex_app_server_protocol::ThreadTokenUsage;
 use codex_app_server_protocol::ThreadTokenUsageUpdatedNotification;
@@ -2840,9 +2841,9 @@ async fn inactive_thread_started_notification_preserves_primary_model_when_path_
     Ok(())
 }
 
-/// `thread/read` is metadata/replay hydration and does not return an
-/// authoritative runtime `PermissionProfile`, so it must not reuse the active
-/// primary session profile after swapping in the read thread's cwd.
+/// `thread/read` fallback state must not reinterpret the active primary
+/// thread's cwd-bound `PermissionProfile` against the read thread cwd when the
+/// response omits an authoritative runtime profile.
 #[tokio::test]
 async fn thread_read_session_state_does_not_reuse_primary_permission_profile() {
     let mut app = make_test_app().await;
@@ -2882,7 +2883,16 @@ async fn thread_read_session_state_does_not_reuse_primary_permission_profile() {
     };
 
     let session = app
-        .session_state_for_thread_read(read_thread_id, &thread)
+        .session_state_for_thread_read(
+            read_thread_id,
+            &ThreadReadResponse {
+                thread,
+                approval_policy: None,
+                approvals_reviewer: None,
+                sandbox: None,
+                permission_profile: None,
+            },
+        )
         .await;
 
     assert_eq!(session.thread_id, read_thread_id);
@@ -2892,6 +2902,56 @@ async fn thread_read_session_state_does_not_reuse_primary_permission_profile() {
         "thread/read does not return an authoritative permission profile; reusing the primary \
          session profile would reinterpret cwd-bound entries against the read thread cwd"
     );
+}
+
+#[tokio::test]
+async fn thread_read_session_state_uses_authoritative_permission_metadata() {
+    let app = make_test_app().await;
+    let read_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000403").expect("valid thread");
+    let sandbox_policy = SandboxPolicy::new_workspace_write_policy();
+    let permission_profile = PermissionProfile::from_legacy_sandbox_policy(
+        &sandbox_policy,
+        std::path::Path::new("/tmp/read"),
+    );
+    let thread = Thread {
+        id: read_thread_id.to_string(),
+        forked_from_id: None,
+        preview: "read thread".to_string(),
+        ephemeral: false,
+        model_provider: "read-provider".to_string(),
+        created_at: 1,
+        updated_at: 2,
+        status: codex_app_server_protocol::ThreadStatus::Idle,
+        path: None,
+        cwd: test_path_buf("/tmp/read").abs(),
+        cli_version: "0.0.0".to_string(),
+        source: codex_app_server_protocol::SessionSource::Unknown,
+        agent_nickname: None,
+        agent_role: None,
+        git_info: None,
+        name: Some("read thread".to_string()),
+        turns: Vec::new(),
+    };
+
+    let session = app
+        .session_state_for_thread_read(
+            read_thread_id,
+            &ThreadReadResponse {
+                thread,
+                approval_policy: Some(codex_app_server_protocol::AskForApproval::OnRequest),
+                approvals_reviewer: Some(codex_app_server_protocol::ApprovalsReviewer::AutoReview),
+                sandbox: Some(sandbox_policy.clone().into()),
+                permission_profile: Some(permission_profile.clone().into()),
+            },
+        )
+        .await;
+
+    assert_eq!(session.thread_id, read_thread_id);
+    assert_eq!(session.approval_policy, AskForApproval::OnRequest);
+    assert_eq!(session.approvals_reviewer, ApprovalsReviewer::AutoReview);
+    assert_eq!(session.sandbox_policy, sandbox_policy);
+    assert_eq!(session.permission_profile, Some(permission_profile));
 }
 
 #[test]
@@ -4775,6 +4835,58 @@ async fn interrupt_without_active_turn_is_treated_as_handled() {
         .expect("interrupt submission should not fail");
 
     assert_eq!(handled, true);
+}
+
+#[tokio::test]
+async fn slop_fork_pilot_turn_is_treated_as_handled() -> Result<()> {
+    let mut app = make_test_app().await;
+    let mut app_server = crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+        .await
+        .expect("embedded app server");
+    let started = app_server
+        .start_thread(app.chat_widget.config_ref())
+        .await?;
+    let thread_id = started.session.thread_id;
+    app.enqueue_primary_thread_session(started.session, started.turns)
+        .await
+        .expect("primary thread should be registered");
+    let op: AppCommand = Op::SlopForkPilotTurn {
+        prompt: "keep shipping".to_string(),
+    }
+    .into();
+
+    let handled = app
+        .try_submit_active_thread_op_via_app_server(&mut app_server, thread_id, &op)
+        .await?;
+
+    assert_eq!(handled, true);
+    Ok(())
+}
+
+#[tokio::test]
+async fn slop_fork_autoresearch_turn_is_treated_as_handled() -> Result<()> {
+    let mut app = make_test_app().await;
+    let mut app_server = crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+        .await
+        .expect("embedded app server");
+    let started = app_server
+        .start_thread(app.chat_widget.config_ref())
+        .await?;
+    let thread_id = started.session.thread_id;
+    app.enqueue_primary_thread_session(started.session, started.turns)
+        .await
+        .expect("primary thread should be registered");
+    let op: AppCommand = Op::SlopForkAutoresearchTurn {
+        prompt: "optimize benchmarks".to_string(),
+    }
+    .into();
+
+    let handled = app
+        .try_submit_active_thread_op_via_app_server(&mut app_server, thread_id, &op)
+        .await?;
+
+    assert_eq!(handled, true);
+    Ok(())
 }
 
 #[tokio::test]

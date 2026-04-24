@@ -482,6 +482,17 @@ impl App {
         thread_id: ThreadId,
         op: &AppCommand,
     ) -> Result<bool> {
+        if crate::slop_fork::try_submit_app_server_op(
+            &mut self.chat_widget,
+            app_server,
+            thread_id,
+            op,
+        )
+        .await?
+        {
+            return Ok(true);
+        }
+
         match op.view() {
             AppCommandView::Interrupt => {
                 if let Some(turn_id) = self.active_turn_id_for_thread(thread_id).await {

@@ -360,6 +360,16 @@ impl CodexAuth {
         }
     }
 
+    /// Returns the full `Authorization` header value for authenticated backend requests.
+    pub fn get_authorization_header_value(&self) -> Result<String, std::io::Error> {
+        match self {
+            Self::ApiKey(_) | Self::Chatgpt(_) | Self::ChatgptAuthTokens(_) => {
+                Ok(format!("Bearer {}", self.get_token()?))
+            }
+            Self::AgentIdentity(auth) => auth.authorization_header_value(),
+        }
+    }
+
     pub async fn initialize_runtime(
         &self,
         chatgpt_base_url: Option<String>,

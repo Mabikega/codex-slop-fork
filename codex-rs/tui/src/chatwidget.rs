@@ -67,11 +67,7 @@ use crate::mention_codec::encode_history_mentions;
 use crate::model_catalog::ModelCatalog;
 use crate::multi_agents;
 use crate::slop_fork::LOGIN_POPUP_VIEW_ID;
-#[cfg(test)]
-use crate::slop_fork::LoginFlowKind;
 use crate::slop_fork::LoginPopupKind;
-#[cfg(test)]
-use crate::slop_fork::PendingChatgptLogin;
 use crate::slop_fork::SlopForkEvent;
 use crate::slop_fork::SlopForkRuntimeEvent;
 use crate::slop_fork::SlopForkUi;
@@ -11161,30 +11157,6 @@ impl ChatWidget {
                 self.apply_slop_fork_effects(effects);
             }
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn open_login_api_key_prompt(&mut self) {
-        self.handle_slop_fork_event(SlopForkEvent::OpenLoginApiKeyPrompt);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn start_login_flow(&mut self, kind: LoginFlowKind) {
-        self.handle_slop_fork_event(SlopForkEvent::StartLoginFlow { kind });
-    }
-
-    #[cfg(test)]
-    fn enter_pending_chatgpt_login(&mut self, pending_login: PendingChatgptLogin) {
-        self.slop_fork_ui
-            .set_pending_chatgpt_login_for_test(pending_login);
-        let context = self.slop_fork_context();
-        let effects = self.slop_fork_ui.open_login_root(&context);
-        self.apply_slop_fork_effects(effects);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn cancel_pending_chatgpt_login(&mut self) {
-        self.handle_slop_fork_event(SlopForkEvent::CancelPendingLogin);
     }
 
     pub(crate) fn on_saved_account_rate_limits_refresh_completed(

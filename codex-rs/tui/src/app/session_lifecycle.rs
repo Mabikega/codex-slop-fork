@@ -217,19 +217,19 @@ impl App {
                     error = %resume_err,
                     "failed to resume live thread for selection; falling back to thread/read"
                 );
-                let (thread, turns) = match app_server
-                    .thread_read(thread_id, /*include_turns*/ true)
+                let (thread_response, turns) = match app_server
+                    .thread_read_response(thread_id, /*include_turns*/ true)
                     .await
                 {
-                    Ok(thread) => {
-                        let turns = thread.turns.clone();
-                        (thread, turns)
+                    Ok(response) => {
+                        let turns = response.thread.turns.clone();
+                        (response, turns)
                     }
                     Err(err) if Self::can_fallback_from_include_turns_error(&err) => {
-                        let thread = app_server
-                            .thread_read(thread_id, /*include_turns*/ false)
+                        let response = app_server
+                            .thread_read_response(thread_id, /*include_turns*/ false)
                             .await?;
-                        (thread, Vec::new())
+                        (response, Vec::new())
                     }
                     Err(err) => return Err(err),
                 };
@@ -240,7 +240,9 @@ impl App {
                         "Agent thread {thread_id} is not yet available for replay or live attach."
                     ));
                 }
-                let mut session = self.session_state_for_thread_read(thread_id, &thread).await;
+                let mut session = self
+                    .session_state_for_thread_read(thread_id, &thread_response)
+                    .await;
                 // `thread/read` can seed replay state, but it does not attach the app-server
                 // listener that `thread/resume` establishes, so treat this path as replay-only.
                 session.model.clear();

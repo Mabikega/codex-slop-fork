@@ -142,7 +142,7 @@ impl PathStyle {
 pub struct Client {
     base_url: String,
     http: reqwest::Client,
-    bearer_token: Option<String>,
+    authorization_header_value: Option<String>,
     user_agent: Option<HeaderValue>,
     chatgpt_account_id: Option<String>,
     chatgpt_account_is_fedramp: bool,
@@ -170,7 +170,7 @@ impl Client {
         Ok(Self {
             base_url,
             http,
-            bearer_token: None,
+            authorization_header_value: None,
             user_agent: None,
             chatgpt_account_id: None,
             chatgpt_account_is_fedramp: false,
@@ -179,10 +179,12 @@ impl Client {
     }
 
     pub fn from_auth(base_url: impl Into<String>, auth: &CodexAuth) -> Result<Self> {
-        let token = auth.get_token().map_err(anyhow::Error::from)?;
+        let authorization_header_value = auth
+            .get_authorization_header_value()
+            .map_err(anyhow::Error::from)?;
         let mut client = Self::new(base_url)?
             .with_user_agent(get_codex_user_agent())
-            .with_bearer_token(token);
+            .with_authorization_header_value(authorization_header_value);
         if let Some(account_id) = auth.get_account_id() {
             client = client.with_chatgpt_account_id(account_id);
         }
@@ -193,7 +195,12 @@ impl Client {
     }
 
     pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
-        self.bearer_token = Some(token.into());
+        self.authorization_header_value = Some(format!("Bearer {}", token.into()));
+        self
+    }
+
+    pub fn with_authorization_header_value(mut self, value: impl Into<String>) -> Self {
+        self.authorization_header_value = Some(value.into());
         self
     }
 
@@ -226,11 +233,10 @@ impl Client {
         } else {
             h.insert(USER_AGENT, HeaderValue::from_static("codex-cli"));
         }
-        if let Some(token) = &self.bearer_token {
-            let value = format!("Bearer {token}");
-            if let Ok(hv) = HeaderValue::from_str(&value) {
-                h.insert(AUTHORIZATION, hv);
-            }
+        if let Some(value) = &self.authorization_header_value
+            && let Ok(hv) = HeaderValue::from_str(value)
+        {
+            h.insert(AUTHORIZATION, hv);
         }
         if let Some(acc) = &self.chatgpt_account_id
             && let Ok(name) = HeaderName::from_bytes(b"ChatGPT-Account-Id")
@@ -580,6 +586,7 @@ impl Client {
         snapshots
     }
 
+    #[cfg(test)]
     fn rate_limit_snapshots_from_payload(
         payload: RateLimitStatusPayload,
     ) -> Vec<RateLimitSnapshot> {
@@ -748,6 +755,7 @@ mod tests {
     use codex_backend_openapi_models::models::AdditionalRateLimitDetails;
     use codex_backend_openapi_models::models::RateLimitReachedKind;
     use codex_backend_openapi_models::models::RateLimitReachedType as BackendRateLimitReachedType;
+    use codex_login::CodexAuth;
     use pretty_assertions::assert_eq;
 
     #[test]
@@ -965,7 +973,7 @@ mod tests {
         let codex_client = Client {
             base_url: "https://example.test".to_string(),
             http: reqwest::Client::new(),
-            bearer_token: None,
+            authorization_header_value: None,
             user_agent: None,
             chatgpt_account_id: None,
             chatgpt_account_is_fedramp: false,
@@ -979,7 +987,7 @@ mod tests {
         let chatgpt_client = Client {
             base_url: "https://chatgpt.com/backend-api".to_string(),
             http: reqwest::Client::new(),
-            bearer_token: None,
+            authorization_header_value: None,
             user_agent: None,
             chatgpt_account_id: None,
             chatgpt_account_is_fedramp: false,
@@ -1003,6 +1011,35 @@ mod tests {
             })
             .unwrap(),
             serde_json::json!({ "credit_type": "usage_limit" })
+        );
+    }
+
+    #[test]
+    fn from_auth_uses_bearer_authorization_for_api_keys() {
+        let auth = CodexAuth::from_api_key("sk-test-123");
+        let client = Client::from_auth("https://chatgpt.com", &auth).expect("client");
+
+        assert_eq!(
+            client
+                .headers()
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer sk-test-123")
+        );
+    }
+
+    #[test]
+    fn custom_authorization_header_value_is_preserved() {
+        let client = Client::new("https://chatgpt.com")
+            .expect("client")
+            .with_authorization_header_value("AgentAssertion signed-payload");
+
+        assert_eq!(
+            client
+                .headers()
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("AgentAssertion signed-payload")
         );
     }
 }
