@@ -1,4 +1,12 @@
 use super::*;
+use codex_protocol::protocol::FileSystemAccessMode;
+use codex_protocol::protocol::FileSystemPath;
+use codex_protocol::protocol::FileSystemSandboxEntry;
+use codex_protocol::protocol::FileSystemSandboxKind;
+use codex_protocol::protocol::FileSystemSandboxPolicy;
+use codex_protocol::protocol::FileSystemSpecialPath;
+use codex_protocol::protocol::NetworkAccess;
+use codex_protocol::protocol::NetworkSandboxPolicy;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
@@ -252,25 +260,24 @@ async fn session_configured_syncs_widget_config_permissions_and_cwd() {
 
     let expected_sandbox = SandboxPolicy::new_read_only_policy();
     let expected_cwd = test_path_buf("/home/user/sub-agent").abs();
-    let expected_file_system_policy =
-        codex_protocol::permissions::FileSystemSandboxPolicy::restricted(vec![
-            codex_protocol::permissions::FileSystemSandboxEntry {
-                path: codex_protocol::permissions::FileSystemPath::Special {
-                    value: codex_protocol::permissions::FileSystemSpecialPath::Root,
-                },
-                access: codex_protocol::permissions::FileSystemAccessMode::Read,
+    let expected_file_system_policy = FileSystemSandboxPolicy::restricted(vec![
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
             },
-            codex_protocol::permissions::FileSystemSandboxEntry {
-                path: codex_protocol::permissions::FileSystemPath::GlobPattern {
-                    pattern: "**/.secret".to_string(),
-                },
-                access: codex_protocol::permissions::FileSystemAccessMode::None,
+            access: FileSystemAccessMode::Read,
+        },
+        FileSystemSandboxEntry {
+            path: FileSystemPath::GlobPattern {
+                pattern: "**/.secret".to_string(),
             },
-        ]);
+            access: FileSystemAccessMode::None,
+        },
+    ]);
     let expected_permission_profile =
         codex_protocol::models::PermissionProfile::from_runtime_permissions(
             &expected_file_system_policy,
-            codex_protocol::permissions::NetworkSandboxPolicy::Restricted,
+            NetworkSandboxPolicy::Restricted,
         );
     let configured = codex_protocol::protocol::SessionConfiguredEvent {
         session_id: ThreadId::new(),
@@ -321,16 +328,12 @@ async fn session_configured_syncs_widget_config_permissions_and_cwd() {
     );
     let (updated_file_system_policy, updated_network_policy) =
         updated_profile.to_runtime_permissions();
-    assert_eq!(
-        updated_network_policy,
-        codex_protocol::permissions::NetworkSandboxPolicy::Restricted
-    );
+    assert_eq!(updated_network_policy, NetworkSandboxPolicy::Restricted);
     assert!(
         updated_file_system_policy.entries.iter().all(|entry| {
             !matches!(
                 entry.path,
-                codex_protocol::permissions::FileSystemPath::GlobPattern { ref pattern }
-                    if pattern == "**/.secret"
+                FileSystemPath::GlobPattern { ref pattern } if pattern == "**/.secret"
             )
         }),
         "local sandbox changes should clear stale SessionConfigured deny rules"
@@ -342,7 +345,7 @@ async fn session_configured_external_sandbox_keeps_external_runtime_policy() {
     let (mut chat, _rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
 
     let expected_sandbox = SandboxPolicy::ExternalSandbox {
-        network_access: codex_protocol::protocol::NetworkAccess::Restricted,
+        network_access: NetworkAccess::Restricted,
     };
     let configured = codex_protocol::protocol::SessionConfiguredEvent {
         session_id: ThreadId::new(),
@@ -378,11 +381,11 @@ async fn session_configured_external_sandbox_keeps_external_runtime_policy() {
             .permissions
             .file_system_sandbox_policy
             .kind,
-        codex_protocol::permissions::FileSystemSandboxKind::ExternalSandbox,
+        FileSystemSandboxKind::ExternalSandbox,
     );
     assert_eq!(
         chat.config_ref().permissions.network_sandbox_policy,
-        codex_protocol::permissions::NetworkSandboxPolicy::Restricted,
+        NetworkSandboxPolicy::Restricted,
     );
 }
 

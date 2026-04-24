@@ -451,6 +451,11 @@ impl CodexAuth {
         })
     }
 
+    pub fn is_workspace_account(&self) -> bool {
+        self.account_plan_type()
+            .is_some_and(AccountPlanType::is_workspace_account)
+    }
+
     /// Returns `None` if token-backed ChatGPT auth is unavailable.
     fn get_current_auth_json(&self) -> Option<AuthDotJson> {
         let state = match self {
@@ -1539,10 +1544,10 @@ impl AuthManager {
     /// For stale managed ChatGPT auth, first performs a guarded reload and then
     /// refreshes only if the on-disk auth is unchanged.
     pub async fn auth(&self) -> Option<CodexAuth> {
-        let _ = crate::slop_fork::sync_external_auth_if_enabled(self);
         if let Some(auth) = self.resolve_external_api_key_auth().await {
             return Some(auth);
         }
+        let _ = crate::slop_fork::sync_external_auth_if_enabled(self);
         let auth = self.auth_cached()?;
         if Self::is_stale_for_proactive_refresh(&auth)
             && let Err(err) = self.refresh_token().await
@@ -1559,6 +1564,9 @@ impl AuthManager {
     }
 
     pub async fn auth_for_status(&self) -> (Option<CodexAuth>, bool) {
+        if let Some(auth) = self.resolve_external_api_key_auth().await {
+            return (Some(auth), false);
+        }
         let _ = crate::slop_fork::sync_external_auth_if_enabled(self);
         let Some(auth) = self.auth_cached() else {
             return (None, false);
@@ -2114,6 +2122,13 @@ impl AuthManager {
 
     pub fn codex_home_path(&self) -> &Path {
         &self.codex_home
+    }
+
+    pub fn current_auth_uses_codex_backend(&self) -> bool {
+        matches!(
+            self.auth_mode(),
+            Some(AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens | AuthMode::AgentIdentity)
+        )
     }
 
     fn is_stale_for_proactive_refresh(auth: &CodexAuth) -> bool {

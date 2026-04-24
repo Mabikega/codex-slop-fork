@@ -827,11 +827,9 @@ fn turn_user_texts(turns: &[codex_app_server_protocol::Turn]) -> Vec<&str> {
 }
 
 fn root_read_only_permission_profile() -> PermissionProfile {
-    PermissionProfile {
-        network: Some(PermissionProfileNetworkPermissions {
-            enabled: Some(false),
-        }),
-        file_system: Some(PermissionProfileFileSystemPermissions {
+    PermissionProfile::Managed {
+        network: PermissionProfileNetworkPermissions { enabled: false },
+        file_system: PermissionProfileFileSystemPermissions::Restricted {
             entries: vec![FileSystemSandboxEntry {
                 path: FileSystemPath::Special {
                     value: FileSystemSpecialPath::Root,
@@ -839,7 +837,7 @@ fn root_read_only_permission_profile() -> PermissionProfile {
                 access: FileSystemAccessMode::Read,
             }],
             glob_scan_max_depth: None,
-        }),
+        },
     }
 }
 

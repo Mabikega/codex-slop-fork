@@ -508,6 +508,7 @@ impl App {
                 approval_policy,
                 approvals_reviewer,
                 sandbox_policy,
+                permission_profile,
                 model,
                 effort,
                 summary,
@@ -582,14 +583,16 @@ impl App {
                     }
                 }
                 if should_start_turn {
-                    let permission_profile = if !app_server.is_remote()
-                        && self.runtime_sandbox_policy_override.is_some()
-                        && !matches!(sandbox_policy, SandboxPolicy::ExternalSandbox { .. })
-                    {
-                        Some(self.config.permissions.permission_profile())
-                    } else {
-                        None
-                    };
+                    let permission_profile =
+                        if matches!(sandbox_policy, SandboxPolicy::ExternalSandbox { .. }) {
+                            None
+                        } else if !app_server.is_remote()
+                            && self.runtime_sandbox_policy_override.is_some()
+                        {
+                            Some(self.config.permissions.permission_profile())
+                        } else {
+                            permission_profile.clone()
+                        };
                     app_server
                         .turn_start(
                             thread_id,

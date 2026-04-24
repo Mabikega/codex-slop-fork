@@ -157,7 +157,7 @@ pub(crate) struct ThreadSessionState {
     pub(crate) sandbox_policy: SandboxPolicy,
     /// Canonical active permissions when available. Consumers should prefer
     /// this over `sandbox_policy`; `None` means the session only has a legacy
-    /// sandbox projection or represents an external sandbox.
+    /// sandbox projection.
     pub(crate) permission_profile: Option<PermissionProfile>,
     pub(crate) cwd: AbsolutePathBuf,
     pub(crate) instruction_source_paths: Vec<AbsolutePathBuf>,
@@ -275,6 +275,9 @@ impl AppServerSession {
                     feedback_audience,
                     true,
                 )
+            }
+            Some(Account::AmazonBedrock {}) => {
+                (None, None, None, None, FeedbackAudience::External, false)
             }
             None => (None, None, None, None, FeedbackAudience::External, false),
         };
@@ -1102,14 +1105,7 @@ fn permission_profile_override_from_config(
         return None;
     }
 
-    if matches!(
-        config.permissions.sandbox_policy.get(),
-        SandboxPolicy::ExternalSandbox { .. }
-    ) {
-        None
-    } else {
-        Some(config.permissions.permission_profile().into())
-    }
+    Some(config.permissions.permission_profile().into())
 }
 
 fn thread_start_params_from_config(

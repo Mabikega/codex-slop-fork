@@ -5,6 +5,7 @@ use crate::types::RateLimitReachedKind as BackendRateLimitReachedKind;
 use crate::types::RateLimitStatusPayload;
 use crate::types::TurnAttemptsSiblingTurnsResponse;
 use anyhow::Result;
+use codex_api::SharedAuthProvider;
 use codex_client::build_reqwest_client_with_custom_ca;
 use codex_client::with_chatgpt_cloudflare_cookie_store;
 use codex_login::CodexAuth;
@@ -138,15 +139,32 @@ impl PathStyle {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Client {
     base_url: String,
     http: reqwest::Client,
     authorization_header_value: Option<String>,
+    auth_provider: SharedAuthProvider,
     user_agent: Option<HeaderValue>,
     chatgpt_account_id: Option<String>,
     chatgpt_account_is_fedramp: bool,
     path_style: PathStyle,
+}
+
+impl fmt::Debug for Client {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Client")
+            .field("base_url", &self.base_url)
+            .field("auth_provider", &"<provider>")
+            .field("user_agent", &self.user_agent)
+            .field("chatgpt_account_id", &self.chatgpt_account_id)
+            .field(
+                "chatgpt_account_is_fedramp",
+                &self.chatgpt_account_is_fedramp,
+            )
+            .field("path_style", &self.path_style)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Client {
@@ -171,6 +189,7 @@ impl Client {
             base_url,
             http,
             authorization_header_value: None,
+            auth_provider: codex_model_provider::unauthenticated_auth_provider(),
             user_agent: None,
             chatgpt_account_id: None,
             chatgpt_account_is_fedramp: false,
@@ -179,12 +198,9 @@ impl Client {
     }
 
     pub fn from_auth(base_url: impl Into<String>, auth: &CodexAuth) -> Result<Self> {
-        let authorization_header_value = auth
-            .get_authorization_header_value()
-            .map_err(anyhow::Error::from)?;
         let mut client = Self::new(base_url)?
             .with_user_agent(get_codex_user_agent())
-            .with_authorization_header_value(authorization_header_value);
+            .with_auth_provider(codex_model_provider::auth_provider_from_auth(auth));
         if let Some(account_id) = auth.get_account_id() {
             client = client.with_chatgpt_account_id(account_id);
         }
@@ -201,6 +217,11 @@ impl Client {
 
     pub fn with_authorization_header_value(mut self, value: impl Into<String>) -> Self {
         self.authorization_header_value = Some(value.into());
+        self
+    }
+
+    pub fn with_auth_provider(mut self, auth: SharedAuthProvider) -> Self {
+        self.auth_provider = auth;
         self
     }
 
@@ -233,6 +254,7 @@ impl Client {
         } else {
             h.insert(USER_AGENT, HeaderValue::from_static("codex-cli"));
         }
+        self.auth_provider.add_auth_headers(&mut h);
         if let Some(value) = &self.authorization_header_value
             && let Ok(hv) = HeaderValue::from_str(value)
         {
@@ -974,6 +996,7 @@ mod tests {
             base_url: "https://example.test".to_string(),
             http: reqwest::Client::new(),
             authorization_header_value: None,
+            auth_provider: codex_model_provider::unauthenticated_auth_provider(),
             user_agent: None,
             chatgpt_account_id: None,
             chatgpt_account_is_fedramp: false,
@@ -988,6 +1011,7 @@ mod tests {
             base_url: "https://chatgpt.com/backend-api".to_string(),
             http: reqwest::Client::new(),
             authorization_header_value: None,
+            auth_provider: codex_model_provider::unauthenticated_auth_provider(),
             user_agent: None,
             chatgpt_account_id: None,
             chatgpt_account_is_fedramp: false,

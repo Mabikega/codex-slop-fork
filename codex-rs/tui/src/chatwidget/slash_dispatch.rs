@@ -564,7 +564,6 @@ impl ChatWidget {
                     self.add_error_message("Usage: /fast [on|off|status]".to_string());
                 }
             },
-            InlineCommand::Slash(SlashCommand::Rename) if !trimmed.is_empty() => {}
             InlineCommand::Slash(SlashCommand::Mcp) => {
                 match trimmed.to_ascii_lowercase().as_str() {
                     "verbose" => self.add_mcp_output(McpServerStatusDetail::Full),
