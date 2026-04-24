@@ -252,6 +252,26 @@ async fn session_configured_syncs_widget_config_permissions_and_cwd() {
 
     let expected_sandbox = SandboxPolicy::new_read_only_policy();
     let expected_cwd = test_path_buf("/home/user/sub-agent").abs();
+    let expected_file_system_policy =
+        codex_protocol::permissions::FileSystemSandboxPolicy::restricted(vec![
+            codex_protocol::permissions::FileSystemSandboxEntry {
+                path: codex_protocol::permissions::FileSystemPath::Special {
+                    value: codex_protocol::permissions::FileSystemSpecialPath::Root,
+                },
+                access: codex_protocol::permissions::FileSystemAccessMode::Read,
+            },
+            codex_protocol::permissions::FileSystemSandboxEntry {
+                path: codex_protocol::permissions::FileSystemPath::GlobPattern {
+                    pattern: "**/.secret".to_string(),
+                },
+                access: codex_protocol::permissions::FileSystemAccessMode::None,
+            },
+        ]);
+    let expected_permission_profile =
+        codex_protocol::models::PermissionProfile::from_runtime_permissions(
+            &expected_file_system_policy,
+            codex_protocol::permissions::NetworkSandboxPolicy::Restricted,
+        );
     let configured = codex_protocol::protocol::SessionConfiguredEvent {
         session_id: ThreadId::new(),
         forked_from_id: None,
@@ -262,7 +282,7 @@ async fn session_configured_syncs_widget_config_permissions_and_cwd() {
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
         sandbox_policy: expected_sandbox.clone(),
-        permission_profile: None,
+        permission_profile: Some(expected_permission_profile.clone()),
         cwd: expected_cwd.clone(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         history_log_id: 0,
@@ -285,7 +305,85 @@ async fn session_configured_syncs_widget_config_permissions_and_cwd() {
         chat.config_ref().permissions.sandbox_policy.get(),
         &expected_sandbox
     );
+    assert_eq!(
+        chat.config_ref().permissions.permission_profile(),
+        expected_permission_profile
+    );
     assert_eq!(&chat.config_ref().cwd, &expected_cwd);
+
+    let updated_sandbox = SandboxPolicy::new_workspace_write_policy();
+    chat.set_sandbox_policy(updated_sandbox)
+        .expect("set sandbox policy");
+    let updated_profile = chat.config_ref().permissions.permission_profile();
+    assert_ne!(
+        updated_profile, expected_permission_profile,
+        "local sandbox changes should replace SessionConfigured profile-derived runtime permissions"
+    );
+    let (updated_file_system_policy, updated_network_policy) =
+        updated_profile.to_runtime_permissions();
+    assert_eq!(
+        updated_network_policy,
+        codex_protocol::permissions::NetworkSandboxPolicy::Restricted
+    );
+    assert!(
+        updated_file_system_policy.entries.iter().all(|entry| {
+            !matches!(
+                entry.path,
+                codex_protocol::permissions::FileSystemPath::GlobPattern { ref pattern }
+                    if pattern == "**/.secret"
+            )
+        }),
+        "local sandbox changes should clear stale SessionConfigured deny rules"
+    );
+}
+
+#[tokio::test]
+async fn session_configured_external_sandbox_keeps_external_runtime_policy() {
+    let (mut chat, _rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    let expected_sandbox = SandboxPolicy::ExternalSandbox {
+        network_access: codex_protocol::protocol::NetworkAccess::Restricted,
+    };
+    let configured = codex_protocol::protocol::SessionConfiguredEvent {
+        session_id: ThreadId::new(),
+        forked_from_id: None,
+        thread_name: None,
+        model: "test-model".to_string(),
+        model_provider_id: "test-provider".to_string(),
+        service_tier: None,
+        approval_policy: AskForApproval::Never,
+        approvals_reviewer: ApprovalsReviewer::User,
+        sandbox_policy: expected_sandbox.clone(),
+        permission_profile: None,
+        cwd: test_path_buf("/home/user/external").abs(),
+        reasoning_effort: Some(ReasoningEffortConfig::default()),
+        history_log_id: 0,
+        history_entry_count: 0,
+        initial_messages: None,
+        network_proxy: None,
+        rollout_path: None,
+    };
+
+    chat.handle_codex_event(Event {
+        id: "session-configured".into(),
+        msg: EventMsg::SessionConfigured(configured),
+    });
+
+    assert_eq!(
+        chat.config_ref().permissions.sandbox_policy.get(),
+        &expected_sandbox
+    );
+    assert_eq!(
+        chat.config_ref()
+            .permissions
+            .file_system_sandbox_policy
+            .kind,
+        codex_protocol::permissions::FileSystemSandboxKind::ExternalSandbox,
+    );
+    assert_eq!(
+        chat.config_ref().permissions.network_sandbox_policy,
+        codex_protocol::permissions::NetworkSandboxPolicy::Restricted,
+    );
 }
 
 #[tokio::test]
