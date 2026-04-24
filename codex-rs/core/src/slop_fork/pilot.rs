@@ -131,6 +131,10 @@ impl PilotRuntime {
         self.state.as_ref()
     }
 
+    pub fn thread_id(&self) -> &str {
+        &self.thread_id
+    }
+
     pub fn start(
         &mut self,
         goal: String,
@@ -313,6 +317,13 @@ impl PilotRuntime {
         &mut self,
         now: DateTime<Local>,
     ) -> std::io::Result<Option<PilotCyclePlan>> {
+        if self.state.as_ref().is_none_or(|state| {
+            state.status != PilotStatus::Running
+                || state.pending_cycle_kind.is_some()
+                || state.active_turn_id.is_some()
+        }) {
+            return Ok(None);
+        }
         self.update_state(|state| {
             let Some(state) = state.as_mut() else {
                 return Ok(None);
@@ -868,6 +879,19 @@ mod tests {
 
         let runtime = PilotRuntime::load(dir.path(), thread_id).unwrap();
         assert_eq!(runtime.state(), Some(&state));
+    }
+
+    #[test]
+    fn prepare_cycle_submission_without_state_does_not_create_state_file() {
+        let dir = tempdir().unwrap();
+        let thread_id = "thread-1";
+        let mut runtime = PilotRuntime::load(dir.path(), thread_id).unwrap();
+
+        let cycle = runtime.prepare_cycle_submission(Local::now()).unwrap();
+
+        assert_eq!(cycle, None);
+        assert_eq!(runtime.state(), None);
+        assert!(!pilot_state_path(dir.path()).exists());
     }
 
     #[test]

@@ -60,6 +60,7 @@ use crate::multi_agents::format_agent_picker_item_name;
 use crate::multi_agents::next_agent_shortcut_matches;
 use crate::multi_agents::previous_agent_shortcut_matches;
 use crate::pager_overlay::Overlay;
+use crate::perf;
 use crate::read_session_model;
 use crate::render::highlight::highlight_bash_to_lines;
 use crate::render::renderable::Renderable;
@@ -1131,6 +1132,7 @@ impl App {
         } else {
             match event {
                 TuiEvent::Key(key_event) => {
+                    let _timer = perf::PerfTimer::start("app.handle_key_event");
                     self.handle_key_event(tui, app_server, key_event).await;
                 }
                 TuiEvent::Paste(pasted) => {
@@ -1142,6 +1144,7 @@ impl App {
                     self.chat_widget.handle_paste(pasted);
                 }
                 TuiEvent::Draw => {
+                    let _timer = perf::PerfTimer::start("app.draw_event");
                     if self.backtrack_render_pending {
                         self.backtrack_render_pending = false;
                         self.render_transcript_once(tui);
@@ -1155,15 +1158,18 @@ impl App {
                     }
                     // Allow widgets to process any pending timers before rendering.
                     self.chat_widget.pre_draw_tick();
-                    tui.draw(
-                        self.chat_widget.desired_height(tui.terminal.size()?.width),
-                        |frame| {
+                    let width = tui.terminal.size()?.width;
+                    let desired_height = perf::measure("chatwidget.desired_height", || {
+                        self.chat_widget.desired_height(width)
+                    });
+                    tui.draw(desired_height, |frame| {
+                        perf::measure("chatwidget.render", || {
                             self.chat_widget.render(frame.area(), frame.buffer);
-                            if let Some((x, y)) = self.chat_widget.cursor_pos(frame.area()) {
-                                frame.set_cursor_position((x, y));
-                            }
-                        },
-                    )?;
+                        });
+                        if let Some((x, y)) = self.chat_widget.cursor_pos(frame.area()) {
+                            frame.set_cursor_position((x, y));
+                        }
+                    })?;
                     if self.chat_widget.external_editor_state() == ExternalEditorState::Requested {
                         self.chat_widget
                             .set_external_editor_state(ExternalEditorState::Active);

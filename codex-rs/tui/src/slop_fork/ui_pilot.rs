@@ -770,10 +770,16 @@ impl SlopForkUi {
             self.pilot_runtime = None;
             return Err("Pilot requires an active thread.".to_string());
         };
-        self.pilot_runtime = Some(
-            PilotRuntime::load(&ctx.codex_home, thread_id)
-                .map_err(|err| format!("Failed to load pilot state: {err}"))?,
-        );
+        let must_reload = self
+            .pilot_runtime
+            .as_ref()
+            .is_none_or(|runtime| runtime.thread_id() != thread_id);
+        if must_reload {
+            self.pilot_runtime = Some(
+                PilotRuntime::load(&ctx.codex_home, thread_id)
+                    .map_err(|err| format!("Failed to load pilot state: {err}"))?,
+            );
+        }
         self.pilot_runtime
             .as_mut()
             .ok_or_else(|| "Pilot is unavailable.".to_string())
@@ -844,6 +850,15 @@ fn recover_idle_stale_pilot_state(
     runtime: &mut PilotRuntime,
 ) -> Result<bool, String> {
     if ctx.task_running {
+        return Ok(false);
+    }
+    if runtime.state().is_none_or(|state| {
+        state.pending_cycle_kind.is_none()
+            && state.submission_dispatched_at.is_none()
+            && state.active_cycle_kind.is_none()
+            && state.active_turn_id.is_none()
+            && state.last_submitted_turn_id.is_none()
+    }) {
         return Ok(false);
     }
     if runtime.state().is_some_and(|state| {

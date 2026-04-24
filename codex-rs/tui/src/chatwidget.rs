@@ -66,6 +66,7 @@ use crate::mention_codec::LinkedMention;
 use crate::mention_codec::encode_history_mentions;
 use crate::model_catalog::ModelCatalog;
 use crate::multi_agents;
+use crate::perf;
 use crate::slop_fork::LOGIN_POPUP_VIEW_ID;
 use crate::slop_fork::LoginPopupKind;
 use crate::slop_fork::SlopForkEvent;
@@ -4746,14 +4747,27 @@ impl ChatWidget {
     }
 
     pub(crate) fn pre_draw_tick(&mut self) {
+        let _timer = perf::PerfTimer::start("chatwidget.pre_draw_tick");
         self.layout_pass_revision
             .set(self.layout_pass_revision.get().wrapping_add(1));
-        self.update_due_hook_visibility();
-        self.schedule_hook_timer_if_needed();
-        self.bottom_pane.pre_draw_tick();
-        self.poll_timer_automations();
-        self.poll_pilot_autonomy();
-        self.schedule_slop_fork_frames();
+        perf::measure("chatwidget.update_due_hook_visibility", || {
+            self.update_due_hook_visibility();
+        });
+        perf::measure("chatwidget.schedule_hook_timer_if_needed", || {
+            self.schedule_hook_timer_if_needed();
+        });
+        perf::measure("bottom_pane.pre_draw_tick", || {
+            self.bottom_pane.pre_draw_tick();
+        });
+        perf::measure("chatwidget.poll_timer_automations", || {
+            self.poll_timer_automations();
+        });
+        perf::measure("chatwidget.poll_pilot_autonomy", || {
+            self.poll_pilot_autonomy();
+        });
+        perf::measure("chatwidget.schedule_slop_fork_frames", || {
+            self.schedule_slop_fork_frames();
+        });
         if self.should_animate_terminal_title_spinner() {
             self.refresh_terminal_title();
         }
@@ -6262,9 +6276,14 @@ impl ChatWidget {
     }
 
     fn poll_pilot_autonomy(&mut self) {
-        if self.bottom_pane.is_task_running()
+        if !self.is_session_configured()
+            || self.suppress_queue_autosend
+            || self.bottom_pane.is_task_running()
+            || self.is_review_mode
             || !self.queued_user_messages.is_empty()
             || !self.pending_steers.is_empty()
+            || !self.bottom_pane.composer_is_empty()
+            || !self.bottom_pane.no_modal_or_popup_active()
         {
             return;
         }
@@ -12205,7 +12224,10 @@ impl ChatWidget {
         }
 
         let cell = self.active_cell.as_ref()?;
-        let viewport = Arc::new(cell.prepare_viewport(width));
+        let viewport = Arc::new(perf::measure(
+            "chatwidget.active_cell.prepare_viewport",
+            || cell.prepare_viewport(width),
+        ));
         *self.active_cell_viewport_cache.borrow_mut() = Some(ActiveCellViewportCache {
             width,
             pass_revision,

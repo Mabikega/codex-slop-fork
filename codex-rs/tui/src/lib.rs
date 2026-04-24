@@ -129,6 +129,7 @@ mod notifications;
 pub(crate) mod onboarding;
 mod oss_selection;
 mod pager_overlay;
+mod perf;
 pub(crate) mod public_widgets;
 mod render;
 mod resume_picker;

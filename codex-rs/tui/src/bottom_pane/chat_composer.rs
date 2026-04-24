@@ -183,6 +183,7 @@ use super::slash_commands;
 use super::slash_commands::BuiltinCommandFlags;
 use crate::bottom_pane::paste_burst::FlushResult;
 use crate::bottom_pane::prompt_args::parse_slash_name;
+use crate::perf;
 use crate::render::Insets;
 use crate::render::RectExt;
 use crate::render::renderable::Renderable;
@@ -4001,6 +4002,7 @@ impl Renderable for ChatComposer {
     }
 
     fn desired_height(&self, width: u16) -> u16 {
+        let _timer = perf::PerfTimer::start("chat_composer.desired_height");
         let footer_props = self.footer_props();
         let footer_hint_height = self
             .custom_footer_height()
@@ -4028,7 +4030,9 @@ impl Renderable for ChatComposer {
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        self.render_with_mask(area, buf, /*mask_char*/ None);
+        perf::measure("chat_composer.render", || {
+            self.render_with_mask(area, buf, /*mask_char*/ None);
+        });
     }
 }
 

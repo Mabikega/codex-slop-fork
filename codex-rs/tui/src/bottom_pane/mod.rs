@@ -24,6 +24,7 @@ use crate::bottom_pane::pending_thread_approvals::PendingThreadApprovals;
 use crate::bottom_pane::unified_exec_footer::UnifiedExecFooter;
 use crate::key_hint;
 use crate::key_hint::KeyBinding;
+use crate::perf;
 use crate::render::renderable::FlexRenderable;
 use crate::render::renderable::Renderable;
 use crate::render::renderable::RenderableItem;
@@ -1350,9 +1351,12 @@ impl BottomPane {
 
 impl Renderable for BottomPane {
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        self.as_renderable().render(area, buf);
+        perf::measure("bottom_pane.render", || {
+            self.as_renderable().render(area, buf);
+        });
     }
     fn desired_height(&self, width: u16) -> u16 {
+        let _timer = perf::PerfTimer::start("bottom_pane.desired_height");
         let state_revision = self.layout_revision.get();
         let pass_revision = self.layout_pass_revision.get();
         if let Some(cache) = self.desired_height_cache.get()
@@ -1363,7 +1367,9 @@ impl Renderable for BottomPane {
             return cache.height;
         }
 
-        let height = self.as_renderable().desired_height(width);
+        let height = perf::measure("bottom_pane.desired_height.compute", || {
+            self.as_renderable().desired_height(width)
+        });
         self.desired_height_cache.set(Some(BottomPaneHeightCache {
             width,
             state_revision,
