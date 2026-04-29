@@ -392,6 +392,14 @@ pub fn saved_account_subscription_ran_out(
     auth_chatgpt_plan_type_raw(&account.auth).is_some_and(|saved_plan| saved_plan != "free")
 }
 
+pub fn saved_account_subscription_active_until(account: &StoredAccount) -> Option<DateTime<Utc>> {
+    account
+        .auth
+        .is_chatgpt_mode()
+        .then(|| auth_chatgpt_subscription_active_until(&account.auth))
+        .flatten()
+}
+
 pub fn ensure_current_active_account_saved(
     codex_home: &Path,
     auth_credentials_store_mode: AuthCredentialsStoreMode,

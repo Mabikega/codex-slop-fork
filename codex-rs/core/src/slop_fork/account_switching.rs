@@ -54,6 +54,7 @@ impl RateLimitSwitchState {
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct CandidateScore {
     used_percent: f64,
+    billing_ends_before_weekly_reset: bool,
     weekly_reset_bucket: Option<i64>,
 }
 
@@ -199,14 +200,23 @@ fn select_next_account(
             continue;
         }
 
+        let weekly_reset_at = snapshot_map
+            .get(&account.id)
+            .and_then(|snapshot| snapshot.weekly_window.reset_at);
+        let billing_ends_before_weekly_reset = match (
+            auth_accounts::saved_account_subscription_active_until(account),
+            weekly_reset_at,
+        ) {
+            (Some(active_until), Some(weekly_reset_at)) => active_until < weekly_reset_at,
+            _ => false,
+        };
         let score = CandidateScore {
             used_percent: snapshot_map
                 .get(&account.id)
                 .and_then(account_rate_limits::snapshot_used_percent)
                 .unwrap_or(0.0),
-            weekly_reset_bucket: snapshot_map
-                .get(&account.id)
-                .and_then(|snapshot| snapshot.weekly_window.reset_at)
+            billing_ends_before_weekly_reset,
+            weekly_reset_bucket: weekly_reset_at
                 .map(|reset_at| reset_at.timestamp().div_euclid(WEEKLY_RESET_BUCKET_SECONDS)),
         };
         match &best_chatgpt {
@@ -216,6 +226,10 @@ fn select_next_account(
                     true
                 } else if score.used_percent > best_score.used_percent {
                     false
+                } else if score.billing_ends_before_weekly_reset
+                    != best_score.billing_ends_before_weekly_reset
+                {
+                    score.billing_ends_before_weekly_reset
                 } else {
                     match (score.weekly_reset_bucket, best_score.weekly_reset_bucket) {
                         (Some(score_bucket), Some(best_bucket)) if score_bucket != best_bucket => {
@@ -335,7 +349,7 @@ mod tests {
     use codex_protocol::protocol::RateLimitSnapshot;
     use codex_protocol::protocol::RateLimitWindow;
 
-    fn fake_jwt(email: &str, account_id: &str) -> String {
+    fn fake_jwt(email: &str, account_id: &str, subscription_active_until: Option<&str>) -> String {
         #[derive(Serialize)]
         struct Header {
             alg: &'static str,
@@ -346,13 +360,17 @@ mod tests {
             alg: "none",
             typ: "JWT",
         };
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "email": email,
             "https://api.openai.com/auth": {
                 "chatgpt_plan_type": "pro",
                 "chatgpt_account_id": account_id,
             }
         });
+        if let Some(subscription_active_until) = subscription_active_until {
+            payload["https://api.openai.com/auth"]["chatgpt_subscription_active_until"] =
+                serde_json::json!(subscription_active_until);
+        }
 
         fn b64url_no_pad(bytes: &[u8]) -> String {
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
@@ -375,7 +393,7 @@ mod tests {
                     chatgpt_user_id: None,
                     chatgpt_account_id: Some(account_id.to_string()),
                     chatgpt_account_is_fedramp: false,
-                    raw_jwt: fake_jwt(email, account_id),
+                    raw_jwt: fake_jwt(email, account_id, /*subscription_active_until*/ None),
                 },
                 access_token: "access".to_string(),
                 refresh_token: "refresh".to_string(),
@@ -384,6 +402,17 @@ mod tests {
             last_refresh: Some(Utc::now()),
             agent_identity: None,
         }
+    }
+
+    fn chatgpt_auth_with_subscription_active_until(
+        account_id: &str,
+        email: &str,
+        subscription_active_until: &str,
+    ) -> AuthDotJson {
+        let mut auth = chatgpt_auth(account_id, email);
+        auth.tokens.as_mut().expect("tokens").id_token.raw_jwt =
+            fake_jwt(email, account_id, Some(subscription_active_until));
+        auth
     }
 
     fn api_key_auth(suffix: &str) -> AuthDotJson {
@@ -543,6 +572,180 @@ mod tests {
         .expect("switched");
 
         assert_eq!(next.id, account_z);
+        Ok(())
+    }
+
+    #[test]
+    fn prefers_account_whose_billing_ends_before_weekly_reset_when_usage_is_tied()
+    -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let now = fixed_now();
+        let weekly_reset_at = Utc
+            .with_ymd_and_hms(2027, 1, 1, 0, 0, 0)
+            .single()
+            .expect("valid timestamp");
+        let auth_a = chatgpt_auth("acct-a", "a@example.com");
+        let auth_b = chatgpt_auth("acct-b", "b@example.com");
+        let auth_z = chatgpt_auth_with_subscription_active_until(
+            "acct-z",
+            "z@example.com",
+            "2026-12-31T00:00:00+00:00",
+        );
+        let account_a = upsert_account(dir.path(), &auth_a)?.expect("account a");
+        let account_b = upsert_account(dir.path(), &auth_b)?.expect("account b");
+        let account_z = upsert_account(dir.path(), &auth_z)?.expect("account z");
+        crate::auth::save_auth(dir.path(), &auth_a, AuthCredentialsStoreMode::File)?;
+        record_rate_limit_snapshot(
+            dir.path(),
+            &account_a,
+            Some("pro"),
+            &sample_snapshot(now, /*used_percent*/ 90.0),
+            now,
+        )?;
+        record_rate_limit_snapshot(
+            dir.path(),
+            &account_b,
+            Some("pro"),
+            &sample_snapshot_with_weekly_reset(now, /*used_percent*/ 20.0, weekly_reset_at),
+            now,
+        )?;
+        record_rate_limit_snapshot(
+            dir.path(),
+            &account_z,
+            Some("pro"),
+            &sample_snapshot_with_weekly_reset(now, /*used_percent*/ 20.0, weekly_reset_at),
+            now,
+        )?;
+
+        let next = switch_active_account_on_rate_limit(
+            dir.path(),
+            AuthCredentialsStoreMode::File,
+            &mut RateLimitSwitchState::default(),
+            /*allow_api_key_fallback*/ false,
+            /*failed_auth*/ None,
+            /*blocked_until*/ None,
+            now,
+        )?
+        .expect("switched");
+
+        assert_eq!(next.id, account_z);
+        Ok(())
+    }
+
+    #[test]
+    fn lower_usage_wins_over_billing_before_weekly_reset_preference() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let now = fixed_now();
+        let weekly_reset_at = Utc
+            .with_ymd_and_hms(2027, 1, 1, 0, 0, 0)
+            .single()
+            .expect("valid timestamp");
+        let auth_a = chatgpt_auth("acct-a", "a@example.com");
+        let auth_b = chatgpt_auth("acct-b", "b@example.com");
+        let auth_z = chatgpt_auth_with_subscription_active_until(
+            "acct-z",
+            "z@example.com",
+            "2026-12-31T00:00:00+00:00",
+        );
+        let account_a = upsert_account(dir.path(), &auth_a)?.expect("account a");
+        let account_b = upsert_account(dir.path(), &auth_b)?.expect("account b");
+        let account_z = upsert_account(dir.path(), &auth_z)?.expect("account z");
+        crate::auth::save_auth(dir.path(), &auth_a, AuthCredentialsStoreMode::File)?;
+        record_rate_limit_snapshot(
+            dir.path(),
+            &account_a,
+            Some("pro"),
+            &sample_snapshot(now, /*used_percent*/ 90.0),
+            now,
+        )?;
+        record_rate_limit_snapshot(
+            dir.path(),
+            &account_b,
+            Some("pro"),
+            &sample_snapshot_with_weekly_reset(now, /*used_percent*/ 10.0, weekly_reset_at),
+            now,
+        )?;
+        record_rate_limit_snapshot(
+            dir.path(),
+            &account_z,
+            Some("pro"),
+            &sample_snapshot_with_weekly_reset(now, /*used_percent*/ 20.0, weekly_reset_at),
+            now,
+        )?;
+
+        let next = switch_active_account_on_rate_limit(
+            dir.path(),
+            AuthCredentialsStoreMode::File,
+            &mut RateLimitSwitchState::default(),
+            /*allow_api_key_fallback*/ false,
+            /*failed_auth*/ None,
+            /*blocked_until*/ None,
+            now,
+        )?
+        .expect("switched");
+
+        assert_eq!(next.id, account_b);
+        assert_ne!(next.id, account_z);
+        Ok(())
+    }
+
+    #[test]
+    fn missing_billing_or_weekly_reset_falls_back_to_existing_ordering() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let now = fixed_now();
+        let auth_a = chatgpt_auth("acct-a", "a@example.com");
+        let auth_b = chatgpt_auth_with_subscription_active_until(
+            "acct-b",
+            "b@example.com",
+            "2026-12-31T00:00:00+00:00",
+        );
+        let auth_z = chatgpt_auth("acct-z", "z@example.com");
+        let account_a = upsert_account(dir.path(), &auth_a)?.expect("account a");
+        let account_b = upsert_account(dir.path(), &auth_b)?.expect("account b");
+        let account_z = upsert_account(dir.path(), &auth_z)?.expect("account z");
+        crate::auth::save_auth(dir.path(), &auth_a, AuthCredentialsStoreMode::File)?;
+        record_rate_limit_snapshot(
+            dir.path(),
+            &account_a,
+            Some("pro"),
+            &sample_snapshot(now, /*used_percent*/ 90.0),
+            now,
+        )?;
+        record_rate_limit_snapshot(
+            dir.path(),
+            &account_b,
+            Some("pro"),
+            &RateLimitSnapshot {
+                secondary: None,
+                ..sample_snapshot(now, /*used_percent*/ 20.0)
+            },
+            now,
+        )?;
+        record_rate_limit_snapshot(
+            dir.path(),
+            &account_z,
+            Some("pro"),
+            &sample_snapshot_with_weekly_reset(
+                now,
+                /*used_percent*/ 20.0,
+                now + Duration::hours(10),
+            ),
+            now,
+        )?;
+
+        let next = switch_active_account_on_rate_limit(
+            dir.path(),
+            AuthCredentialsStoreMode::File,
+            &mut RateLimitSwitchState::default(),
+            /*allow_api_key_fallback*/ false,
+            /*failed_auth*/ None,
+            /*blocked_until*/ None,
+            now,
+        )?
+        .expect("switched");
+
+        let expected = std::cmp::min(account_b, account_z);
+        assert_eq!(next.id, expected);
         Ok(())
     }
 
