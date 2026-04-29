@@ -1168,7 +1168,10 @@ async fn run_sampling_request(
             continue;
         }
 
-        if !err.is_retryable() {
+        let retry_model_at_capacity =
+            slop_fork::should_retry_model_at_capacity(turn_context.as_ref(), &err);
+
+        if !err.is_retryable() && !retry_model_at_capacity {
             return Err(err);
         }
 
@@ -1198,25 +1201,32 @@ async fn run_sampling_request(
                 }
                 _ => backoff(retries),
             };
-            warn!(
-                "stream disconnected - retrying sampling request ({retries}/{max_retries} in {delay:?})...",
-            );
+            if retry_model_at_capacity {
+                warn!(
+                    "model at capacity - retrying sampling request ({retries}/{max_retries} in {delay:?})...",
+                );
+            } else {
+                warn!(
+                    "stream disconnected - retrying sampling request ({retries}/{max_retries} in {delay:?})...",
+                );
+            }
 
             // In release builds, hide the first websocket retry notification to reduce noisy
             // transient reconnect messages. In debug builds, keep full visibility for diagnosis.
-            let report_error = retries > 1
+            let report_error = retry_model_at_capacity
+                || retries > 1
                 || cfg!(debug_assertions)
                 || !sess.services.model_client.responses_websocket_enabled();
             if report_error {
                 // Surface retry information to any UI/front‑end so the
                 // user understands what is happening instead of staring
                 // at a seemingly frozen screen.
-                sess.notify_stream_error(
-                    &turn_context,
-                    format!("Reconnecting... {retries}/{max_retries}"),
-                    err,
-                )
-                .await;
+                let message = if retry_model_at_capacity {
+                    format!("Model at capacity; retrying... {retries}/{max_retries}")
+                } else {
+                    format!("Reconnecting... {retries}/{max_retries}")
+                };
+                sess.notify_stream_error(&turn_context, message, err).await;
             }
             tokio::time::sleep(delay).await;
         } else {

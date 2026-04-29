@@ -321,6 +321,20 @@ pub(crate) fn record_active_usage_limit_hint(
     record_usage_limit_hint_for_auth(codex_home, &auth, reset_at);
 }
 
+pub(crate) fn should_retry_model_at_capacity(turn_context: &TurnContext, err: &CodexErr) -> bool {
+    if !matches!(err, CodexErr::ServerOverloaded) {
+        return false;
+    }
+
+    match load_slop_fork_config(&turn_context.config.codex_home) {
+        Ok(config) => config.retry_model_at_capacity,
+        Err(err) => {
+            tracing::warn!("failed to load fork config for model-capacity retry: {err}");
+            false
+        }
+    }
+}
+
 pub(crate) async fn handle_usage_limit_error(
     sess: &Session,
     turn_context: &TurnContext,

@@ -222,6 +222,7 @@ Current fork storage conventions:
 - each saved account file should be `auth.json`-compatible
 - fork-only account rate-limit snapshots live at `~/.codex/.accounts/.rate-limits.json`
 - fork-only settings live at `~/.codex/config-slop-fork.toml`
+- model-at-capacity retry policy is a fork-only setting in `config-slop-fork.toml`
 
 Do not invent new storage layouts unless there is a clear need.
 

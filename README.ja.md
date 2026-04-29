@@ -86,6 +86,7 @@ bun install -g https://github.com/Mabikega/codex-slop-fork/releases/latest/downl
 設定項目:
 
 - `auto_switch_accounts_on_rate_limit = true`
+- `retry_model_at_capacity = true`
 - `follow_external_account_switches = false`
 - `api_key_fallback_on_all_accounts_limited = false`
 - `auto_start_five_hour_quota = false`
@@ -102,6 +103,8 @@ bun install -g https://github.com/Mabikega/codex-slop-fork/releases/latest/downl
 `follow_external_account_switches` を有効にすると、実行中のセッションは別の Codex インスタンスによって書き込まれたアカウント変更を取り込めます。
 
 `show_account_numbers_instead_of_emails` を有効にすると、フォークのアカウント一覧や切り替え通知では、保存済み ChatGPT アカウントのメールアドレスを表示せず `Account N` を表示します。番号は、保存済み ChatGPT アカウントを利用可能なら UID 順に並べて決まります。
+
+`retry_model_at_capacity` を有効にすると、`Selected model is at capacity` の失敗時に、一時的な再接続と同じバックオフと表示付きステータスで再試行します。
 
 ### テレメトリの既定値
 

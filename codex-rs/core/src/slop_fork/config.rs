@@ -25,6 +25,7 @@ fn legacy_config_filename() -> String {
 #[serde(default)]
 pub struct SlopForkConfig {
     pub auto_switch_accounts_on_rate_limit: bool,
+    pub retry_model_at_capacity: bool,
     pub follow_external_account_switches: bool,
     pub api_key_fallback_on_all_accounts_limited: bool,
     pub auto_start_five_hour_quota: bool,
@@ -69,6 +70,7 @@ impl Default for SlopForkConfig {
     fn default() -> Self {
         Self {
             auto_switch_accounts_on_rate_limit: true,
+            retry_model_at_capacity: true,
             follow_external_account_switches: false,
             api_key_fallback_on_all_accounts_limited: false,
             auto_start_five_hour_quota: false,
@@ -394,6 +396,7 @@ mod tests {
         let dir = tempdir()?;
         let config = SlopForkConfig {
             auto_switch_accounts_on_rate_limit: false,
+            retry_model_at_capacity: false,
             follow_external_account_switches: true,
             api_key_fallback_on_all_accounts_limited: true,
             auto_start_five_hour_quota: true,
@@ -425,6 +428,7 @@ mod tests {
         let dir = tempdir()?;
         let config = SlopForkConfig {
             auto_switch_accounts_on_rate_limit: false,
+            retry_model_at_capacity: true,
             follow_external_account_switches: true,
             api_key_fallback_on_all_accounts_limited: true,
             auto_start_five_hour_quota: true,
@@ -472,6 +476,7 @@ mod tests {
 
         let config = SlopForkConfig {
             auto_switch_accounts_on_rate_limit: true,
+            retry_model_at_capacity: true,
             follow_external_account_switches: false,
             api_key_fallback_on_all_accounts_limited: false,
             auto_start_five_hour_quota: false,

@@ -90,6 +90,7 @@ When enabled, the fork can switch to another saved account after a ChatGPT rate-
 Settings:
 
 - `auto_switch_accounts_on_rate_limit = true`
+- `retry_model_at_capacity = true`
 - `follow_external_account_switches = false`
 - `api_key_fallback_on_all_accounts_limited = false`
 - `auto_start_five_hour_quota = false`
@@ -110,6 +111,9 @@ written by another Codex instance.
 When `show_account_numbers_instead_of_emails` is enabled, fork account menus and switch
 notifications replace saved ChatGPT account emails with `Account N`. The numbering is assigned by
 sorting the saved ChatGPT accounts by UID when available.
+
+When `retry_model_at_capacity` is enabled, `Selected model is at capacity` failures are retried
+with the same backoff and visible retry status used for transient reconnects.
 
 ### Telemetry defaults
 
