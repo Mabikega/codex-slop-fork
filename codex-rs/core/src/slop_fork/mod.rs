@@ -41,6 +41,9 @@ pub(crate) use config::load_project_doc_overlay;
 pub use config::load_slop_fork_config;
 pub use config::maybe_load_slop_fork_config;
 pub use config::update_slop_fork_config;
+
+pub const AUTO_SWITCH_ACCOUNT_WARNING_PREFIX: &str = "Switched to saved account ";
+pub const AUTO_SWITCH_ACCOUNT_WARNING_SUFFIX: &str = " after hitting a rate limit.";
 pub use saved_account_auth::auth_for_saved_account_file;
 pub use saved_account_auth::refresh_saved_account_auth_from_authority;
 
@@ -231,16 +234,12 @@ pub(crate) async fn maybe_switch_account_for_rate_limit(
     *client_session = sess.services.model_client.new_session();
     let display_labels =
         auth_accounts::load_account_display_labels(&turn_context.config.codex_home);
-    sess.send_event(
-        turn_context,
-        EventMsg::Warning(WarningEvent {
-            message: format!(
-                "Switched to saved account {} after hitting a rate limit.",
-                display_labels.label_for_account(&next_account)
-            ),
-        }),
-    )
-    .await;
+    let account_label = display_labels.label_for_account(&next_account);
+    let message = format!(
+        "{AUTO_SWITCH_ACCOUNT_WARNING_PREFIX}{account_label}{AUTO_SWITCH_ACCOUNT_WARNING_SUFFIX}"
+    );
+    sess.send_event(turn_context, EventMsg::Warning(WarningEvent { message }))
+        .await;
     true
 }
 

@@ -551,6 +551,7 @@ pub(crate) enum ApiVersion {
 
 #[derive(Clone)]
 struct ListenerTaskContext {
+    auth_manager: Arc<AuthManager>,
     thread_manager: Arc<ThreadManager>,
     thread_state_manager: ThreadStateManager,
     outgoing: Arc<OutgoingMessageSender>,
@@ -562,6 +563,8 @@ struct ListenerTaskContext {
     autoresearch_manager: SlopForkAutoresearchManager,
     pilot_manager: SlopForkPilotManager,
     fallback_model_provider: String,
+    config_manager: ConfigManager,
+    chatgpt_base_url: String,
     codex_home: PathBuf,
     codex_linux_sandbox_exe: Option<PathBuf>,
     windows_sandbox_level: WindowsSandboxLevel,
@@ -708,6 +711,16 @@ fn configured_thread_store(config: &Config) -> Arc<dyn ThreadStore> {
     }
 }
 
+fn current_account_updated_notification_from_auth_manager(
+    auth_manager: &AuthManager,
+) -> AccountUpdatedNotification {
+    let auth = auth_manager.auth_cached();
+    AccountUpdatedNotification {
+        auth_mode: auth.as_ref().map(CodexAuth::api_auth_mode),
+        plan_type: auth.as_ref().and_then(CodexAuth::account_plan_type),
+    }
+}
+
 fn environment_selection_error_message(err: CodexErr) -> String {
     match err {
         CodexErr::InvalidRequest(message) => message,
@@ -732,11 +745,7 @@ impl CodexMessageProcessor {
     }
 
     fn current_account_updated_notification(&self) -> AccountUpdatedNotification {
-        let auth = self.auth_manager.auth_cached();
-        AccountUpdatedNotification {
-            auth_mode: auth.as_ref().map(CodexAuth::api_auth_mode),
-            plan_type: auth.as_ref().and_then(CodexAuth::account_plan_type),
-        }
+        current_account_updated_notification_from_auth_manager(&self.auth_manager)
     }
 
     async fn refresh_account_runtime_state(&self) {
@@ -3541,6 +3550,7 @@ impl CodexMessageProcessor {
         );
         typesafe_overrides.ephemeral = ephemeral;
         let listener_task_context = ListenerTaskContext {
+            auth_manager: self.auth_manager.clone(),
             thread_manager: Arc::clone(&self.thread_manager),
             thread_state_manager: self.thread_state_manager.clone(),
             outgoing: Arc::clone(&self.outgoing),
@@ -3552,6 +3562,8 @@ impl CodexMessageProcessor {
             autoresearch_manager: self.autoresearch_manager.clone(),
             pilot_manager: self.pilot_manager.clone(),
             fallback_model_provider: self.config.model_provider_id.clone(),
+            config_manager: self.config_manager.clone(),
+            chatgpt_base_url: self.config.chatgpt_base_url.clone(),
             codex_home: self.config.codex_home.clone().to_path_buf(),
             codex_linux_sandbox_exe: self.config.codex_linux_sandbox_exe.clone(),
             windows_sandbox_level: WindowsSandboxLevel::from_config(&self.config),
@@ -8967,6 +8979,7 @@ impl CodexMessageProcessor {
     ) -> Result<EnsureConversationListenerResult, JSONRPCErrorError> {
         Self::ensure_conversation_listener_task(
             ListenerTaskContext {
+                auth_manager: self.auth_manager.clone(),
                 thread_manager: Arc::clone(&self.thread_manager),
                 thread_state_manager: self.thread_state_manager.clone(),
                 outgoing: Arc::clone(&self.outgoing),
@@ -8978,6 +8991,8 @@ impl CodexMessageProcessor {
                 autoresearch_manager: self.autoresearch_manager.clone(),
                 pilot_manager: self.pilot_manager.clone(),
                 fallback_model_provider: self.config.model_provider_id.clone(),
+                config_manager: self.config_manager.clone(),
+                chatgpt_base_url: self.config.chatgpt_base_url.clone(),
                 codex_home: self.config.codex_home.clone().to_path_buf(),
                 codex_linux_sandbox_exe: self.config.codex_linux_sandbox_exe.clone(),
                 windows_sandbox_level: WindowsSandboxLevel::from_config(&self.config),
@@ -9094,6 +9109,7 @@ impl CodexMessageProcessor {
     ) -> Result<(), JSONRPCErrorError> {
         Self::ensure_listener_task_running_task(
             ListenerTaskContext {
+                auth_manager: self.auth_manager.clone(),
                 thread_manager: Arc::clone(&self.thread_manager),
                 thread_state_manager: self.thread_state_manager.clone(),
                 outgoing: Arc::clone(&self.outgoing),
@@ -9105,6 +9121,8 @@ impl CodexMessageProcessor {
                 autoresearch_manager: self.autoresearch_manager.clone(),
                 pilot_manager: self.pilot_manager.clone(),
                 fallback_model_provider: self.config.model_provider_id.clone(),
+                config_manager: self.config_manager.clone(),
+                chatgpt_base_url: self.config.chatgpt_base_url.clone(),
                 codex_home: self.config.codex_home.clone().to_path_buf(),
                 codex_linux_sandbox_exe: self.config.codex_linux_sandbox_exe.clone(),
                 windows_sandbox_level: WindowsSandboxLevel::from_config(&self.config),
@@ -9152,6 +9170,7 @@ impl CodexMessageProcessor {
             thread_state.set_listener(cancel_tx, &conversation)
         };
         let ListenerTaskContext {
+            auth_manager,
             outgoing,
             thread_manager,
             thread_state_manager,
@@ -9163,6 +9182,8 @@ impl CodexMessageProcessor {
             autoresearch_manager,
             pilot_manager,
             fallback_model_provider,
+            config_manager,
+            chatgpt_base_url,
             codex_home,
             codex_linux_sandbox_exe,
             windows_sandbox_level,
@@ -9382,6 +9403,20 @@ impl CodexMessageProcessor {
                             subscribed_connection_ids,
                             conversation_id,
                         );
+                        if pending_notifications.account_updated {
+                            config_manager.replace_cloud_requirements_loader(
+                                auth_manager.clone(),
+                                chatgpt_base_url.clone(),
+                            );
+                            config_manager.sync_default_client_residency_requirement().await;
+                            thread_outgoing
+                                .send_global_server_notification(ServerNotification::AccountUpdated(
+                                    current_account_updated_notification_from_auth_manager(
+                                        &auth_manager,
+                                    ),
+                                ))
+                                .await;
+                        }
                         for notification in pending_notifications.automation_notifications {
                             thread_outgoing
                                 .send_server_notification(ServerNotification::AutomationUpdated(

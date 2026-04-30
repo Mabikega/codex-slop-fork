@@ -6,6 +6,8 @@ use codex_app_server_protocol::AutoresearchUpdatedNotification;
 use codex_app_server_protocol::PilotUpdatedNotification;
 use codex_app_server_protocol::TurnError;
 use codex_core::CodexThread;
+use codex_core::slop_fork::AUTO_SWITCH_ACCOUNT_WARNING_PREFIX;
+use codex_core::slop_fork::AUTO_SWITCH_ACCOUNT_WARNING_SUFFIX;
 use codex_core::slop_fork::SlopForkConfig;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::WindowsSandboxLevel;
@@ -16,6 +18,7 @@ use tracing::warn;
 
 #[derive(Default)]
 pub(crate) struct SlopForkRuntimeEventEffects {
+    pub(crate) account_updated: bool,
     pub(crate) automation_notifications: Vec<AutomationUpdatedNotification>,
     pub(crate) autoresearch_notification: Option<AutoresearchUpdatedNotification>,
     pub(crate) pilot_notification: Option<PilotUpdatedNotification>,
@@ -42,6 +45,9 @@ impl SlopForkRuntimeEventHandler<'_> {
     ) -> SlopForkRuntimeEventEffects {
         let mut effects = SlopForkRuntimeEventEffects::default();
         match event {
+            EventMsg::Warning(warning) if is_auto_switch_account_warning(&warning.message) => {
+                effects.account_updated = true;
+            }
             EventMsg::TurnStarted(turn_started) => {
                 match self
                     .pilot_manager
@@ -289,5 +295,31 @@ impl SlopForkRuntimeEventHandler<'_> {
             _ => {}
         }
         effects
+    }
+}
+
+fn is_auto_switch_account_warning(message: &str) -> bool {
+    message.starts_with(AUTO_SWITCH_ACCOUNT_WARNING_PREFIX)
+        && message.ends_with(AUTO_SWITCH_ACCOUNT_WARNING_SUFFIX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identifies_auto_switch_account_warning() {
+        let message = format!(
+            "{AUTO_SWITCH_ACCOUNT_WARNING_PREFIX}ChatGPT #2{AUTO_SWITCH_ACCOUNT_WARNING_SUFFIX}"
+        );
+
+        assert!(is_auto_switch_account_warning(&message));
+    }
+
+    #[test]
+    fn ignores_other_warnings() {
+        assert!(!is_auto_switch_account_warning(
+            "Switched transport after hitting a rate limit."
+        ));
     }
 }
