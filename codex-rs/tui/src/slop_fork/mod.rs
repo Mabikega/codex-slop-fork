@@ -45,9 +45,7 @@ pub(crate) use runtime_event::automation_updated as runtime_event_automation_upd
 pub(crate) use runtime_event::autoresearch_updated as runtime_event_autoresearch_updated;
 pub(crate) use runtime_event::controller_turn_started as runtime_event_controller_turn_started;
 pub(crate) use runtime_event::failed_controller_turn as runtime_event_failed_controller_turn;
-#[cfg(test)]
 pub(crate) use runtime_event::from_turn_abort_reason as runtime_event_from_turn_abort_reason;
-pub(crate) use runtime_event::interrupted_controller_turn as runtime_event_interrupted_controller_turn;
 pub(crate) use runtime_event::pilot_updated as runtime_event_pilot_updated;
 pub(crate) use status_line::SavedAccountLimitKind;
 pub(crate) use status_line::SavedAccountStatusLineFormatter;

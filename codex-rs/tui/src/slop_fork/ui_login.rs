@@ -488,7 +488,10 @@ impl SlopForkUi {
         match login_with_api_key(&ctx.codex_home, &api_key, ctx.auth_credentials_store_mode) {
             Ok(()) => {
                 self.active_login_popup_kind = None;
-                ctx.auth_manager.reload();
+                let auth_manager = Arc::clone(&ctx.auth_manager);
+                tokio::spawn(async move {
+                    auth_manager.reload().await;
+                });
                 vec![SlopForkUiEffect::AuthStateChanged {
                     message: "Saved API key and activated it.".to_string(),
                     is_error: false,
@@ -1799,7 +1802,7 @@ impl SlopForkUi {
                     async move {
                         let event = match child.block_until_done().await {
                             Ok(()) => {
-                                auth_manager.reload();
+                                auth_manager.reload().await;
                                 AppEvent::AuthStateChanged {
                                     message: "Successfully logged in with ChatGPT.".to_string(),
                                     is_error: false,
@@ -1854,7 +1857,7 @@ impl SlopForkUi {
 
                         match complete_device_code_login(opts, device_code).await {
                             Ok(()) => {
-                                auth_manager.reload();
+                                auth_manager.reload().await;
                                 AppEvent::AuthStateChanged {
                                     message:
                                         "Successfully logged in with ChatGPT using device code."

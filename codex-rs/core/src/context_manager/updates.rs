@@ -49,33 +49,38 @@ fn build_permissions_update_item(
     }
 
     let prev = previous?;
-    let exec_permission_approvals_enabled = next.features.enabled(Feature::ExecPermissionApprovals);
-    let request_permissions_tool_enabled = next.features.enabled(Feature::RequestPermissionsTool);
-    let next_text = PermissionsInstructions::from_policy(
-        next.sandbox_policy.get(),
+    if prev.permission_profile() == next.permission_profile()
+        && prev.approval_policy == next.approval_policy.value()
+    {
+        return None;
+    }
+
+    let next_rendered = PermissionsInstructions::from_permission_profile(
+        &next.permission_profile,
         next.approval_policy.value(),
         next.config.approvals_reviewer,
         exec_policy,
         &next.cwd,
-        exec_permission_approvals_enabled,
-        request_permissions_tool_enabled,
+        next.features.enabled(Feature::ExecPermissionApprovals),
+        next.features.enabled(Feature::RequestPermissionsTool),
     )
     .render();
-    let prev_text = PermissionsInstructions::from_policy(
-        &prev.sandbox_policy,
+
+    let prev_rendered = PermissionsInstructions::from_permission_profile(
+        &prev.permission_profile(),
         prev.approval_policy,
         next.config.approvals_reviewer,
         exec_policy,
         &prev.cwd,
-        exec_permission_approvals_enabled,
-        request_permissions_tool_enabled,
+        next.features.enabled(Feature::ExecPermissionApprovals),
+        next.features.enabled(Feature::RequestPermissionsTool),
     )
     .render();
-    if prev_text == next_text {
+    if prev_rendered == next_rendered {
         return None;
     }
 
-    Some(next_text)
+    Some(next_rendered)
 }
 
 fn build_collaboration_mode_update_item(
@@ -206,7 +211,6 @@ fn build_text_message(role: &str, text_sections: Vec<String>) -> Option<Response
         id: None,
         role: role.to_string(),
         content,
-        end_turn: None,
         phase: None,
     })
 }

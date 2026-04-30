@@ -13,6 +13,7 @@ use crate::auth::AuthDotJson;
 use crate::auth::CodexAuth;
 use crate::auth::load_auth_dot_json;
 use crate::path_utils::write_atomically;
+use codex_login::auth::AgentIdentityAuthRecord;
 use codex_login::token_data::parse_chatgpt_jwt_claims;
 use codex_login::token_data::parse_chatgpt_subscription_active_until;
 
@@ -98,6 +99,7 @@ pub fn auth_label(auth: &AuthDotJson) -> String {
         AuthMode::AgentIdentity => auth
             .agent_identity
             .as_ref()
+            .and_then(|jwt| AgentIdentityAuthRecord::from_agent_identity_jwt(jwt).ok())
             .map(|record| format!("Agent identity ({})", record.email))
             .unwrap_or_else(|| "Agent identity".to_string()),
     }
@@ -650,14 +652,18 @@ fn account_identity(auth: &AuthDotJson) -> Option<String> {
                     .map(str::to_ascii_lowercase)
             })
             .map(|identity| format!("chatgpt:{identity}")),
-        AuthMode::AgentIdentity => auth.agent_identity.as_ref().and_then(|record| {
-            preferred_chatgpt_identity(
-                Some(record.chatgpt_user_id.clone()),
-                Some(record.account_id.clone()),
-                Some(record.email.clone()),
-            )
-            .map(|identity| format!("chatgpt:{identity}"))
-        }),
+        AuthMode::AgentIdentity => auth
+            .agent_identity
+            .as_ref()
+            .and_then(|jwt| AgentIdentityAuthRecord::from_agent_identity_jwt(jwt).ok())
+            .and_then(|record| {
+                preferred_chatgpt_identity(
+                    Some(record.chatgpt_user_id),
+                    Some(record.account_id),
+                    Some(record.email),
+                )
+                .map(|identity| format!("chatgpt:{identity}"))
+            }),
     }
 }
 
@@ -756,9 +762,7 @@ fn api_key_suffix(api_key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::CodexAuth;
     use base64::Engine;
-    use codex_login::auth::AgentIdentityAuth;
     use codex_login::auth::AgentIdentityAuthRecord;
     use codex_login::token_data::IdTokenInfo;
     use codex_login::token_data::TokenData;
@@ -856,22 +860,46 @@ mod tests {
     }
 
     fn agent_identity_auth(account_id: &str, user_id: &str, email: &str) -> AuthDotJson {
+        let record = AgentIdentityAuthRecord {
+            agent_runtime_id: format!("runtime-{account_id}"),
+            agent_private_key: "MC4CAQAwBQYDK2VwBCIEIF0YfwNgTOuld+mqaN7OfdKVvNKnUgb2N0ONXqXY92a2"
+                .to_string(),
+            account_id: account_id.to_string(),
+            chatgpt_user_id: user_id.to_string(),
+            email: email.to_string(),
+            plan_type: AccountPlanType::Pro,
+            chatgpt_account_is_fedramp: false,
+        };
         AuthDotJson {
             auth_mode: Some(AuthMode::AgentIdentity),
             openai_api_key: None,
             tokens: None,
             last_refresh: None,
-            agent_identity: Some(AgentIdentityAuthRecord {
-                agent_runtime_id: format!("runtime-{account_id}"),
-                agent_private_key:
-                    "MC4CAQAwBQYDK2VwBCIEIF0YfwNgTOuld+mqaN7OfdKVvNKnUgb2N0ONXqXY92a2".to_string(),
-                account_id: account_id.to_string(),
-                chatgpt_user_id: user_id.to_string(),
-                email: email.to_string(),
-                plan_type: AccountPlanType::Pro,
-                chatgpt_account_is_fedramp: false,
-            }),
+            agent_identity: Some(fake_agent_identity_jwt(&record)),
         }
+    }
+
+    fn fake_agent_identity_jwt(record: &AgentIdentityAuthRecord) -> String {
+        let header = serde_json::json!({ "alg": "EdDSA", "typ": "JWT" });
+        let payload = serde_json::json!({
+            "iss": "https://chatgpt.com/codex-backend/agent-identity",
+            "aud": "codex-app-server",
+            "iat": 1_700_000_000usize,
+            "exp": 4_000_000_000usize,
+            "agent_runtime_id": record.agent_runtime_id,
+            "agent_private_key": record.agent_private_key,
+            "account_id": record.account_id,
+            "chatgpt_user_id": record.chatgpt_user_id,
+            "email": record.email,
+            "plan_type": record.plan_type,
+            "chatgpt_account_is_fedramp": record.chatgpt_account_is_fedramp,
+        });
+        let header_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&header).expect("header"));
+        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&payload).expect("payload"));
+        let signature_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"sig");
+        format!("{header_b64}.{payload_b64}.{signature_b64}")
     }
 
     #[test]
@@ -938,13 +966,13 @@ mod tests {
     }
 
     #[test]
-    fn stored_account_id_for_auth_uses_agent_identity_account_identity() {
+    fn stored_account_id_uses_agent_identity_account_identity() {
         let auth = agent_identity_auth("acct-1", "user-1", "person@example.com");
-        let expected = stored_account_id(&auth).expect("saved account id");
-        let record = auth.agent_identity.expect("agent identity record");
-        let codex_auth = CodexAuth::AgentIdentity(AgentIdentityAuth::new(record));
+        let digest = Sha256::digest("chatgpt:user-1".as_bytes());
+        let hex = format!("{digest:x}");
+        let expected = format!("chatgpt-{}", &hex[..16]);
 
-        assert_eq!(stored_account_id_for_auth(&codex_auth), Some(expected));
+        assert_eq!(stored_account_id(&auth), Some(expected));
     }
 
     #[test]

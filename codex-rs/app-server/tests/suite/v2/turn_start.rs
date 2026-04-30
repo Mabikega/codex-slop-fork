@@ -27,9 +27,6 @@ use codex_app_server_protocol::FileChangeApprovalDecision;
 use codex_app_server_protocol::FileChangeOutputDeltaNotification;
 use codex_app_server_protocol::FileChangePatchUpdatedNotification;
 use codex_app_server_protocol::FileChangeRequestApprovalResponse;
-use codex_app_server_protocol::FileSystemAccessMode;
-use codex_app_server_protocol::FileSystemPath;
-use codex_app_server_protocol::FileSystemSandboxEntry;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::JSONRPCError;
@@ -38,9 +35,7 @@ use codex_app_server_protocol::JSONRPCNotification;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::PatchApplyStatus;
 use codex_app_server_protocol::PatchChangeKind;
-use codex_app_server_protocol::PermissionProfile;
-use codex_app_server_protocol::PermissionProfileFileSystemPermissions;
-use codex_app_server_protocol::PermissionProfileNetworkPermissions;
+use codex_app_server_protocol::PermissionProfileSelectionParams;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::ServerRequestResolvedNotification;
@@ -67,7 +62,6 @@ use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::Settings;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::user_input::MAX_USER_INPUT_TEXT_CHARS;
-use codex_utils_absolute_path::AbsolutePathBuf;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
 use pretty_assertions::assert_eq;
@@ -78,7 +72,6 @@ use std::path::Path;
 use tempfile::TempDir;
 use tokio::time::timeout;
 
-use super::analytics::enable_analytics_capture;
 use super::analytics::mount_analytics_capture;
 use super::analytics::wait_for_analytics_event;
 
@@ -333,9 +326,9 @@ async fn turn_start_emits_thread_scoped_warning_notification_for_trimmed_skills(
         serde_json::from_value(params).expect("deserialize warning notification");
     assert_eq!(warning.thread_id.as_deref(), Some(thread.id.as_str()));
     assert!(
-        warning
-            .message
-            .starts_with("Warning: Exceeded skills context budget of 2%. All skill descriptions were removed and "),
+        warning.message.starts_with(
+            "Exceeded skills context budget of 2%. All skill descriptions were removed and "
+        ),
         "unexpected warning prefix: {}",
         warning.message
     );
@@ -473,7 +466,7 @@ async fn turn_start_tracks_turn_event_analytics() -> Result<()> {
         &server.uri(),
         &server.uri(),
     )?;
-    enable_analytics_capture(&server, codex_home.path()).await?;
+    mount_analytics_capture(&server, codex_home.path()).await?;
 
     let mut mcp = McpProcess::new_without_managed_config(codex_home.path()).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
@@ -545,77 +538,6 @@ async fn turn_start_tracks_turn_event_analytics() -> Result<()> {
     assert_eq!(event["event_params"]["reasoning_output_tokens"], 0);
     assert_eq!(event["event_params"]["total_tokens"], 0);
 
-    Ok(())
-}
-
-#[tokio::test]
-async fn turn_start_does_not_track_turn_event_analytics_without_feature() -> Result<()> {
-    let responses = vec![create_final_assistant_message_sse_response("Done")?];
-    let server = create_mock_responses_server_sequence_unchecked(responses).await;
-
-    let codex_home = TempDir::new()?;
-    write_mock_responses_config_toml_with_chatgpt_base_url(
-        codex_home.path(),
-        &server.uri(),
-        &server.uri(),
-    )?;
-    let config_path = codex_home.path().join("config.toml");
-    let config_toml = std::fs::read_to_string(&config_path)?;
-    std::fs::write(
-        &config_path,
-        format!("{config_toml}\n[features]\ngeneral_analytics = false\n"),
-    )?;
-    mount_analytics_capture(&server, codex_home.path()).await?;
-
-    let mut mcp = McpProcess::new_without_managed_config(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-
-    let thread_req = mcp
-        .send_thread_start_request(ThreadStartParams {
-            model: Some("mock-model".to_string()),
-            ..Default::default()
-        })
-        .await?;
-    let thread_resp: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(thread_req)),
-    )
-    .await??;
-    let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(thread_resp)?;
-
-    let turn_req = mcp
-        .send_turn_start_request(TurnStartParams {
-            thread_id: thread.id,
-            input: vec![V2UserInput::Text {
-                text: "hello".to_string(),
-                text_elements: Vec::new(),
-            }],
-            ..Default::default()
-        })
-        .await?;
-    let turn_resp: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(turn_req)),
-    )
-    .await??;
-    let _ = to_response::<TurnStartResponse>(turn_resp)?;
-
-    timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("turn/completed"),
-    )
-    .await??;
-
-    let turn_event = wait_for_analytics_event(
-        &server,
-        std::time::Duration::from_millis(250),
-        "codex_turn_event",
-    )
-    .await;
-    assert!(
-        turn_event.is_err(),
-        "turn analytics should be gated off when general_analytics is disabled"
-    );
     Ok(())
 }
 
@@ -757,14 +679,17 @@ async fn turn_start_rejects_combined_oversized_text_input() -> Result<()> {
 }
 
 #[tokio::test]
-async fn turn_start_rejects_invalid_permission_profile_before_starting_turn() -> Result<()> {
+async fn turn_start_rejects_invalid_permission_selection_before_starting_turn() -> Result<()> {
     let codex_home = TempDir::new()?;
-    let unsupported_write_root = TempDir::new()?;
     create_config_toml(
         codex_home.path(),
         "http://localhost/unused",
         "never",
         &BTreeMap::from([(Feature::Personality, true)]),
+    )?;
+    std::fs::write(
+        codex_home.path().join("managed_config.toml"),
+        "sandbox_mode = \"read-only\"\n",
     )?;
 
     let mut mcp = McpProcess::new(codex_home.path()).await?;
@@ -782,9 +707,6 @@ async fn turn_start_rejects_invalid_permission_profile_before_starting_turn() ->
     )
     .await??;
     let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(thread_resp)?;
-    let unsupported_write_root = AbsolutePathBuf::from_absolute_path(unsupported_write_root.path())
-        .expect("tempdir path should be absolute");
-
     let turn_req = mcp
         .send_turn_start_request(TurnStartParams {
             thread_id: thread.id,
@@ -792,17 +714,9 @@ async fn turn_start_rejects_invalid_permission_profile_before_starting_turn() ->
                 text: "Hello".to_string(),
                 text_elements: Vec::new(),
             }],
-            permission_profile: Some(PermissionProfile::Managed {
-                network: PermissionProfileNetworkPermissions { enabled: false },
-                file_system: PermissionProfileFileSystemPermissions::Restricted {
-                    entries: vec![FileSystemSandboxEntry {
-                        path: FileSystemPath::Path {
-                            path: unsupported_write_root,
-                        },
-                        access: FileSystemAccessMode::Write,
-                    }],
-                    glob_scan_max_depth: None,
-                },
+            permissions: Some(PermissionProfileSelectionParams::Profile {
+                id: ":danger-no-sandbox".to_string(),
+                modifications: None,
             }),
             ..Default::default()
         })
@@ -816,9 +730,9 @@ async fn turn_start_rejects_invalid_permission_profile_before_starting_turn() ->
     assert_eq!(err.error.code, INVALID_REQUEST_ERROR_CODE);
     assert!(err.error.message.contains("invalid turn context override"));
     assert!(
-        err.error
-            .message
-            .contains("filesystem writes outside the workspace root")
+        err.error.message.contains("allowed set [ReadOnly]"),
+        "unexpected error message: {}",
+        err.error.message
     );
     let turn_started = tokio::time::timeout(
         std::time::Duration::from_millis(250),
@@ -827,7 +741,7 @@ async fn turn_start_rejects_invalid_permission_profile_before_starting_turn() ->
     .await;
     assert!(
         turn_started.is_err(),
-        "did not expect a turn/started notification after rejected permissionProfile"
+        "did not expect a turn/started notification after rejected permissions selection"
     );
 
     Ok(())
@@ -1047,7 +961,7 @@ async fn turn_start_accepts_collaboration_mode_override_v2() -> Result<()> {
         codex_home.path(),
         &server.uri(),
         "never",
-        &BTreeMap::from([(Feature::DefaultModeRequestUserInput, true)]),
+        &BTreeMap::default(),
     )?;
 
     let mut mcp = McpProcess::new(codex_home.path()).await?;
@@ -1107,13 +1021,15 @@ async fn turn_start_accepts_collaboration_mode_override_v2() -> Result<()> {
     let payload = request.body_json();
     assert_eq!(payload["model"].as_str(), Some("mock-model-collab"));
     let payload_text = payload.to_string();
-    assert!(payload_text.contains("The `request_user_input` tool is available in Default mode."));
+    assert!(payload_text.contains(
+        "Use the `request_user_input` tool only when it is listed in the available tools"
+    ));
 
     Ok(())
 }
 
 #[tokio::test]
-async fn turn_start_uses_thread_feature_overrides_for_collaboration_mode_instructions_v2()
+async fn turn_start_uses_thread_feature_overrides_for_request_user_input_tool_description_v2()
 -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -1192,7 +1108,7 @@ async fn turn_start_uses_thread_feature_overrides_for_collaboration_mode_instruc
 
     let request = response_mock.single_request();
     let payload_text = request.body_json().to_string();
-    assert!(payload_text.contains("The `request_user_input` tool is available in Default mode."));
+    assert!(payload_text.contains("This tool is only available in Default or Plan mode."));
 
     Ok(())
 }
@@ -1905,12 +1821,11 @@ async fn turn_start_updates_sandbox_and_cwd_between_turns_v2() -> Result<()> {
             approvals_reviewer: None,
             sandbox_policy: Some(codex_app_server_protocol::SandboxPolicy::WorkspaceWrite {
                 writable_roots: vec![first_cwd.try_into()?],
-                read_only_access: codex_app_server_protocol::ReadOnlyAccess::FullAccess,
                 network_access: false,
                 exclude_tmpdir_env_var: false,
                 exclude_slash_tmp: false,
             }),
-            permission_profile: None,
+            permissions: None,
             model: Some("mock-model".to_string()),
             effort: Some(ReasoningEffort::Medium),
             summary: Some(ReasoningSummary::Auto),
@@ -1946,7 +1861,7 @@ async fn turn_start_updates_sandbox_and_cwd_between_turns_v2() -> Result<()> {
             approval_policy: Some(codex_app_server_protocol::AskForApproval::Never),
             approvals_reviewer: None,
             sandbox_policy: Some(codex_app_server_protocol::SandboxPolicy::DangerFullAccess),
-            permission_profile: None,
+            permissions: None,
             model: Some("mock-model".to_string()),
             effort: Some(ReasoningEffort::Medium),
             summary: Some(ReasoningSummary::Auto),

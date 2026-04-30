@@ -32,6 +32,7 @@ use crate::exec::process_exec_tool_call;
 use crate::sandboxing::SandboxPermissions;
 use crate::slop_fork::resolve_root_git_project_for_trust_local;
 use codex_protocol::config_types::WindowsSandboxLevel;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::SandboxPolicy;
@@ -346,6 +347,10 @@ pub async fn run_policy_command(
             ),
         ]
     };
+    let permission_profile = PermissionProfile::from_runtime_permissions(
+        &execution.file_system_sandbox_policy,
+        execution.network_sandbox_policy,
+    );
     let output = process_exec_tool_call(
         ExecParams {
             command: wrapped_command,
@@ -360,9 +365,7 @@ pub async fn run_policy_command(
             justification: Some("Run /auto policy command".to_string()),
             arg0: None,
         },
-        &execution.sandbox_policy,
-        &execution.file_system_sandbox_policy,
-        execution.network_sandbox_policy,
+        &permission_profile,
         &session_cwd,
         &execution.codex_linux_sandbox_exe,
         /*use_legacy_landlock*/ false,

@@ -815,9 +815,7 @@ async fn execute_command(
     };
     process_exec_tool_call(
         exec_params,
-        turn.sandbox_policy.get(),
-        &turn.file_system_sandbox_policy,
-        turn.network_sandbox_policy,
+        &turn.permission_profile(),
         &turn.cwd,
         &turn.codex_linux_sandbox_exe,
         /*use_legacy_landlock*/ false,

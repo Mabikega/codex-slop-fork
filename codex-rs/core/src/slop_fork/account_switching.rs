@@ -426,22 +426,46 @@ mod tests {
     }
 
     fn agent_identity_auth(account_id: &str, user_id: &str, email: &str) -> AuthDotJson {
+        let record = AgentIdentityAuthRecord {
+            agent_runtime_id: format!("runtime-{account_id}"),
+            agent_private_key: "MC4CAQAwBQYDK2VwBCIEIF0YfwNgTOuld+mqaN7OfdKVvNKnUgb2N0ONXqXY92a2"
+                .to_string(),
+            account_id: account_id.to_string(),
+            chatgpt_user_id: user_id.to_string(),
+            email: email.to_string(),
+            plan_type: PlanType::Pro,
+            chatgpt_account_is_fedramp: false,
+        };
         AuthDotJson {
             auth_mode: Some(ApiAuthMode::AgentIdentity),
             openai_api_key: None,
             tokens: None,
             last_refresh: None,
-            agent_identity: Some(AgentIdentityAuthRecord {
-                agent_runtime_id: format!("runtime-{account_id}"),
-                agent_private_key:
-                    "MC4CAQAwBQYDK2VwBCIEIF0YfwNgTOuld+mqaN7OfdKVvNKnUgb2N0ONXqXY92a2".to_string(),
-                account_id: account_id.to_string(),
-                chatgpt_user_id: user_id.to_string(),
-                email: email.to_string(),
-                plan_type: PlanType::Pro,
-                chatgpt_account_is_fedramp: false,
-            }),
+            agent_identity: Some(fake_agent_identity_jwt(&record)),
         }
+    }
+
+    fn fake_agent_identity_jwt(record: &AgentIdentityAuthRecord) -> String {
+        let header = serde_json::json!({ "alg": "EdDSA", "typ": "JWT" });
+        let payload = serde_json::json!({
+            "iss": "https://chatgpt.com/codex-backend/agent-identity",
+            "aud": "codex-app-server",
+            "iat": 1_700_000_000usize,
+            "exp": 4_000_000_000usize,
+            "agent_runtime_id": record.agent_runtime_id,
+            "agent_private_key": record.agent_private_key,
+            "account_id": record.account_id,
+            "chatgpt_user_id": record.chatgpt_user_id,
+            "email": record.email,
+            "plan_type": record.plan_type,
+            "chatgpt_account_is_fedramp": record.chatgpt_account_is_fedramp,
+        });
+        let header_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&header).expect("header"));
+        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&payload).expect("payload"));
+        let signature_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"sig");
+        format!("{header_b64}.{payload_b64}.{signature_b64}")
     }
 
     fn fixed_now() -> DateTime<Utc> {

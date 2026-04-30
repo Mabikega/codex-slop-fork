@@ -237,10 +237,9 @@ pub(crate) enum SlopForkUiEffect {
 pub(crate) enum SlopForkTurnAbortCause {
     Interrupted,
     Failed,
-    #[cfg(test)]
     Replaced,
-    #[cfg(test)]
     ReviewEnded,
+    BudgetLimited,
 }
 
 pub(crate) enum SlopForkRuntimeEvent<'a> {
@@ -588,13 +587,14 @@ impl SlopForkUi {
                     SlopForkTurnAbortCause::Failed => {
                         "Controller-owned turn failed before completion."
                     }
-                    #[cfg(test)]
                     SlopForkTurnAbortCause::Replaced => {
                         "Controller-owned turn was replaced by another task."
                     }
-                    #[cfg(test)]
                     SlopForkTurnAbortCause::ReviewEnded => {
                         "Controller-owned turn ended because review mode finished."
+                    }
+                    SlopForkTurnAbortCause::BudgetLimited => {
+                        "Controller-owned turn stopped after reaching its token budget."
                     }
                 };
                 self.on_controller_turn_aborted(ctx, turn_id, reason, from_replay)

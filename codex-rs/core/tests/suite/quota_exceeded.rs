@@ -145,8 +145,13 @@ async fn usage_limit_switches_to_another_saved_account_and_retries_turn() -> Res
     let home = std::sync::Arc::new(TempDir::new()?);
     let active_auth_json =
         write_chatgpt_auth_json(&home, "first@example.com", "acct-first", "access-first");
-    let active_auth = CodexAuth::from_auth_storage(home.path(), AuthCredentialsStoreMode::File)?
-        .expect("active auth");
+    let active_auth = CodexAuth::from_auth_storage(
+        home.path(),
+        AuthCredentialsStoreMode::File,
+        /*chatgpt_base_url*/ None,
+    )
+    .await?
+    .expect("active auth");
 
     let saved_active_account_id =
         auth_accounts::upsert_account(home.path(), &active_auth_json)?.expect("active account id");

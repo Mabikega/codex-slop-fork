@@ -4,7 +4,6 @@ use codex_app_server_protocol::AutoresearchRun;
 use codex_app_server_protocol::AutoresearchUpdateType;
 use codex_app_server_protocol::PilotRun;
 use codex_app_server_protocol::PilotUpdateType;
-#[cfg(test)]
 use codex_protocol::protocol::TurnAbortReason;
 
 use super::ui::SlopForkRuntimeEvent;
@@ -64,13 +63,6 @@ pub(crate) fn controller_turn_started(
     }
 }
 
-pub(crate) fn interrupted_controller_turn(
-    turn_id: Option<&str>,
-    from_replay: bool,
-) -> SlopForkRuntimeEvent<'_> {
-    controller_turn_aborted(turn_id, SlopForkTurnAbortCause::Interrupted, from_replay)
-}
-
 pub(crate) fn failed_controller_turn(
     turn_id: Option<&str>,
     from_replay: bool,
@@ -78,7 +70,6 @@ pub(crate) fn failed_controller_turn(
     controller_turn_aborted(turn_id, SlopForkTurnAbortCause::Failed, from_replay)
 }
 
-#[cfg(test)]
 pub(crate) fn from_turn_abort_reason(
     turn_id: Option<&str>,
     reason: TurnAbortReason,
@@ -88,6 +79,7 @@ pub(crate) fn from_turn_abort_reason(
         TurnAbortReason::Interrupted => SlopForkTurnAbortCause::Interrupted,
         TurnAbortReason::Replaced => SlopForkTurnAbortCause::Replaced,
         TurnAbortReason::ReviewEnded => SlopForkTurnAbortCause::ReviewEnded,
+        TurnAbortReason::BudgetLimited => SlopForkTurnAbortCause::BudgetLimited,
     };
     controller_turn_aborted(turn_id, cause, from_replay)
 }

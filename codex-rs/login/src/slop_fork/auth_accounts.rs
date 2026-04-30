@@ -9,6 +9,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::AuthCredentialsStoreMode;
+use crate::auth::AgentIdentityAuthRecord;
 use crate::auth::AuthDotJson;
 use crate::auth::CodexAuth;
 use crate::auth::load_auth_dot_json;
@@ -85,6 +86,7 @@ pub fn auth_label(auth: &AuthDotJson) -> String {
         AuthMode::AgentIdentity => auth
             .agent_identity
             .as_ref()
+            .and_then(|jwt| AgentIdentityAuthRecord::from_agent_identity_jwt(jwt).ok())
             .map(|record| format!("Agent identity ({})", record.email))
             .unwrap_or_else(|| "Agent identity".to_string()),
     }

@@ -228,7 +228,7 @@ pub(crate) async fn maybe_switch_account_for_rate_limit(
         }
         Err(err) => {
             tracing::warn!("failed to load switched account into auth manager cache: {err}");
-            sess.services.auth_manager.reload();
+            sess.services.auth_manager.reload().await;
         }
     }
     *client_session = sess.services.model_client.new_session();

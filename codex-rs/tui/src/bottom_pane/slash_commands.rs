@@ -16,6 +16,7 @@ pub(crate) struct BuiltinCommandFlags {
     pub(crate) connectors_enabled: bool,
     pub(crate) plugins_command_enabled: bool,
     pub(crate) fast_command_enabled: bool,
+    pub(crate) goal_command_enabled: bool,
     pub(crate) personality_command_enabled: bool,
     pub(crate) realtime_conversation_enabled: bool,
     pub(crate) audio_device_selection_enabled: bool,
@@ -30,6 +31,7 @@ fn command_is_enabled(cmd: SlashCommand, flags: BuiltinCommandFlags) -> bool {
         && (flags.connectors_enabled || cmd != SlashCommand::Apps)
         && (flags.plugins_command_enabled || cmd != SlashCommand::Plugins)
         && (flags.fast_command_enabled || cmd != SlashCommand::Fast)
+        && (flags.goal_command_enabled || cmd != SlashCommand::Goal)
         && (flags.personality_command_enabled || cmd != SlashCommand::Personality)
         && (flags.realtime_conversation_enabled || cmd != SlashCommand::Realtime)
         && (flags.audio_device_selection_enabled || cmd != SlashCommand::Settings)
@@ -77,6 +79,7 @@ mod tests {
             connectors_enabled: true,
             plugins_command_enabled: true,
             fast_command_enabled: true,
+            goal_command_enabled: true,
             personality_command_enabled: true,
             realtime_conversation_enabled: true,
             audio_device_selection_enabled: true,
@@ -120,6 +123,13 @@ mod tests {
         let mut flags = all_enabled_flags();
         flags.fast_command_enabled = false;
         assert_eq!(find_builtin_command("fast", flags), None);
+    }
+
+    #[test]
+    fn goal_command_is_hidden_when_disabled() {
+        let mut flags = all_enabled_flags();
+        flags.goal_command_enabled = false;
+        assert_eq!(find_builtin_command("goal", flags), None);
     }
 
     #[test]

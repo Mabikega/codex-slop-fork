@@ -40,12 +40,14 @@ pub enum RequestError {
     Other(anyhow::Error),
 }
 
+/// Raw backend rate-limit fields retained for fork account-limit polling.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RawRateLimitSnapshotInput {
     pub primary: Option<RawRateLimitWindowSnapshot>,
     pub secondary: Option<RawRateLimitWindowSnapshot>,
 }
 
+/// Raw backend rate-limit window fields retained for fork account-limit polling.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RawRateLimitWindowSnapshot {
     pub used_percent: i32,

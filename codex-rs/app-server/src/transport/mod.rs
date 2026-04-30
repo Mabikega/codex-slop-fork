@@ -343,9 +343,7 @@ fn should_skip_notification_for_connection(
     };
     match message {
         OutgoingMessage::AppServerNotification(notification) => {
-            if !experimental_api_enabled
-                && ExperimentalApi::experimental_reason(notification).is_some()
-            {
+            if notification.experimental_reason().is_some() && !experimental_api_enabled {
                 return true;
             }
             let method = notification.to_string();
@@ -480,6 +478,9 @@ mod tests {
     use codex_app_server_protocol::JSONRPCResponse;
     use codex_app_server_protocol::RequestId;
     use codex_app_server_protocol::ServerNotification;
+    use codex_app_server_protocol::ThreadGoal;
+    use codex_app_server_protocol::ThreadGoalStatus;
+    use codex_app_server_protocol::ThreadGoalUpdatedNotification;
     use codex_utils_absolute_path::AbsolutePathBuf;
     use pretty_assertions::assert_eq;
     use serde_json::json;
@@ -488,6 +489,23 @@ mod tests {
 
     fn absolute_path(path: &str) -> AbsolutePathBuf {
         AbsolutePathBuf::from_absolute_path(path).expect("absolute path")
+    }
+
+    fn thread_goal_updated_notification() -> ServerNotification {
+        ServerNotification::ThreadGoalUpdated(ThreadGoalUpdatedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: None,
+            goal: ThreadGoal {
+                thread_id: "thread-1".to_string(),
+                objective: "ship goal mode".to_string(),
+                status: ThreadGoalStatus::Active,
+                token_budget: None,
+                tokens_used: 0,
+                time_used_seconds: 0,
+                created_at: 1,
+                updated_at: 1,
+            },
+        })
     }
 
     #[test]
@@ -818,6 +836,76 @@ mod tests {
             OutgoingMessage::AppServerNotification(ServerNotification::ConfigWarning(
                 ConfigWarningNotification { summary, .. }
             )) if summary == "task_started"
+        ));
+    }
+
+    #[tokio::test]
+    async fn experimental_notifications_are_dropped_without_capability() {
+        let connection_id = ConnectionId(12);
+        let (writer_tx, mut writer_rx) = mpsc::channel(1);
+
+        let mut connections = HashMap::new();
+        connections.insert(
+            connection_id,
+            OutboundConnectionState::new(
+                writer_tx,
+                Arc::new(AtomicBool::new(true)),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(RwLock::new(HashSet::new())),
+                /*disconnect_sender*/ None,
+            ),
+        );
+
+        route_outgoing_envelope(
+            &mut connections,
+            OutgoingEnvelope::ToConnection {
+                connection_id,
+                message: OutgoingMessage::AppServerNotification(thread_goal_updated_notification()),
+                write_complete_tx: None,
+            },
+        )
+        .await;
+
+        assert!(
+            writer_rx.try_recv().is_err(),
+            "experimental notifications should not reach clients without capability"
+        );
+    }
+
+    #[tokio::test]
+    async fn experimental_notifications_are_preserved_with_capability() {
+        let connection_id = ConnectionId(13);
+        let (writer_tx, mut writer_rx) = mpsc::channel(1);
+
+        let mut connections = HashMap::new();
+        connections.insert(
+            connection_id,
+            OutboundConnectionState::new(
+                writer_tx,
+                Arc::new(AtomicBool::new(true)),
+                Arc::new(AtomicBool::new(true)),
+                Arc::new(RwLock::new(HashSet::new())),
+                /*disconnect_sender*/ None,
+            ),
+        );
+
+        route_outgoing_envelope(
+            &mut connections,
+            OutgoingEnvelope::ToConnection {
+                connection_id,
+                message: OutgoingMessage::AppServerNotification(thread_goal_updated_notification()),
+                write_complete_tx: None,
+            },
+        )
+        .await;
+
+        let message = writer_rx
+            .recv()
+            .await
+            .expect("experimental notification should reach opted-in client");
+        assert!(matches!(
+            message.message,
+            OutgoingMessage::AppServerNotification(ServerNotification::ThreadGoalUpdated(_))
         ));
     }
 

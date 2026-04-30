@@ -299,7 +299,7 @@ fn project_doc_path_matches_readable_roots(
     sandbox_cwd: &Path,
     path: &Path,
 ) -> bool {
-    let file_system_policy = &config.permissions.file_system_sandbox_policy;
+    let file_system_policy = config.permissions.file_system_sandbox_policy();
 
     if file_system_policy.has_full_disk_read_access() {
         return true;
