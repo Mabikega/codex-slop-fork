@@ -102,7 +102,7 @@ pub(crate) fn spawn_rate_limit_poller(
                         &snapshot,
                         Some(&raw),
                     );
-                    fetched_snapshots.push(snapshot);
+                    fetched_snapshots.push(snapshot.into());
                 }
                 if !fetched_snapshots.is_empty() {
                     app_event_tx.send(AppEvent::RateLimitsLoaded {

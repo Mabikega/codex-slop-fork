@@ -12,10 +12,10 @@ use super::ResponsesApiTool;
 use super::ToolHandler;
 use super::ToolInvocation;
 use super::ToolKind;
+use super::ToolName;
 use super::ToolPayload;
 use super::ToolRegistryBuilder;
 use super::ToolSpec;
-use super::augment_tool_spec_for_code_mode;
 use super::load_active_state;
 use crate::slop_fork::autoresearch::AutoresearchDiscoveryEntry;
 use crate::slop_fork::autoresearch::AutoresearchDiscoveryReason;
@@ -87,16 +87,14 @@ pub(crate) fn register_discovery_tools(builder: &mut ToolRegistryBuilder, code_m
         AUTORESEARCH_REQUEST_DISCOVERY_TOOL.clone(),
         AUTORESEARCH_LOG_DISCOVERY_TOOL.clone(),
     ] {
-        builder.push_spec(augment_tool_spec_for_code_mode(spec, code_mode_enabled));
+        builder.push_spec(
+            spec,
+            /*supports_parallel_tool_calls*/ false,
+            code_mode_enabled,
+        );
     }
-    builder.register_handler(
-        "autoresearch_request_discovery",
-        Arc::new(AutoresearchRequestDiscoveryHandler),
-    );
-    builder.register_handler(
-        "autoresearch_log_discovery",
-        Arc::new(AutoresearchLogDiscoveryHandler),
-    );
+    builder.register_handler(Arc::new(AutoresearchRequestDiscoveryHandler));
+    builder.register_handler(Arc::new(AutoresearchLogDiscoveryHandler));
 }
 
 pub(crate) struct AutoresearchRequestDiscoveryHandler;
@@ -137,6 +135,10 @@ fn already_logged_discovery_message() -> String {
 
 impl ToolHandler for AutoresearchRequestDiscoveryHandler {
     type Output = FunctionToolOutput;
+
+    fn tool_name(&self) -> ToolName {
+        ToolName::plain("autoresearch_request_discovery")
+    }
 
     fn kind(&self) -> ToolKind {
         ToolKind::Function
@@ -186,6 +188,10 @@ impl ToolHandler for AutoresearchRequestDiscoveryHandler {
 
 impl ToolHandler for AutoresearchLogDiscoveryHandler {
     type Output = FunctionToolOutput;
+
+    fn tool_name(&self) -> ToolName {
+        ToolName::plain("autoresearch_log_discovery")
+    }
 
     fn kind(&self) -> ToolKind {
         ToolKind::Function

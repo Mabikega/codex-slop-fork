@@ -177,13 +177,18 @@ impl Renderable for SavedAccountRateLimitsRefreshRenderable {
 
         let elapsed = fmt_elapsed_compact(self.started_at.elapsed().as_secs());
         let mut spans = Vec::new();
-        spans.push(spinner(Some(self.started_at), self.animations_enabled));
-        spans.push(" ".into());
-        if self.animations_enabled {
-            spans.extend(shimmer_spans("Refreshing saved account limits"));
-        } else {
-            spans.push("Refreshing saved account limits".into());
+        if let Some(indicator) = activity_indicator(
+            Some(self.started_at),
+            MotionMode::from_animations_enabled(self.animations_enabled),
+            ReducedMotionIndicator::StaticBullet,
+        ) {
+            spans.push(indicator);
+            spans.push(" ".into());
         }
+        spans.extend(shimmer_text(
+            "Refreshing saved account limits",
+            MotionMode::from_animations_enabled(self.animations_enabled),
+        ));
         spans.push(" ".into());
         spans.push(format!("({elapsed})").dim());
 

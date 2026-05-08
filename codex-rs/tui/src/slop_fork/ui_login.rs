@@ -1656,8 +1656,10 @@ impl SlopForkUi {
         if let Some(snapshot) = snapshot {
             if let Some(rate_limit) = snapshot.snapshot.as_ref() {
                 let observed_at = snapshot.observed_at.unwrap_or_else(Utc::now);
+                let rate_limit =
+                    codex_app_server_protocol::RateLimitSnapshot::from(rate_limit.clone());
                 let display = rate_limit_snapshot_display_for_limit(
-                    rate_limit,
+                    &rate_limit,
                     rate_limit
                         .limit_name
                         .clone()

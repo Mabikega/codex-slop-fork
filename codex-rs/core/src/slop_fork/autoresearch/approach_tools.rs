@@ -12,10 +12,10 @@ use super::ResponsesApiTool;
 use super::ToolHandler;
 use super::ToolInvocation;
 use super::ToolKind;
+use super::ToolName;
 use super::ToolPayload;
 use super::ToolRegistryBuilder;
 use super::ToolSpec;
-use super::augment_tool_spec_for_code_mode;
 use super::load_active_state;
 use crate::slop_fork::autoresearch::AutoresearchApproachEntry;
 use crate::slop_fork::autoresearch::AutoresearchApproachStatus;
@@ -105,14 +105,12 @@ pub(crate) static AUTORESEARCH_LOG_APPROACH_TOOL: LazyLock<ToolSpec> = LazyLock:
 });
 
 pub(crate) fn register_approach_tools(builder: &mut ToolRegistryBuilder, code_mode_enabled: bool) {
-    builder.push_spec(augment_tool_spec_for_code_mode(
+    builder.push_spec(
         AUTORESEARCH_LOG_APPROACH_TOOL.clone(),
+        /*supports_parallel_tool_calls*/ false,
         code_mode_enabled,
-    ));
-    builder.register_handler(
-        "autoresearch_log_approach",
-        Arc::new(AutoresearchLogApproachHandler),
     );
+    builder.register_handler(Arc::new(AutoresearchLogApproachHandler));
 }
 
 pub(crate) struct AutoresearchLogApproachHandler;
@@ -139,6 +137,10 @@ struct LogApproachArgs {
 
 impl ToolHandler for AutoresearchLogApproachHandler {
     type Output = FunctionToolOutput;
+
+    fn tool_name(&self) -> ToolName {
+        ToolName::plain("autoresearch_log_approach")
+    }
 
     fn kind(&self) -> ToolKind {
         ToolKind::Function

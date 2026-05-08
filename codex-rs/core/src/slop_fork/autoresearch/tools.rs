@@ -15,8 +15,8 @@ use std::sync::LazyLock;
 use chrono::Local;
 use codex_protocol::exec_output::ExecToolCallOutput;
 use codex_tools::ResponsesApiTool;
+use codex_tools::ToolName;
 use codex_tools::ToolSpec;
-use codex_tools::augment_tool_spec_for_code_mode as augment_tool_spec_for_code_mode_impl;
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -52,14 +52,6 @@ use super::PendingRunResult;
 use super::load_evaluation_governance_settings;
 use super::load_stage_progress;
 use super::refresh_playbook_artifact;
-
-pub(super) fn augment_tool_spec_for_code_mode(spec: ToolSpec, code_mode_enabled: bool) -> ToolSpec {
-    if code_mode_enabled {
-        augment_tool_spec_for_code_mode_impl(spec)
-    } else {
-        spec
-    }
-}
 
 pub(crate) static AUTORESEARCH_INIT_TOOL: LazyLock<ToolSpec> = LazyLock::new(|| {
     let properties = BTreeMap::from([
@@ -201,15 +193,19 @@ pub(crate) fn register_autoresearch_tools(
         AUTORESEARCH_RUN_TOOL.clone(),
         AUTORESEARCH_LOG_TOOL.clone(),
     ] {
-        builder.push_spec(augment_tool_spec_for_code_mode(spec, code_mode_enabled));
+        builder.push_spec(
+            spec,
+            /*supports_parallel_tool_calls*/ false,
+            code_mode_enabled,
+        );
     }
     approach_tools::register_approach_tools(builder, code_mode_enabled);
     discovery_tools::register_discovery_tools(builder, code_mode_enabled);
     parallel_tools::register_parallel_tools(builder, code_mode_enabled);
     validation_tools::register_validation_tools(builder, code_mode_enabled);
-    builder.register_handler("autoresearch_init", Arc::new(AutoresearchInitHandler));
-    builder.register_handler("autoresearch_run", Arc::new(AutoresearchRunHandler));
-    builder.register_handler("autoresearch_log", Arc::new(AutoresearchLogHandler));
+    builder.register_handler(Arc::new(AutoresearchInitHandler));
+    builder.register_handler(Arc::new(AutoresearchRunHandler));
+    builder.register_handler(Arc::new(AutoresearchLogHandler));
 }
 
 pub struct AutoresearchInitHandler;
@@ -257,6 +253,10 @@ struct ResolvedLoggedRun {
 
 impl ToolHandler for AutoresearchInitHandler {
     type Output = FunctionToolOutput;
+
+    fn tool_name(&self) -> ToolName {
+        ToolName::plain("autoresearch_init")
+    }
 
     fn kind(&self) -> ToolKind {
         ToolKind::Function
@@ -348,6 +348,10 @@ impl ToolHandler for AutoresearchInitHandler {
 
 impl ToolHandler for AutoresearchRunHandler {
     type Output = FunctionToolOutput;
+
+    fn tool_name(&self) -> ToolName {
+        ToolName::plain("autoresearch_run")
+    }
 
     fn kind(&self) -> ToolKind {
         ToolKind::Function
@@ -483,6 +487,10 @@ impl ToolHandler for AutoresearchRunHandler {
 
 impl ToolHandler for AutoresearchLogHandler {
     type Output = FunctionToolOutput;
+
+    fn tool_name(&self) -> ToolName {
+        ToolName::plain("autoresearch_log")
+    }
 
     fn kind(&self) -> ToolKind {
         ToolKind::Function

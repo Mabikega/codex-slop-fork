@@ -1,5 +1,4 @@
 use crate::app_command::AppCommand;
-use crate::app_command::AppCommandView;
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::app_server_session::AppServerSession;
@@ -85,8 +84,8 @@ pub(crate) async fn try_submit_app_server_op(
     thread_id: ThreadId,
     op: &AppCommand,
 ) -> Result<bool> {
-    match op.view() {
-        AppCommandView::SlopForkPilotTurn { prompt } => {
+    match op {
+        AppCommand::SlopForkPilotTurn { prompt } => {
             if let Err(err) = app_server
                 .slop_fork_assistant_turn_start(
                     thread_id,
@@ -100,7 +99,7 @@ pub(crate) async fn try_submit_app_server_op(
             }
             Ok(true)
         }
-        AppCommandView::SlopForkAutoresearchTurn { prompt } => {
+        AppCommand::SlopForkAutoresearchTurn { prompt } => {
             if let Err(err) = app_server
                 .slop_fork_assistant_turn_start(
                     thread_id,

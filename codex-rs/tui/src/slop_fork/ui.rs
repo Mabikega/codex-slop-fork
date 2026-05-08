@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
+use crate::app_command::AppCommand;
 use chrono::DateTime;
 use chrono::Local;
 use chrono::Utc;
@@ -19,6 +20,7 @@ use codex_app_server_protocol::AutoresearchRun as AppServerAutoresearchRun;
 use codex_app_server_protocol::PilotControlAction as AppServerPilotControlAction;
 use codex_app_server_protocol::PilotRun as AppServerPilotRun;
 use codex_app_server_protocol::PilotUpdateType;
+use codex_app_server_protocol::SkillMetadata as AppServerSkillMetadata;
 use codex_backend_client::Client as BackendClient;
 use codex_core::AuthManager;
 use codex_core::CodexAuth;
@@ -52,10 +54,8 @@ use codex_login::run_login_server;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
-use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::SandboxPolicy;
-use codex_protocol::protocol::SkillMetadata as ProtocolSkillMetadata;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
@@ -73,12 +73,14 @@ use crate::bottom_pane::SelectionItem;
 use crate::bottom_pane::SelectionViewParams;
 use crate::bottom_pane::custom_prompt_view::CustomPromptView;
 use crate::bottom_pane::popup_consts::standard_popup_hint_line;
-use crate::exec_cell::spinner;
 use crate::history_cell;
 use crate::line_truncation::truncate_line_with_ellipsis_if_overflow;
+use crate::motion::MotionMode;
+use crate::motion::ReducedMotionIndicator;
+use crate::motion::activity_indicator;
+use crate::motion::shimmer_text;
 use crate::render::renderable::ColumnRenderable;
 use crate::render::renderable::Renderable;
-use crate::shimmer::shimmer_spans;
 use crate::status::rate_limit_snapshot_display_for_limit;
 use crate::status_indicator_widget::StatusIndicatorWidget;
 use crate::status_indicator_widget::fmt_elapsed_compact;
@@ -318,14 +320,13 @@ impl SlopForkUi {
         self.last_manual_user_message.as_deref()
     }
 
-    pub(crate) fn note_successful_outbound_op(&mut self, op: &Op) {
+    pub(crate) fn note_successful_outbound_op(&mut self, op: &AppCommand) {
         if matches!(
             op,
-            Op::UserInput { .. }
-                | Op::UserTurn { .. }
-                | Op::Review { .. }
-                | Op::RunUserShellCommand { .. }
-                | Op::SlopForkPilotTurn { .. }
+            AppCommand::UserTurn { .. }
+                | AppCommand::Review { .. }
+                | AppCommand::RunUserShellCommand { .. }
+                | AppCommand::SlopForkPilotTurn { .. }
         ) {
             self.awaiting_autoresearch_turn_start = false;
             self.recovered_autoresearch_turn_start = false;
@@ -448,7 +449,7 @@ impl SlopForkUi {
         effects
     }
 
-    pub(crate) fn on_skills_loaded(&mut self, skills: &[ProtocolSkillMetadata]) -> Option<String> {
+    pub(crate) fn on_skills_loaded(&mut self, skills: &[AppServerSkillMetadata]) -> Option<String> {
         let has_conflict = skills
             .iter()
             .any(|skill| skill.enabled && skill.name == AUTO_COMMAND_NAME);

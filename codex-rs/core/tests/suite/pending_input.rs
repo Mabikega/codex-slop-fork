@@ -164,26 +164,11 @@ async fn submit_queue_only_agent_mail(codex: &CodexThread, text: &str) {
         .await
         .unwrap_or_else(|err| panic!("submit queue-only agent mail: {err}"));
     codex
-        .submit(Op::ListMcpTools)
+        .submit(Op::RealtimeConversationListVoices)
         .await
-        .unwrap_or_else(|err| panic!("submit list-mcp-tools barrier: {err}"));
+        .unwrap_or_else(|err| panic!("submit list-voices barrier: {err}"));
     wait_for_event(codex, |event| {
-        matches!(event, EventMsg::McpListToolsResponse(_))
-    })
-    .await;
-}
-
-async fn wait_for_submission_barrier(codex: &CodexThread) {
-    codex
-        .submit(Op::GetHistoryEntryRequest {
-            offset: 0,
-            log_id: 0,
-        })
-        .await
-        .unwrap_or_else(|err| panic!("submit barrier op: {err}"));
-
-    wait_for_event(codex, |event| {
-        matches!(event, EventMsg::GetHistoryEntryResponse(_))
+        matches!(event, EventMsg::RealtimeConversationListVoicesResponse(_))
     })
     .await;
 }
@@ -377,7 +362,6 @@ async fn queued_inter_agent_mail_triggers_follow_up_after_reasoning_item() {
     wait_for_reasoning_item_started(&codex).await;
 
     submit_queue_only_agent_mail(&codex, "queued child update").await;
-    wait_for_submission_barrier(&codex).await;
 
     let _ = gate_reasoning_done_tx.send(());
 
@@ -440,7 +424,6 @@ async fn queued_inter_agent_mail_triggers_follow_up_after_commentary_message_ite
     .await;
 
     submit_queue_only_agent_mail(&codex, "queued child update").await;
-    wait_for_submission_barrier(&codex).await;
 
     let _ = gate_message_done_tx.send(());
 

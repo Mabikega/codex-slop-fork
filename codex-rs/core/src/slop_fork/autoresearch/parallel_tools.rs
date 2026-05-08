@@ -12,10 +12,10 @@ use super::ResponsesApiTool;
 use super::ToolHandler;
 use super::ToolInvocation;
 use super::ToolKind;
+use super::ToolName;
 use super::ToolPayload;
 use super::ToolRegistryBuilder;
 use super::ToolSpec;
-use super::augment_tool_spec_for_code_mode;
 use super::enforce_autoresearch_script;
 use super::ensure_experiment_cycle;
 use super::execute_command;
@@ -76,14 +76,12 @@ pub(crate) static AUTORESEARCH_RUN_PARALLEL_TOOL: LazyLock<ToolSpec> = LazyLock:
 });
 
 pub(crate) fn register_parallel_tools(builder: &mut ToolRegistryBuilder, code_mode_enabled: bool) {
-    builder.push_spec(augment_tool_spec_for_code_mode(
+    builder.push_spec(
         AUTORESEARCH_RUN_PARALLEL_TOOL.clone(),
+        /*supports_parallel_tool_calls*/ false,
         code_mode_enabled,
-    ));
-    builder.register_handler(
-        "autoresearch_run_parallel",
-        Arc::new(AutoresearchRunParallelHandler),
     );
+    builder.register_handler(Arc::new(AutoresearchRunParallelHandler));
 }
 
 pub(crate) struct AutoresearchRunParallelHandler;
@@ -113,6 +111,10 @@ struct ParallelRunConfig<'a> {
 
 impl ToolHandler for AutoresearchRunParallelHandler {
     type Output = super::FunctionToolOutput;
+
+    fn tool_name(&self) -> ToolName {
+        ToolName::plain("autoresearch_run_parallel")
+    }
 
     fn kind(&self) -> ToolKind {
         ToolKind::Function
