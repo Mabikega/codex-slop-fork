@@ -7317,33 +7317,9 @@ impl ChatWidget {
     }
 
     #[cfg(test)]
-    fn replay_initial_messages(&mut self, events: Vec<EventMsg>) {
-        for msg in events {
-            if matches!(msg, EventMsg::SessionConfigured(_)) {
-                continue;
-            }
-            // `id: None` indicates a synthetic/fake id coming from replay.
-            self.dispatch_event_msg(
-                /*id*/ None,
-                msg,
-                Some(ReplayKind::ResumeInitialMessages),
-            );
-        }
-    }
-
-    #[cfg(test)]
     pub(crate) fn handle_codex_event(&mut self, event: Event) {
         let Event { id, msg } = event;
         self.dispatch_event_msg(Some(id), msg, /*replay_kind*/ None);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn handle_codex_event_replay(&mut self, event: Event) {
-        let Event { msg, .. } = event;
-        if matches!(msg, EventMsg::ShutdownComplete) {
-            return;
-        }
-        self.dispatch_event_msg(/*id*/ None, msg, Some(ReplayKind::ThreadSnapshot));
     }
 
     /// Dispatch a protocol `EventMsg` to the appropriate handler.
@@ -12053,6 +12029,7 @@ impl ChatWidget {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 impl ChatWidget {
     pub(crate) fn update_recording_meter_in_place(&mut self, id: &str, text: &str) -> bool {
         let updated = self.bottom_pane.update_recording_meter_in_place(id, text);

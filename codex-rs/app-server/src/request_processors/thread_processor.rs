@@ -767,6 +767,15 @@ impl ThreadRequestProcessor {
             }
         }
         self.finalize_thread_teardown(thread_id).await;
+        self.automation_manager
+            .clear_thread(&self.config.codex_home, &thread_id)
+            .await;
+        self.autoresearch_manager
+            .clear_thread(&self.config.codex_home, &thread_id)
+            .await;
+        self.pilot_manager
+            .clear_thread(&self.config.codex_home, &thread_id)
+            .await;
     }
 
     fn listener_task_context(&self) -> ListenerTaskContext {

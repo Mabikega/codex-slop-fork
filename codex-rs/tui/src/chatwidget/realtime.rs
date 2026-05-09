@@ -87,11 +87,6 @@ impl ChatWidget {
         false
     }
 
-    #[cfg(target_os = "linux")]
-    pub(crate) fn stop_realtime_conversation_for_deleted_meter(&mut self, _id: &str) -> bool {
-        false
-    }
-
     pub(super) fn start_realtime_conversation(&mut self) {
         self.realtime_conversation.phase = RealtimeConversationPhase::Starting;
         self.realtime_conversation.requested_close = false;
