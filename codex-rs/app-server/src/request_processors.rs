@@ -19,10 +19,8 @@ use crate::slop_fork_pilot::SlopForkPilotManager;
 use crate::slop_fork_runtime_events::SlopForkRuntimeEventHandler;
 use crate::thread_status::ThreadWatchManager;
 use crate::thread_status::resolve_thread_status;
-use chrono::DateTime;
 use chrono::Duration as ChronoDuration;
 use chrono::SecondsFormat;
-use chrono::Utc;
 use codex_analytics::AnalyticsEventsClient;
 use codex_analytics::AnalyticsJsonRpcError;
 use codex_analytics::InputError;
@@ -158,6 +156,7 @@ use codex_app_server_protocol::PluginSharePrincipalType;
 use codex_app_server_protocol::PluginShareSaveParams;
 use codex_app_server_protocol::PluginShareSaveResponse;
 use codex_app_server_protocol::PluginShareTarget;
+use codex_app_server_protocol::PluginShareUpdateDiscoverability;
 use codex_app_server_protocol::PluginShareUpdateTargetsParams;
 use codex_app_server_protocol::PluginShareUpdateTargetsResponse;
 use codex_app_server_protocol::PluginSkillReadParams;
@@ -256,6 +255,7 @@ use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::ThreadStartedNotification;
 use codex_app_server_protocol::ThreadStatus;
+use codex_app_server_protocol::ThreadTurnsItemsListParams;
 use codex_app_server_protocol::ThreadTurnsListParams;
 use codex_app_server_protocol::ThreadTurnsListResponse;
 use codex_app_server_protocol::ThreadUnarchiveParams;
@@ -313,7 +313,6 @@ use codex_core::exec::ExecCapturePolicy;
 use codex_core::exec::ExecExpiration;
 use codex_core::exec::ExecParams;
 use codex_core::exec_env::create_env;
-use codex_core::find_thread_name_by_id;
 use codex_core::find_thread_path_by_id_str;
 use codex_core::path_utils;
 #[cfg(test)]
@@ -475,7 +474,6 @@ mod apps_processor;
 mod catalog_processor;
 mod command_exec_processor;
 mod config_processor;
-mod device_key_processor;
 mod external_agent_config_processor;
 mod feedback_processor;
 mod fs_processor;
@@ -496,7 +494,6 @@ pub(crate) use apps_processor::AppsRequestProcessor;
 pub(crate) use catalog_processor::CatalogRequestProcessor;
 pub(crate) use command_exec_processor::CommandExecRequestProcessor;
 pub(crate) use config_processor::ConfigRequestProcessor;
-pub(crate) use device_key_processor::DeviceKeyRequestProcessor;
 pub(crate) use external_agent_config_processor::ExternalAgentConfigRequestProcessor;
 pub(crate) use feedback_processor::FeedbackRequestProcessor;
 pub(crate) use fs_processor::FsRequestProcessor;
@@ -538,6 +535,7 @@ pub(crate) use self::thread_lifecycle::populate_thread_turns_from_history;
 pub(crate) use self::thread_processor::thread_from_stored_thread;
 #[cfg(test)]
 pub(crate) use self::thread_summary::read_summary_from_rollout;
+#[cfg(test)]
 pub(crate) use self::thread_summary::summary_to_thread;
 
 pub(crate) fn build_api_turns_from_rollout_items(items: &[RolloutItem]) -> Vec<Turn> {

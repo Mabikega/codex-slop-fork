@@ -75,11 +75,10 @@ pub(crate) static AUTORESEARCH_RUN_PARALLEL_TOOL: LazyLock<ToolSpec> = LazyLock:
     })
 });
 
-pub(crate) fn register_parallel_tools(builder: &mut ToolRegistryBuilder, code_mode_enabled: bool) {
+pub(crate) fn register_parallel_tools(builder: &mut ToolRegistryBuilder, _code_mode_enabled: bool) {
     builder.push_spec(
         AUTORESEARCH_RUN_PARALLEL_TOOL.clone(),
         /*supports_parallel_tool_calls*/ false,
-        code_mode_enabled,
     );
     builder.register_handler(Arc::new(AutoresearchRunParallelHandler));
 }

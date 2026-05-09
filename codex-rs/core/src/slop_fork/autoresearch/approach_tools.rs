@@ -104,11 +104,10 @@ pub(crate) static AUTORESEARCH_LOG_APPROACH_TOOL: LazyLock<ToolSpec> = LazyLock:
     })
 });
 
-pub(crate) fn register_approach_tools(builder: &mut ToolRegistryBuilder, code_mode_enabled: bool) {
+pub(crate) fn register_approach_tools(builder: &mut ToolRegistryBuilder, _code_mode_enabled: bool) {
     builder.push_spec(
         AUTORESEARCH_LOG_APPROACH_TOOL.clone(),
         /*supports_parallel_tool_calls*/ false,
-        code_mode_enabled,
     );
     builder.register_handler(Arc::new(AutoresearchLogApproachHandler));
 }

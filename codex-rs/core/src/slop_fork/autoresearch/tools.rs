@@ -193,11 +193,7 @@ pub(crate) fn register_autoresearch_tools(
         AUTORESEARCH_RUN_TOOL.clone(),
         AUTORESEARCH_LOG_TOOL.clone(),
     ] {
-        builder.push_spec(
-            spec,
-            /*supports_parallel_tool_calls*/ false,
-            code_mode_enabled,
-        );
+        builder.push_spec(spec, /*supports_parallel_tool_calls*/ false);
     }
     approach_tools::register_approach_tools(builder, code_mode_enabled);
     discovery_tools::register_discovery_tools(builder, code_mode_enabled);

@@ -220,7 +220,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
         session_configured_event: &SessionConfiguredEvent,
     ) {
         const VERSION: &str = env!("CARGO_PKG_VERSION");
-        eprintln!("{FORK_DISPLAY_NAME} v{VERSION} (research preview)\n--------");
+        eprintln!("{FORK_DISPLAY_NAME} v{VERSION}\n--------");
 
         let mut entries = config_summary_entries(config, session_configured_event);
         entries.push((

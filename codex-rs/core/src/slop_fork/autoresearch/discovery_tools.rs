@@ -82,16 +82,15 @@ pub(crate) static AUTORESEARCH_LOG_DISCOVERY_TOOL: LazyLock<ToolSpec> = LazyLock
         })
 });
 
-pub(crate) fn register_discovery_tools(builder: &mut ToolRegistryBuilder, code_mode_enabled: bool) {
+pub(crate) fn register_discovery_tools(
+    builder: &mut ToolRegistryBuilder,
+    _code_mode_enabled: bool,
+) {
     for spec in [
         AUTORESEARCH_REQUEST_DISCOVERY_TOOL.clone(),
         AUTORESEARCH_LOG_DISCOVERY_TOOL.clone(),
     ] {
-        builder.push_spec(
-            spec,
-            /*supports_parallel_tool_calls*/ false,
-            code_mode_enabled,
-        );
+        builder.push_spec(spec, /*supports_parallel_tool_calls*/ false);
     }
     builder.register_handler(Arc::new(AutoresearchRequestDiscoveryHandler));
     builder.register_handler(Arc::new(AutoresearchLogDiscoveryHandler));

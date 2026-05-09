@@ -79,12 +79,11 @@ pub(crate) static AUTORESEARCH_LOG_VALIDATION_TOOL: LazyLock<ToolSpec> = LazyLoc
 
 pub(crate) fn register_validation_tools(
     builder: &mut ToolRegistryBuilder,
-    code_mode_enabled: bool,
+    _code_mode_enabled: bool,
 ) {
     builder.push_spec(
         AUTORESEARCH_LOG_VALIDATION_TOOL.clone(),
         /*supports_parallel_tool_calls*/ false,
-        code_mode_enabled,
     );
     builder.register_handler(Arc::new(AutoresearchLogValidationHandler));
 }
